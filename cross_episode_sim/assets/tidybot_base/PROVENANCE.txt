@@ -1,0 +1,6 @@
+source: https://github.com/jimmyyhwu/tidybot2
+commit: c8dd23819f9cced476124a4b88538e6863ef53f7
+licence: MIT (see LICENSE)
+files: models/stanford_tidybot/base.xml, models/assets/base/*.stl
+note: upstream ships only a Kinova Gen3 arm; no Franka anywhere in the repo.
+      The base is arm-agnostic by design, which is why B3 grafts our FR3 onto it.

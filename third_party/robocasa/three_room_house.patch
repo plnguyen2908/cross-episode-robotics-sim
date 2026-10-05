@@ -1,0 +1,1511 @@
+diff --git a/robocasa/models/objects/objects.py b/robocasa/models/objects/objects.py
+index 413e8aa..9a4a8dd 100644
+--- a/robocasa/models/objects/objects.py
++++ b/robocasa/models/objects/objects.py
+@@ -201,6 +201,31 @@ class MJCFObject(MujocoXMLObjectRobocasa):
+     Blender object with support for changing the scaling
+     """
+ 
++    def get_grasp_annotations(self, robot="franka_tidybot"):
++        """Physically qualified object-local TCP poses for this exact scale.
++
++        Optional sidecars never change the mesh or object sampling. Entries
++        for another robot, scale, or source XML are not silently reused.
++        They still require fresh reachability/collision planning in a new scene.
++        """
++        import hashlib
++        import json
++        import re
++        from pathlib import Path
++        if not re.fullmatch(r"[a-zA-Z0-9_]+", robot):
++            raise ValueError("Invalid robot annotation identifier")
++        model = Path(self.mjcf_path)
++        path = model.parent / f"grasp_annotations_{robot}.json"
++        if not path.is_file():
++            return []
++        payload = json.loads(path.read_text())
++        digest = hashlib.sha256(model.read_bytes()).hexdigest()
++        return [record for record in payload.get("grasps", [])
++                if record.get("robot") == robot
++                and record.get("model_sha256") == digest
++                and np.asarray(record.get("object_scale", [])).shape == self._scale.shape
++                and np.allclose(record["object_scale"], self._scale, rtol=0, atol=1e-8)]
++
+     def __init__(
+         self,
+         name,
+diff --git a/robocasa/models/scenes/kitchen_arena.py b/robocasa/models/scenes/kitchen_arena.py
+index 8319b30..32e315a 100644
+--- a/robocasa/models/scenes/kitchen_arena.py
++++ b/robocasa/models/scenes/kitchen_arena.py
+@@ -106,7 +106,14 @@ class KitchenArena(Arena):
+         )
+ 
+         # load layout config
+-        if isinstance(layout_id, dict):
++        if layout_id in (1002, 1003, 1101, 1102, 1104, 1109):
++            from robocasa.models.scenes.dining_room import build_dining_layout, build_three_room_layout
++            from copy import deepcopy
++            builder = build_dining_layout if layout_id == 1002 else build_three_room_layout
++            layout_config, self.room_metadata = builder(rng, base_layout=int(layout_id)-1100 if layout_id >= 1100 else 1)
++            self.room_metadata["layout_id"] = int(layout_id)
++            self.generated_layout = deepcopy(layout_config)
++        elif isinstance(layout_id, dict):
+             layout_config = layout_id
+         else:
+             layout_path = get_layout_path(layout_id=layout_id)
+diff --git a/robocasa/models/scenes/scene_registry.py b/robocasa/models/scenes/scene_registry.py
+index 533ae08..581791e 100644
+--- a/robocasa/models/scenes/scene_registry.py
++++ b/robocasa/models/scenes/scene_registry.py
+@@ -180,6 +180,12 @@ def get_layout_path(layout_id):
+     Return:
+         str: yaml path for specified layout
+     """
++    # Local two-room extension, intentionally outside the benchmark splits.
++    if layout_id == 1001:
++        return xml_path_completion(
++            "scenes/kitchen_layouts/custom/kitchen_living_room.yaml",
++            root=robocasa.models.assets_root,
++        )
+     if (
+         isinstance(layout_id, int)
+         or isinstance(layout_id, np.int64)
+diff --git a/robocasa/models/assets/scenes/kitchen_layouts/custom/kitchen_living_room.rooms.json b/robocasa/models/assets/scenes/kitchen_layouts/custom/kitchen_living_room.rooms.json
+new file mode 100644
+index 0000000..23e744f
+--- /dev/null
++++ b/robocasa/models/assets/scenes/kitchen_layouts/custom/kitchen_living_room.rooms.json
+@@ -0,0 +1,43 @@
++{
++  "layout_id": 1001,
++  "units": "metres",
++  "rooms": {
++    "kitchen": {
++      "bounds_xy": [
++        0,
++        -3,
++        5.5,
++        0
++      ]
++    },
++    "living_room": {
++      "bounds_xy": [
++        0,
++        -7,
++        5.5,
++        -3
++      ]
++    }
++  },
++  "portals": [
++    {
++      "rooms": [
++        "kitchen",
++        "living_room"
++      ],
++      "bounds_xy": [
++        1.9,
++        -3.12,
++        3.6,
++        -2.88
++      ],
++      "nominal_width_m": 1.7,
++      "type": "open_passage"
++    }
++  ],
++  "manipulation_receptacles": {
++    "living_room": "side_table_living_room",
++    "kitchen": "counter_right_main_group"
++  },
++  "notes": "Procedural furniture. Room bounds describe navigation metadata, not a navigation planner."
++}
+diff --git a/robocasa/models/assets/scenes/kitchen_layouts/custom/kitchen_living_room.yaml b/robocasa/models/assets/scenes/kitchen_layouts/custom/kitchen_living_room.yaml
+new file mode 100644
+index 0000000..dd5dce4
+--- /dev/null
++++ b/robocasa/models/assets/scenes/kitchen_layouts/custom/kitchen_living_room.yaml
+@@ -0,0 +1,717 @@
++room:
++  walls:
++  - name: wall
++    type: wall
++    size:
++    - 2.75
++    - 1.5
++    - 0.02
++    pos:
++    - 2.75
++    - 0
++    - 1.5
++  - name: wall_backing
++    type: wall
++    backing: true
++    backing_extended:
++    - true
++    - true
++    size:
++    - 2.75
++    - 1.5
++    - 0.1
++    pos:
++    - 2.75
++    - 0
++    - 1.5
++  - name: wall_left
++    type: wall
++    wall_side: left
++    size:
++    - 1.5
++    - 1.5
++    - 0.02
++    pos:
++    - 0
++    - -1.5
++    - 1.5
++  - name: wall_left_backing
++    type: wall
++    wall_side: left
++    backing: true
++    size:
++    - 1.5
++    - 1.5
++    - 0.1
++    pos:
++    - 0
++    - -1.5
++    - 1.5
++  - name: wall_right
++    type: wall
++    wall_side: right
++    size:
++    - 1.5
++    - 1.5
++    - 0.02
++    pos:
++    - 5.5
++    - -1.5
++    - 1.5
++  - name: wall_right_backing
++    type: wall
++    wall_side: right
++    backing: true
++    size:
++    - 1.5
++    - 1.5
++    - 0.1
++    pos:
++    - 5.5
++    - -1.5
++    - 1.5
++  floor:
++  - name: floor
++    type: floor
++    size:
++    - 2.75
++    - 1.5
++    - 0.02
++    pos:
++    - 2.75
++    - -1.5
++    - 0
++  - name: floor_backing
++    type: floor
++    backing: true
++    size:
++    - 2.75
++    - 1.5
++    - 0.1
++    pos:
++    - 2.75
++    - -1.5
++    - 0
++  wall_accessories:
++  - name: outlet
++    type: wall_accessory
++    attach_to: wall
++    pos:
++    - 4.1
++    - null
++    - 1.2
++  - name: outlet_2
++    type: wall_accessory
++    attach_to: wall
++    pos:
++    - 2
++    - null
++    - 1.2
++  - name: light_switch
++    type: wall_accessory
++    config_name: light_switch
++    attach_to: wall
++    pos:
++    - 2.5
++    - null
++    - 1.2
++  - name: light_switch_2
++    type: wall_accessory
++    config_name: light_switch
++    attach_to: wall
++    pos:
++    - 2.61
++    - null
++    - 1.2
++main_group:
++  bottom_row:
++  - name: sink
++    type: sink
++  - name: counter_main
++    type: counter
++    interior_obj: sink
++    size:
++    - 2.5
++    - 0.65
++    - 0.92
++    pos:
++    - 1.5
++    - -0.325
++    - 0.46
++    obj_x_percent: 0.4
++    obj_y_percent: 0.01
++  - name: stove
++    type: stove
++    size:
++    - null
++    - 0.66
++    - null
++    align_to: counter_main
++    side: right
++    alignment: top_back
++  - name: counter_right
++    type: counter
++    size:
++    - 0.7
++    - 0.65
++    - 0.92
++    align_to: stove
++    alignment: top_back
++    side: right
++  - name: fridge
++    type: fridge_bottom_freezer
++    align_to: counter_right
++    side: right
++    alignment: bottom_back
++  top_row:
++  - name: cab_1
++    type: single_cabinet
++    orientation: left
++    default_config_name: cab_top
++    size:
++    - 0.5
++    - 0.4
++    - 0.92
++    pos:
++    - 0.5
++    - -0.2
++    - 1.85
++  - name: cab_2
++    type: hinge_cabinet
++    default_config_name: cab_top
++    size:
++    - 1
++    - 0.4
++    - 0.92
++    align_to: cab_1
++    side: right
++  - name: cab_main
++    type: hinge_cabinet
++    default_config_name: cab_top
++    size:
++    - 1
++    - 0.4
++    - 0.92
++    align_to: cab_2
++    side: right
++  - name: microwave
++    type: microwave
++    size:
++    - stove
++    - 0.45
++    - null
++    align_to: cab_main
++    alignment: back_bottom
++    side: right
++  - name: cab_micro
++    type: hinge_cabinet
++    handle_type: knob
++    default_config_name: cab_top_small
++    size:
++    - microwave
++    - 0.4
++    - null
++    align_to: microwave
++    side: top
++    alignment: back
++    stack_height: 0.92
++    stack_fixtures:
++    - microwave
++  - name: cab_3
++    type: open_cabinet
++    default_config_name: shelves
++    num_levels: 3
++    size:
++    - 0.7
++    - 0.4
++    - 0.92
++    align_to: microwave
++    side: right
++    alignment: bottom_back
++  - name: cab_4
++    type: hinge_cabinet
++    handle_type: knob
++    default_config_name: cab_top_small
++    size:
++    - fridge
++    - fridge
++    - null
++    align_to: fridge
++    side: top
++    alignment: back
++    stack_height: 2.31
++    stack_fixtures:
++    - fridge
++  bottom_row_cabinets:
++  - name: stack_1
++    type: stack
++    levels:
++    - drawer
++    - drawer
++    - drawer
++    - drawer
++    percentages:
++    - 0.25
++    - 0.25
++    - 0.25
++    - 0.25
++    size:
++    - 0.5
++    - 0.6
++    - 0.84
++    pos:
++    - 0.5
++    - -0.3
++    - 0.47
++  - name: stack_2
++    type: stack
++    levels:
++    - hinge_cabinet
++    - panel_cabinet
++    percentages:
++    - 0.75
++    - 0.25
++    size:
++    - 1
++    - 0.6
++    - 0.84
++    align_to: stack_1
++    side: right
++    configs:
++      hinge_cabinet:
++        open_top: true
++  - name: dishwasher
++    type: dishwasher
++    size:
++    - 0.65
++    - 0.6
++    - 0.89
++    align_to: stack_2
++    side: right
++    alignment: top_back
++  - name: stack_3
++    type: stack
++    levels:
++    - single_cabinet
++    percentages:
++    - 1
++    size:
++    - 0.35
++    - 0.6
++    - 0.84
++    align_to: dishwasher
++    side: right
++    alignment: top_back
++  - name: stack_4
++    type: stack
++    levels:
++    - single_cabinet
++    - drawer
++    percentages:
++    - 0.75
++    - 0.25
++    size:
++    - 0.7
++    - 0.6
++    - 0.84
++    align_to: stove
++    side: right
++    alignment: top_back
++    offset:
++    - 0.0
++    - 0.0
++    - -0.03
++  counter_accessories:
++  - name: dish_rack
++    type: dish_rack
++    enable: false
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: sink
++        loc: right
++      size:
++      - obj
++      - 0.5
++      pos:
++      - ref
++      - 1.0
++      rotation:
++      - 0
++      - 0
++  - name: oil_bottle
++    type: oil_bottle
++    is_clutter: true
++    has_free_joints: true
++    aux_fixture_config:
++      is_clutter: true
++      has_free_joints: true
++      placement: anchor
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: stove
++      size:
++      - 0.3
++      - obj
++      pos:
++      - ref
++      - 0.8
++      rotation:
++      - 0
++      - 0
++  - name: soap_dispenser
++    type: soap_dispenser
++    is_clutter: true
++    has_free_joints: true
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: sink
++        loc: left_right
++      size:
++      - obj
++      - 0.15
++      pos:
++      - ref
++      - 0.9
++      rotation:
++      - -3.14
++      - 3.14
++  - name: toaster
++    type: toaster
++    placement:
++      fixture: counter_right_main_group
++      size:
++      - 1.0
++      - 0.4
++      pos:
++      - null
++      - 1.0
++      rotation:
++      - 0
++      - 0
++  - name: toaster_oven
++    type: toaster_oven
++    enable: false
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: cab_main
++      size:
++      - 1.0
++      - 0.45
++      pos:
++      - null
++      - 1.0
++      rotation:
++      - 0
++      - 0
++  - name: knife_block
++    type: knife_block
++    placement:
++      fixture: counter_right_main_group
++      size:
++      - 1.0
++      - obj
++      pos:
++      - null
++      - 1.0
++      rotation:
++      - 0
++      - 0
++  - name: digital_scale
++    type: digital_scale
++    is_clutter: true
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: cab_main
++      size:
++      - 0.5
++      - 0.3
++      pos:
++      - null
++      - 1.0
++      rotation:
++      - 0
++      - 0
++  - name: paper_towel
++    type: paper_towel
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: cab_main
++      size:
++      - 1.0
++      - 0.25
++      pos:
++      - null
++      - 1.0
++      rotation:
++      - 0
++      - 0
++  - name: electric_kettle
++    type: electric_kettle
++    enable: false
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: sink
++        loc: right
++      size:
++      - 0.8
++      - 0.3
++      pos:
++      - ref
++      - -0.75
++      rotation:
++      - -1.0
++      - 0.1
++  - name: stand_mixer
++    type: stand_mixer
++    enable: false
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: sink
++        loc: right
++      size:
++      - 0.9
++      - 0.25
++      pos:
++      - ref
++      - -1.0
++      rotation:
++      - -1.57
++      - -1.57
++      offset:
++      - 0
++      - 0.01
++  - name: blender
++    type: blender
++    enable: false
++    aux_fixture_config:
++      has_free_joints: true
++      placement: anchor
++      auxiliary_placement_args:
++        ensure_valid_placement: false
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: sink
++        loc: right
++      size:
++      - 0.5
++      - 0.25
++      pos:
++      - ref
++      - -1.0
++      rotation:
++      - 0
++      - 0
++      margin: 0.03
++  - name: coffee_machine
++    type: coffee_machine
++    placement:
++      fixture: counter_main_main_group
++      sample_region_kwargs:
++        ref: cab_1
++      size:
++      - 1.0
++      - 0.52
++      pos:
++      - null
++      - 1.0
++      rotation:
++      - 0
++      - 0
++      margin: 0.0
++  - name: glass_cup
++    type: glass_cup
++    is_clutter: true
++    placement:
++      fixture: cab_3_main_group
++      size:
++      - 1.0
++      - obj
++      pos:
++      - null
++      - -0.5
++      rotation:
++      - 0
++      - 0
++  - name: glass_cup_2
++    type: glass_cup
++    is_clutter: true
++    placement:
++      fixture: cab_3_main_group
++      size:
++      - 1.0
++      - obj
++      pos:
++      - null
++      - -0.5
++      rotation:
++      - 0
++      - 0
++  - name: glass_cup_3
++    type: glass_cup
++    is_clutter: true
++    placement:
++      fixture: cab_3_main_group
++      size:
++      - 1.0
++      - obj
++      pos:
++      - null
++      - -0.5
++      rotation:
++      - 0
++      - 0
++living_room:
++  walls:
++  - name: partition_left
++    type: wall
++    pos:
++    - 0.95
++    - -3
++    - 1.5
++    size:
++    - 0.95
++    - 1.5
++    - 0.02
++    wall_side: front
++  - name: partition_right
++    type: wall
++    pos:
++    - 4.55
++    - -3
++    - 1.5
++    size:
++    - 0.95
++    - 1.5
++    - 0.02
++    wall_side: front
++  - name: outer_left
++    type: wall
++    pos:
++    - 0
++    - -5
++    - 1.5
++    size:
++    - 2
++    - 1.5
++    - 0.02
++    wall_side: left
++  - name: outer_right
++    type: wall
++    pos:
++    - 5.5
++    - -5
++    - 1.5
++    size:
++    - 2
++    - 1.5
++    - 0.02
++    wall_side: right
++  - name: outer_front
++    type: wall
++    pos:
++    - 2.75
++    - -7
++    - 1.5
++    size:
++    - 2.75
++    - 1.5
++    - 0.02
++    wall_side: front
++    enclosing_wall: true
++  floor:
++  - name: floor
++    type: floor
++    size:
++    - 2.75
++    - 2
++    - 0.02
++    pos:
++    - 2.75
++    - -5
++    - 0
++  furniture:
++  - name: sofa_seat
++    type: box
++    size:
++    - 0.9
++    - 2.1
++    - 0.38
++    pos:
++    - 0.65
++    - -5.45
++    - 0.29
++  - name: sofa_back
++    type: box
++    size:
++    - 0.18
++    - 2.1
++    - 0.9
++    pos:
++    - 0.18
++    - -5.45
++    - 0.55
++  - name: sofa_arm_north
++    type: box
++    size:
++    - 1.0
++    - 0.18
++    - 0.65
++    pos:
++    - 0.65
++    - -4.4
++    - 0.425
++  - name: sofa_arm_south
++    type: box
++    size:
++    - 1.0
++    - 0.18
++    - 0.65
++    pos:
++    - 0.65
++    - -6.5
++    - 0.425
++  - name: side_table
++    type: counter
++    size:
++    - 1.2
++    - 0.75
++    - 0.8
++    pos:
++    - 4.2
++    - -5.3
++    - 0.4
++    hollow:
++    - true
++    - true
++  - name: coffee_table
++    type: counter
++    size:
++    - 1.15
++    - 0.6
++    - 0.42
++    pos:
++    - 2.55
++    - -6.15
++    - 0.21
++    hollow:
++    - true
++    - true
++  - name: media_console
++    type: box
++    size:
++    - 0.4
++    - 1.7
++    - 0.5
++    pos:
++    - 5.2
++    - -5.3
++    - 0.25
+diff --git a/robocasa/models/scenes/dining_room.py b/robocasa/models/scenes/dining_room.py
+new file mode 100644
+index 0000000..459c31a
+--- /dev/null
++++ b/robocasa/models/scenes/dining_room.py
+@@ -0,0 +1,220 @@
++"""Seeded dining/living extensions of native kitchens 001, 002, 004 and 009.
++
++Geometry generation has no simulator dependency. Dimensions are metres.
++The north table edge is reserved for manipulation; chairs occupy other sides.
++"""
++from pathlib import Path
++import copy
++import numpy as np
++import yaml
++
++
++def build_dining_layout(rng=None, base_layout=1):
++    rng = np.random.default_rng() if rng is None else rng
++    if base_layout not in (1,2,4,9):
++        raise ValueError('Supported native kitchens: 1, 2, 4, 9')
++    path = Path(__file__).parent.parent/f'assets/scenes/kitchen_layouts/test/layout{base_layout:03d}.yaml'
++    layout = yaml.safe_load(path.read_text())
++    layout['room']['walls'] = [w for w in layout['room']['walls']
++                               if not w['name'].startswith('wall_front')]
++    floor=layout['room']['floor'][0]
++    cx,cy,_=floor['pos'];hx,hy,_=floor['size']
++    xmin,xmax,front,back=cx-hx,cx+hx,cy-hy,cy+hy
++    span=xmax-xmin
++    depth = float(rng.uniform(4.8, 5.5))
++    doorway_x = float(rng.uniform(cx-.35, cx+.35))
++    doorway_width = float(rng.uniform(1.65, 1.95))
++    left, right = doorway_x-doorway_width/2, doorway_x+doorway_width/2
++    width, length, height = float(rng.uniform(1.4,1.9)), float(rng.uniform(.8,1.0)), float(rng.uniform(.76,.84))
++    tx, ty = float(rng.uniform(cx-.35,cx+.35)), front-depth*.60
++    furniture = [dict(name='dining_table', type='counter', size=[width,length,height],
++                      pos=[tx,ty,height/2], hollow=[True,True],top_thickness=.04)]
++    for i,(dx,dy) in enumerate(((-1,-1),(-1,1),(1,-1),(1,1))):
++        furniture.append(dict(name=f'table_leg_{i}',type='box',
++            pos=[tx+dx*(width/2-.08),ty+dy*(length/2-.08),(height-.04)/2],
++            size=[.09,.09,height-.04]))
++    # Two side chairs, plus zero, one or two along the far edge.
++    chair_positions = [(tx-width/2-.42,ty,'west'),(tx+width/2+.42,ty,'east')]
++    extra = int(rng.integers(0,3))
++    if extra == 1:
++        chair_positions.append((tx,ty-length/2-.42,'south'))
++    elif extra == 2:
++        chair_positions.extend((tx+dx,ty-length/2-.42,'south') for dx in (-.38,.38))
++    chair_bounds = []
++    for i,(x,y,side) in enumerate(chair_positions):
++        size = float(rng.uniform(.40,.46))
++        seat_z = float(rng.uniform(.43,.47))
++        furniture.append(dict(name=f'chair_{i}_seat',type='box',
++            pos=[x,y,seat_z],size=[size,size,.08]))
++        bx,by=x,y
++        if side=='west': bx-=size/2-.035
++        elif side=='east': bx+=size/2-.035
++        else: by-=size/2-.035
++        furniture.append(dict(name=f'chair_{i}_back',type='box',pos=[bx,by,.70],
++            size=[.07,size,.52] if side!='south' else [size,.07,.52]))
++        for j,(dx,dy) in enumerate(((-1,-1),(-1,1),(1,-1),(1,1))):
++            furniture.append(dict(name=f'chair_{i}_leg_{j}',type='box',
++                pos=[x+dx*(size/2-.05),y+dy*(size/2-.05),(seat_z-.04)/2],
++                size=[.055,.055,seat_z-.04]))
++        chair_bounds.append([x-size/2,y-size/2,x+size/2,y+size/2])
++    def wall(name,pos,size,side):
++        return dict(name=name,type='wall',pos=pos,size=size,wall_side=side)
++    walls=[wall('partition_left',[(xmin+left)/2,front,1.5],[(left-xmin)/2,1.5,.02],'front'),
++           wall('partition_right',[(right+xmax)/2,front,1.5],[(xmax-right)/2,1.5,.02],'front'),
++           wall('left',[xmin,front-depth/2,1.5],[depth/2,1.5,.02],'left'),
++           wall('right',[xmax,front-depth/2,1.5],[depth/2,1.5,.02],'right'),
++           dict(wall('front',[cx,front-depth,1.5],[span/2,1.5,.02],'front'),enclosing_wall=True)]
++    layout['dining_room']=dict(walls=walls,
++        floor=[dict(name='floor',type='floor',size=[span/2,depth/2,.02],pos=[cx,front-depth/2,0])],
++        furniture=furniture)
++    kitchen_counters=[f['name']+'_'+group_name for group_name,group in layout.items()
++        if group_name != 'dining_room' for fixtures in group.values() if isinstance(fixtures,list)
++        for f in fixtures if isinstance(f,dict) and f.get('type')=='counter']
++    metadata=dict(layout_id=1002,base_layout_id=base_layout,room_bounds={'kitchen':[xmin,front,xmax,back],
++        'dining_room':[xmin,front-depth,xmax,front]},
++        doorway=dict(center=[doorway_x,front],nominal_width_m=doorway_width,
++                     clear_width_m=doorway_width-.08),
++        table=dict(center=[tx,ty],size=[width,length,height],
++                   fixture='dining_table_dining_room'),
++        chairs=chair_bounds,chair_count=len(chair_bounds),
++        manipulation_stance=[tx,ty+length/2+.72,-np.pi/2],
++        robot_radius_m=.6,kitchen_receptacle=('counter_right_main_group' if 'counter_right_main_group' in kitchen_counters else kitchen_counters[0]),
++        simulation_tested=False)
++    validate_dining_layout(metadata)
++    return copy.deepcopy(layout),metadata
++
++
++def validate_dining_layout(meta):
++    """Conservative planar clearance, not an IK or full-robot physics test."""
++    r=meta['robot_radius_m']; bounds=meta['room_bounds']['dining_room']
++    tx,ty=meta['table']['center'];w,d,_=meta['table']['size']
++    obstacles=[[tx-w/2,ty-d/2,tx+w/2,ty+d/2]]+meta['chairs']
++    assert meta['doorway']['clear_width_m']>2*r
++    for box in obstacles:
++        assert bounds[0]<box[0]<box[2]<bounds[2]
++        assert bounds[1]<box[1]<box[3]<bounds[3]
++    for i,a in enumerate(obstacles):
++        for b in obstacles[i+1:]:
++            assert a[2]<=b[0] or b[2]<=a[0] or a[3]<=b[1] or b[3]<=a[1]
++    # A reserved route through the doorway to the clear north side of the table.
++    start=np.array(meta['doorway']['center'])
++    goal=np.array(meta['manipulation_stance'][:2])
++    for p in np.linspace(start,goal,101):
++        assert bounds[0]+r<p[0]<bounds[2]-r and p[1]>bounds[1]+r
++        for box in obstacles:
++            closest=np.clip(p,box[:2],box[2:])
++            assert np.linalg.norm(p-closest)>=r
++    return True
++
++
++def build_three_room_layout(rng=None, base_layout=1):
++    """Kitchen -> dining -> living, with seeded furniture and open portals."""
++    rng = np.random.default_rng() if rng is None else rng
++    layout, meta = build_dining_layout(rng, base_layout)
++    bottom = meta['room_bounds']['dining_room'][1]
++    edge=meta['room_bounds']['dining_room'][2]
++    front=meta['room_bounds']['dining_room'][3]
++    east = edge + float(rng.uniform(4.5, 5.1))
++    portal_y = front-1.05
++    portal_width = float(rng.uniform(1.65, 1.85))
++    low, high = portal_y-portal_width/2, portal_y+portal_width/2
++    walls = layout['dining_room']['walls']
++    walls[:] = [w for w in walls if w['name'] != 'right']
++    for name, a, b in [('east_south', bottom, low), ('east_north', high, front)]:
++        walls.append(dict(name=name,type='wall',pos=[edge,(a+b)/2,1.5],
++                          size=[(b-a)/2,1.5,.02],wall_side='right'))
++    cx = (edge+east)/2
++    sofa_width = float(rng.uniform(2.1,2.7))
++    sofa_y = bottom+.65
++    coffee_y = bottom+1.9
++    furniture = [
++        dict(name='sofa_seat',type='box',pos=[cx,sofa_y,.30],size=[sofa_width,.85,.60]),
++        dict(name='sofa_back',type='box',pos=[cx,sofa_y-.35,.75],size=[sofa_width,.15,.60]),
++        dict(name='coffee_table',type='counter',pos=[cx,coffee_y,.23],
++             size=[float(rng.uniform(1.,1.35)),.65,.46],hollow=[True,True],top_thickness=.04),
++        dict(name='side_table',type='box',pos=[east-.55,front-1.1,.39],size=[.65,.65,.78]),
++    ]
++    for sign in (-1,1):
++        furniture.append(dict(name='sofa_arm_'+str(sign),type='box',
++            pos=[cx+sign*(sofa_width/2-.09),sofa_y,.65],size=[.18,.85,.30]))
++    w = furniture[2]['size'][0]
++    for i,(dx,dy) in enumerate(((-1,-1),(-1,1),(1,-1),(1,1))):
++        furniture.append(dict(name=f'coffee_leg_{i}',type='box',
++            pos=[cx+dx*(w/2-.07),coffee_y+dy*.255,.21],size=[.07,.07,.42]))
++    layout['living_room'] = dict(
++        floor=[dict(name='floor',type='floor',pos=[cx,(bottom+front)/2,0],
++                    size=[(east-edge)/2,(front-bottom)/2,.02])],
++        walls=[dict(name='north',type='wall',pos=[cx,front,1.5],size=[(east-edge)/2,1.5,.02],wall_side='back'),
++               dict(name='south',type='wall',pos=[cx,bottom,1.5],size=[(east-edge)/2,1.5,.02],wall_side='front'),
++               dict(name='east',type='wall',pos=[east,(bottom+front)/2,1.5],size=[(front-bottom)/2,1.5,.02],wall_side='right')],
++        furniture=furniture)
++    meta.update(layout_id=1003 if base_layout == 1 else 1100+base_layout)
++    meta['room_bounds']['living_room']=[edge,bottom,east,front]
++    meta['portals']=[dict(meta['doorway'],rooms=['kitchen','dining_room']),
++        dict(center=[edge,portal_y],nominal_width_m=portal_width,
++             clear_width_m=portal_width-.08,rooms=['dining_room','living_room'])]
++    meta['living_receptacles']=['coffee_table_living_room','side_table_living_room']
++    meta['living_stance']=[cx,portal_y,-np.pi/2]
++    meta['connecting_route']=[meta['doorway']['center'],
++        [meta['doorway']['center'][0],portal_y],[cx,portal_y]]
++    add_door_frames(layout,meta)
++    validate_three_room_layout(layout,meta)
++    return layout,meta
++
++
++
++def add_door_frames(layout,meta):
++    """Static collision-bearing jambs and headers; passages remain open."""
++    frames=[]
++    thickness,depth,height,header=.10,.18,2.35,.14
++    for index,portal in enumerate(meta['portals']):
++        x,y=portal['center'];width=portal['nominal_width_m']
++        along_x=index==0
++        # Native walls sit 2 cm outside the room boundary.
++        if along_x:y-=.02
++        else:x+=.02
++        for side,sign in [('left',-1),('right',1)]:
++            offset=sign*(width/2-thickness/2)
++            pos=[x+offset if along_x else x,y if along_x else y+offset,height/2]
++            size=[thickness,depth,height] if along_x else [depth,thickness,height]
++            frames.append(dict(name=f'doorframe_{index}_{side}',type='box',pos=pos,size=size))
++        for name,z,h in [('header',height+header/2,header),
++                         ('infill',(height+header+3)/2,3-height-header)]:
++            size=[width,depth,h] if along_x else [depth,width,h]
++            frames.append(dict(name=f'doorframe_{index}_{name}',type='box',pos=[x,y,z],size=size))
++        portal.update(clear_width_m=width-2*thickness,clear_height_m=height,
++                      frame_depth_m=depth,door_leaf=False)
++    layout['dining_room']['door_frames']=frames
++    meta['doorway'].update({k:v for k,v in meta['portals'][0].items() if k!='rooms'})
++
++
++def validate_three_room_layout(layout,meta):
++    """Check a radius-.6 disc along the connecting route against furniture/jambs."""
++    validate_dining_layout(meta)
++    r=meta['robot_radius_m']
++    obstacles=[]
++    for group in ('dining_room','living_room'):
++        for f in layout[group]['furniture']:
++            p=np.array(f['pos'][:2]);half=np.array(f['size'][:2])/2
++            obstacles.append(np.r_[p-half,p+half])
++    for f in layout['dining_room'].get('door_frames',[]):
++        if f['name'].endswith(('left','right')):
++            p=np.array(f['pos'][:2]);half=np.array(f['size'][:2])/2
++            obstacles.append(np.r_[p-half,p+half])
++    for w in layout['dining_room']['walls']:
++        if w['name'].startswith('east_'):
++            x,y,_=w['pos'];half=w['size'][0]+.04
++            obstacles.append(np.array([x-.04,y-half,x+.04,y+half]))
++    for portal in meta['portals']:
++        assert portal['clear_width_m']>2*r
++    boxes=np.asarray(obstacles)
++    for a,b in zip(meta['connecting_route'],meta['connecting_route'][1:]):
++        points=np.linspace(a,b,101)[:,None,:]
++        nearest=np.clip(points,boxes[None,:,:2],boxes[None,:,2:])
++        assert np.all(np.linalg.norm(points-nearest,axis=-1)>=r)
++    bounds=meta['room_bounds']['living_room']
++    for f in layout['living_room']['furniture']:
++        p=np.array(f['pos'][:2]);half=np.array(f['size'][:2])/2
++        assert np.all(p-half>np.array(bounds[:2]))
++        assert np.all(p+half<np.array(bounds[2:]))
++    return True
+diff --git a/robocasa/scripts/preview_kitchen_dining_room.py b/robocasa/scripts/preview_kitchen_dining_room.py
+new file mode 100644
+index 0000000..a1a28ba
+--- /dev/null
++++ b/robocasa/scripts/preview_kitchen_dining_room.py
+@@ -0,0 +1,149 @@
++"""Generate seeded layout 1002; optionally compile and render native RoboCasa."""
++import argparse
++import importlib.util
++import json
++from pathlib import Path
++import secrets
++import numpy as np
++import yaml
++
++ROOT=Path(__file__).resolve().parents[2]
++
++
++def load_generator():
++    spec=importlib.util.spec_from_file_location('dining_geometry',
++        ROOT/'robocasa/models/scenes/dining_room.py')
++    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
++    return module
++
++
++def draw(layout,meta,output):
++    import matplotlib
++    matplotlib.use('Agg')
++    import matplotlib.pyplot as plt
++    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
++    fig=plt.figure(figsize=(12,11),facecolor='#f6f7f9')
++    ax=fig.add_subplot(111,projection='3d',computed_zorder=False)
++    def box(pos,size,color,alpha=1.):
++        x,y,z=np.asarray(pos)-np.asarray(size)/2;dx,dy,dz=size
++        v=np.array([[x,y,z],[x+dx,y,z],[x+dx,y+dy,z],[x,y+dy,z],
++                    [x,y,z+dz],[x+dx,y,z+dz],[x+dx,y+dy,z+dz],[x,y+dy,z+dz]])
++        faces=[v[i] for i in [[0,1,2,3],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7],[4,5,6,7]]]
++        ax.add_collection3d(Poly3DCollection(faces,facecolors=color,
++            edgecolors='#59616a',linewidths=.35,alpha=alpha))
++    bottom=meta['room_bounds']['dining_room'][1]
++    box([2.75,-1.5,-.06],[5.5,3,.12],'#d7e5ef')
++    box([2.75,(bottom-3)/2,-.06],[5.5,-3-bottom,.12],'#eddcc3')
++    for f in layout['dining_room']['furniture']:
++        if f['name']=='dining_table':
++            w,d,h=f['size'];x,y,_=f['pos']
++            box([x,y,h-.02],[w,d,.04],'#a7794f')
++        else:
++            box(f['pos'],f['size'],'#a7794f' if f['name'].startswith('table_leg') else '#728c9d')
++    for w in layout['dining_room']['walls'][:2]:
++        box([w['pos'][0],-3,.55],[2*w['size'][0],.08,1.1],'#b5c2cd',.65)
++    # Native kitchen assets are not loaded in this geometric schematic.
++    for p,s,c in [([1.5,-.325,.46],[2.5,.65,.92],'#b7cbd6'),
++                  ([3.15,-.33,.46],[.8,.66,.92],'#6f7d88'),
++                  ([3.9,-.325,.46],[.7,.65,.92],'#b7cbd6'),
++                  ([4.72,-.4,.95],[.85,.8,1.9],'#c2cad1')]:box(p,s,c)
++    for x in ((0,) if 'living_room' in layout else (0,5.5)):box([x,bottom/2,.18],[.06,-bottom,.36],'#cad0d5')
++    box([2.75,bottom,.18],[5.5,.06,.36],'#cad0d5')
++    goal=meta['manipulation_stance'];door=meta['doorway']['center']
++    ax.plot([door[0],goal[0]],[door[1],goal[1]],[.04,.04],'--',color='#268b72',lw=2)
++    for text,p in [('KITCHEN',[1.5,-1.7,.08]),('DINING ROOM',[2.75,bottom+.4,.08]),
++                   ('Clear manipulation side',[goal[0],goal[1],.16]),
++                   ('Open passage',[door[0],door[1],.12])]:
++        ax.text(*p,text,ha='center',fontsize=10,zorder=20)
++    east=5.5
++    if 'living_room' in layout:
++        east=meta['room_bounds']['living_room'][2]
++        cx=(5.5+east)/2
++        box([cx,(bottom-3)/2,-.06],[east-5.5,-3-bottom,.12],'#dce8d6')
++        for f in layout['living_room']['furniture']:
++            if f['name']=='coffee_table':
++                w,d,h=f['size'];x,y,_=f['pos']
++                box([x,y,h-.02],[w,d,.04],'#a7794f')
++            else:
++                box(f['pos'],f['size'],'#819b86' if f['name'].startswith('sofa') else '#a7794f')
++        for w in layout['dining_room']['walls']:
++            if w['name'].startswith('east_'):
++                box([5.5,w['pos'][1],.55],[.08,2*w['size'][0],1.1],'#b5c2cd',.65)
++        for y in (bottom,-3):
++            box([cx,y,.18],[east-5.5,.06,.36],'#cad0d5')
++        box([east,(bottom-3)/2,.18],[.06,-3-bottom,.36],'#cad0d5')
++        route=np.asarray(meta['connecting_route'])
++        ax.plot(route[:,0],route[:,1],np.full(len(route),.04),'--',color='#268b72',lw=2)
++        ax.text(cx,bottom+.15,.1,'LIVING ROOM',ha='center',fontsize=11)
++    ax.set(xlim=(-.3,east+.3),ylim=(bottom-.3,.4),zlim=(0,2.7),xlabel='X (m)',ylabel='Y (m)')
++    ax.set_box_aspect([east,-bottom,2.7]);ax.view_init(elev=48,azim=-62);ax.grid(False)
++    fig.suptitle(f'Kitchen + randomized dining/living rooms · seed {meta["seed"]}',fontsize=18)
++    fig.text(.5,.045,'Geometry preview, not a simulator render. Kitchen fixture envelopes approximate.\nDining geometry matches the generated layout; outer walls cut down for visibility.',ha='center',fontsize=10)
++    fig.savefig(output/'layout_3d.png',dpi=150,bbox_inches='tight');plt.close(fig)
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--seed',type=int)
++    p.add_argument('--rooms',type=int,choices=(2,3),default=2)
++    p.add_argument('--output',type=Path,required=True)
++    p.add_argument('--render',action='store_true',help='Requires installed RoboSuite and RoboCasa assets')
++    args=p.parse_args();seed=args.seed if args.seed is not None else secrets.randbits(32)
++    args.output.mkdir(parents=True,exist_ok=True)
++    generator=load_generator()
++    builder=generator.build_three_room_layout if args.rooms == 3 else generator.build_dining_layout
++    layout,meta=builder(np.random.default_rng(seed))
++    if args.render:
++        try:
++            import robosuite
++            from robocasa.environments.kitchen.kitchen import Kitchen
++            import mujoco
++            import imageio.v2 as imageio
++        except ImportError as exc:
++            raise SystemExit('Native rendering requires RoboSuite and RoboCasa assets; see KITCHEN_LIVING_ROOM.md. '+str(exc)) from exc
++        class KitchenDiningRoomPreview(Kitchen):
++            def _get_obj_cfgs(self): return []
++            def _check_success(self): return False
++        env=None
++        try:
++            env=robosuite.make('KitchenDiningRoomPreview',robots='PandaOmron',
++                layout_ids=[meta["layout_id"]],seed=seed,init_robot_base_ref='counter_right_main_group',
++                use_camera_obs=False,has_renderer=False,has_offscreen_renderer=False)
++            env.reset();env.sim.forward()
++            layout=env.mujoco_arena.generated_layout;meta=env.mujoco_arena.room_metadata
++            meta.update(simulation_tested=True,style_id=int(env.style_id))
++            model=getattr(env.sim.model,'_model',env.sim.model)
++            data=getattr(env.sim.data,'_data',env.sim.data)
++            (args.output/'scene.xml').write_text(env.model.get_xml())
++            model.vis.global_.offwidth=max(model.vis.global_.offwidth,1600)
++            model.vis.global_.offheight=max(model.vis.global_.offheight,1200)
++            with mujoco.Renderer(model,height=1200,width=1600) as renderer:
++                camera=mujoco.MjvCamera();camera.lookat[:]=[2.75,-4.,.5]
++                camera.lookat[0]=5. if args.rooms == 3 else 2.75
++                camera.distance=16. if args.rooms == 3 else 12.;camera.azimuth=90.;camera.elevation=-55.
++                options=mujoco.MjvOption();options.geomgroup[0]=0
++                renderer.update_scene(data,camera=camera,scene_option=options)
++                imageio.imwrite(args.output/'native_scene.png',renderer.render())
++                # Hide only foreground walls in this extra camera view.
++                # Modify render geoms, preserving the simulation collision world.
++                for geom in renderer.scene.geoms[:renderer.scene.ngeom]:
++                    if geom.objtype != mujoco.mjtObj.mjOBJ_GEOM or geom.objid < 0:
++                        continue
++                    name=mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,geom.objid) or ''
++                    if name.startswith(('front_dining_room_', 'south_living_room_', 'east_south_dining_room_')):
++                        geom.rgba[3]=0
++                imageio.imwrite(args.output/'native_cutaway.png',renderer.render())
++                camera.elevation=-90.
++                renderer.update_scene(data,camera=camera,scene_option=options)
++                imageio.imwrite(args.output/'native_topdown.png',renderer.render())
++        finally:
++            if env is not None:env.close()
++    meta.update(seed=seed,navigation_tested=False,manipulation_tested=False)
++    (args.output/'layout.yaml').write_text(yaml.safe_dump(layout,sort_keys=False))
++    (args.output/'rooms.json').write_text(json.dumps(meta,indent=2)+'\n')
++    draw(layout,meta,args.output)
++    print(json.dumps(dict(output=str(args.output),seed=seed,chair_count=meta['chair_count'],
++                         simulation_tested=meta['simulation_tested'])))
++
++
++if __name__=='__main__':main()
+diff --git a/robocasa/scripts/preview_kitchen_living_room.py b/robocasa/scripts/preview_kitchen_living_room.py
+new file mode 100644
+index 0000000..be53a81
+--- /dev/null
++++ b/robocasa/scripts/preview_kitchen_living_room.py
+@@ -0,0 +1,106 @@
++"""Preview local layout 1001. No navigation or manipulation policy is executed."""
++import argparse
++import json
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[2]
++LAYOUT = ROOT / 'robocasa/models/assets/scenes/kitchen_layouts/custom/kitchen_living_room.yaml'
++
++
++def validate_layout(output):
++    import yaml
++    layout = yaml.safe_load(LAYOUT.read_text())
++    assert not any(w['name'].startswith('wall_front') for w in layout['room']['walls'])
++    furniture = {x['name']: x for x in layout['living_room']['furniture']}
++    table = furniture['side_table']
++    assert abs(table['pos'][2] + table['size'][2]/2 - .8) < 1e-8
++    # Wall applies a 4 cm length extension at each end. Account for both jambs.
++    clear_width = 1.7 - .08
++    assert clear_width > 2*.6
++    # Verify the doorway approach strip is unoccupied by living-room furniture.
++    for fixture in furniture.values():
++        x, y, _ = fixture['pos']; sx, sy, _ = fixture['size']
++        assert not (x+sx/2 > 1.9 and x-sx/2 < 3.6
++                    and y+sy/2 > -4.2 and y-sy/2 < -3.)
++    report = dict(layout_id=1001, layout=str(LAYOUT),
++                  doorway_clear_width_m=clear_width, side_table_height_m=.8,
++                  layout_checks_passed=True, simulation_tested=False)
++    (output/'layout_report.json').write_text(json.dumps(report, indent=2)+'\n')
++    # A schematic, deliberately distinct from the real simulator renders.
++    svg = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="-40 -35 650 800">',
++           '<rect x="0" y="0" width="550" height="300" fill="#e4edf5" stroke="#222"/>',
++           '<rect x="0" y="300" width="550" height="400" fill="#f6eadb" stroke="#222"/>',
++           '<path d="M190 300H360" stroke="white" stroke-width="8"/>',
++           '<g font-family="sans-serif" font-size="16" fill="#222">',
++           '<text x="160" y="80">Native RoboCasa kitchen</text>',
++           '<text x="200" y="380">Living room</text>',
++           '<text x="200" y="285">Open passage</text>']
++    for name, f in furniture.items():
++        x,y,_=f['pos']; sx,sy,_=f['size']
++        svg.append(f'<rect x="{100*(x-sx/2)}" y="{100*(-y-sy/2)}" width="{100*sx}" height="{100*sy}" fill="#ac9985" stroke="#403b35"/>')
++        if name in ('side_table','coffee_table','sofa_seat'):
++            svg.append(f'<text x="{100*(x-sx/2)}" y="{100*(-y-sy/2)-7}">{name.replace("_", " ")}</text>')
++    svg.append('<text x="0" y="740">Layout schematic; kitchen fixtures omitted here.</text></g></svg>')
++    (output/'layout.svg').write_text('\n'.join(svg))
++    return report
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--output', type=Path, required=True)
++    p.add_argument('--layout-only', action='store_true')
++    p.add_argument('--robot', default='PandaOmron')
++    args=p.parse_args()
++    args.output.mkdir(parents=True, exist_ok=True)
++    report=validate_layout(args.output)
++    if args.layout_only:
++        print(json.dumps(report)); return
++    try:
++        import robosuite
++        import robocasa
++        import mujoco
++        import imageio.v2 as imageio
++        from robocasa.environments.kitchen.kitchen import Kitchen
++    except ImportError as exc:
++        raise SystemExit('Install RoboCasa and its RoboSuite dependency in a separate environment first. '
++                         'See robocasa/KITCHEN_LIVING_ROOM.md. Original error: '+str(exc)) from exc
++
++    class KitchenLivingRoomPreview(Kitchen):
++        def _get_obj_cfgs(self):
++            return []
++        def _check_success(self):
++            return False
++
++    env=None
++    try:
++        env=robosuite.make('KitchenLivingRoomPreview', robots=args.robot,
++            layout_ids=[1001], style_ids=[1], seed=0,
++            init_robot_base_ref='counter_right_main_group',
++            use_camera_obs=False, has_renderer=False, has_offscreen_renderer=False)
++        env.reset()
++        env.sim.forward()
++        model=getattr(env.sim.model, '_model', env.sim.model)
++        data=getattr(env.sim.data, '_data', env.sim.data)
++        (args.output/'scene.xml').write_text(env.model.get_xml())
++        with mujoco.Renderer(model, height=900, width=1100) as renderer:
++            camera=mujoco.MjvCamera()
++            camera.lookat[:]=[2.75,-3.5,.5]
++            camera.distance=10.; camera.azimuth=90.
++            for name,elevation in [('top_down',-90.),('perspective',-55.)]:
++                camera.elevation=elevation
++                renderer.update_scene(data,camera=camera)
++                imageio.imwrite(args.output/(name+'.png'),renderer.render())
++        report.update(simulation_tested=True, robot=args.robot,
++            fixture_names=list(env.fixtures),
++            task_receptacles=['counter_right_main_group','side_table_living_room'],
++            navigation_tested=False, manipulation_tested=False)
++        (args.output/'layout_report.json').write_text(json.dumps(report,indent=2)+'\n')
++        print(json.dumps(report))
++    finally:
++        if env is not None:
++            env.close()
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/robocasa/scripts/render_layout_gallery.py b/robocasa/scripts/render_layout_gallery.py
+new file mode 100644
+index 0000000..9daf6db
+--- /dev/null
++++ b/robocasa/scripts/render_layout_gallery.py
+@@ -0,0 +1,87 @@
++"""Render native RoboCasa kitchens, preserving layouts and fixture assets."""
++import argparse
++import json
++import os
++from pathlib import Path
++os.environ.setdefault('MUJOCO_GL','egl')
++import numpy as np
++import yaml
++import mujoco
++import robosuite
++import robocasa
++from robocasa.environments.kitchen.kitchen import Kitchen
++from robocasa.models.scenes.scene_registry import get_layout_path
++from PIL import Image,ImageDraw,ImageFont
++
++class NativeKitchenGallery(Kitchen):
++    def _get_obj_cfgs(self):return []
++    def _check_success(self):return False
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--layouts',nargs='+',type=int,default=[1,2,4,9])
++    p.add_argument('--styles',nargs='+',type=int,default=[1,7,18,57])
++    p.add_argument('--output',type=Path,required=True)
++    p.add_argument('--three-rooms',action='store_true')
++    args=p.parse_args();args.output.mkdir(parents=True,exist_ok=True)
++    records=[];images=[]
++    for index,layout_id in enumerate(args.layouts):
++        style=args.styles[index%len(args.styles)]
++        layout=yaml.safe_load(Path(get_layout_path(layout_id)).read_text())
++        floor=next(f for group in layout.values() for fs in group.values() if isinstance(fs,list)
++                   for f in fs if isinstance(f,dict) and f.get('type')=='floor')
++        cx,cy,_=floor['pos'];w,d=2*floor['size'][0],2*floor['size'][1]
++        env=None
++        try:
++            env=robosuite.make('NativeKitchenGallery',robots='PandaOmron',layout_ids=[1100+layout_id if args.three_rooms else layout_id],
++                style_ids=[style],seed=7,use_camera_obs=False,has_renderer=False,has_offscreen_renderer=False)
++            env.reset();env.sim.forward()
++            if args.three_rooms:
++                layout=env.mujoco_arena.generated_layout
++                meta=env.mujoco_arena.room_metadata
++                bounds=np.asarray(list(meta['room_bounds'].values()))
++                cx=(bounds[:,0].min()+bounds[:,2].max())/2
++                cy=(bounds[:,1].min()+bounds[:,3].max())/2
++            model=env.sim.model._model;data=env.sim.data._data
++            model.vis.global_.offwidth=1400;model.vis.global_.offheight=1100
++            prefix=f'layout_{layout_id:03d}_style_{style:03d}'
++            (args.output/(prefix+'.xml')).write_text(env.model.get_xml())
++            if args.three_rooms:
++                (args.output/(prefix+'_rooms.json')).write_text(json.dumps(meta,indent=2))
++                (args.output/(prefix+'_layout.yaml')).write_text(yaml.safe_dump(layout,sort_keys=False))
++            options=mujoco.MjvOption();options.geomgroup[0]=0
++            with mujoco.Renderer(model,height=1100,width=1400) as renderer:
++                camera=mujoco.MjvCamera();camera.lookat[:]=[cx,cy,.65]
++                camera.distance=20. if args.three_rooms else 11.5;camera.azimuth=105;camera.elevation=-52
++                renderer.update_scene(data,camera=camera,scene_option=options)
++                # Only remove enclosing walls from the camera view, never physics.
++                hide=[]
++                for group_name,group in layout.items():
++                    for f in group.get('walls',[]):
++                        if f.get('enclosing_wall') or (args.three_rooms and group_name=='living_room' and f['name']=='south'):hide.append(f['name']+'_'+group_name+'_')
++                for geom in renderer.scene.geoms[:renderer.scene.ngeom]:
++                    if geom.objtype==mujoco.mjtObj.mjOBJ_GEOM and geom.objid>=0:
++                        name=mujoco.mj_id2name(model,mujoco.mjtObj.mjOBJ_GEOM,geom.objid) or ''
++                        if name.startswith(tuple(hide)):geom.rgba[3]=0
++                image=Image.fromarray(renderer.render());image.save(args.output/(prefix+'.png'))
++                images.append(image)
++                camera.elevation=-90;camera.azimuth=90
++                renderer.update_scene(data,camera=camera,scene_option=options)
++                Image.fromarray(renderer.render()).save(args.output/(prefix+'_topdown.png'))
++            records.append(dict(layout_id=layout_id,style_id=style,width_m=w,depth_m=d,
++                seed=7,three_rooms=args.three_rooms,rendered=True,physics_navigation_tested=False))
++            print(json.dumps(records[-1]),flush=True)
++        finally:
++            if env is not None:env.close()
++    font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',26)
++    columns=2;rows=(len(images)+1)//2
++    gallery=Image.new('RGB',(1600,rows*690),'#f2f3f5');draw=ImageDraw.Draw(gallery)
++    for i,(im,record) in enumerate(zip(images,records)):
++        x=(i%columns)*800;y=(i//columns)*690
++        gallery.paste(im.resize((800,629)),(x,y+55))
++        draw.text((x+18,y+14),f'Layout {record["layout_id"]:03d} / Style {record["style_id"]:03d} | {record["width_m"]:.1f} x {record["depth_m"]:.1f} m',fill='#222222',font=font)
++    gallery.save(args.output/'gallery.png')
++    (args.output/'manifest.json').write_text(json.dumps(records,indent=2))
++
++if __name__=='__main__':main()
+diff --git a/robocasa/scripts/render_room_geometry.py b/robocasa/scripts/render_room_geometry.py
+new file mode 100644
+index 0000000..3aa14df
+--- /dev/null
++++ b/robocasa/scripts/render_room_geometry.py
+@@ -0,0 +1,74 @@
++"""Render generated room geometry in MuJoCo without external fixture assets."""
++import argparse
++import json
++import os
++from pathlib import Path
++import xml.etree.ElementTree as ET
++os.environ.setdefault('MUJOCO_GL', 'egl')
++import mujoco
++import numpy as np
++import imageio.v2 as imageio
++import yaml
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--input',type=Path,required=True)
++    args=p.parse_args()
++    layout=yaml.safe_load((args.input/'layout.yaml').read_text())
++    meta=json.loads((args.input/'rooms.json').read_text())
++    root=ET.Element('mujoco',model='three_room_geometry_preview')
++    ET.SubElement(root,'visual')
++    ET.SubElement(root.find('visual'),'global',offwidth='1600',offheight='1200')
++    ET.SubElement(root.find('visual'),'quality',shadowsize='4096')
++    world=ET.SubElement(root,'worldbody')
++    ET.SubElement(world,'light',pos='3 -4 10',dir='0 0 -1',diffuse='.8 .8 .8',castshadow='true')
++    ET.SubElement(world,'light',pos='10 -1 8',dir='-1 -1 -2',diffuse='.5 .5 .5',castshadow='false')
++    def box(name,pos,size,color):
++        ET.SubElement(world,'geom',name=name,type='box',pos=' '.join(map(str,pos)),
++                      size=' '.join(str(float(v)/2) for v in size),rgba=color,contype='0',conaffinity='0')
++    colors={'kitchen':'.71 .79 .83 1','dining_room':'.77 .64 .47 1','living_room':'.64 .74 .61 1'}
++    for name,(x0,y0,x1,y1) in meta['room_bounds'].items():
++        box(name+'_floor',[(x0+x1)/2,(y0+y1)/2,-.055],[x1-x0,y1-y0,.1],colors[name])
++    for group in ('dining_room','living_room'):
++        if group not in layout:continue
++        for f in layout[group]['furniture']:
++            name=group+'_'+f['name'];pos=list(f['pos']);size=list(f['size'])
++            color='.44 .25 .12 1' if 'table' in name or 'leg' in name else '.28 .42 .44 1'
++            if 'sofa' in name:color='.36 .47 .33 1'
++            if f['type']=='counter':pos[2]=size[2]-.02;size[2]=.04
++            box(name,pos,size,color)
++        for w in layout[group]['walls']:
++            # Cutaway walls retain actual XY boundaries and doorway gaps.
++            pos=list(w['pos']);pos[2]=.32
++            length=2*w['size'][0]+.08
++            size=[.08,length,.64] if w['wall_side'] in ('left','right') else [length,.08,.64]
++            box(group+'_'+w['name'],pos,size,'.84 .83 .79 1')
++    box('kitchen_left',[0,-1.5,.32],[.08,3,.64],'.84 .83 .79 1')
++    box('kitchen_right',[5.5,-1.5,.32],[.08,3,.64],'.84 .83 .79 1')
++    box('kitchen_back',[2.75,0,.32],[5.5,.08,.64],'.84 .83 .79 1')
++    for name,pos,size,color in [
++        ('counter',[1.5,-.325,.46],[2.5,.65,.92],'.64 .69 .70 1'),
++        ('stove',[3.15,-.33,.46],[.8,.66,.92],'.23 .27 .29 1'),
++        ('counter_right',[3.9,-.325,.46],[.7,.65,.92],'.64 .69 .70 1'),
++        ('fridge',[4.72,-.4,.95],[.85,.8,1.9],'.65 .68 .69 1')]:
++        box(name,pos,size,color)
++    box('counter_top',[1.5,-.325,.935],[2.5,.67,.03],'.91 .90 .86 1')
++    box('sink_visual',[1.5,-.325,.955],[.55,.43,.01],'.22 .27 .29 1')
++    xml=ET.tostring(root,encoding='unicode')
++    (args.input/'geometry_preview.xml').write_text(xml)
++    model=mujoco.MjModel.from_xml_string(xml);data=mujoco.MjData(model);mujoco.mj_forward(model,data)
++    bounds=np.array(list(meta['room_bounds'].values()))
++    center=[(bounds[:,0].min()+bounds[:,2].max())/2,(bounds[:,1].min()+bounds[:,3].max())/2,0]
++    with mujoco.Renderer(model,height=1200,width=1600) as renderer:
++        for name,elevation,azimuth in [('mujoco_3d',-55,105),('mujoco_topdown',-90,90)]:
++            camera=mujoco.MjvCamera();camera.lookat[:]=center;camera.distance=15.5
++            camera.elevation=elevation;camera.azimuth=azimuth
++            renderer.update_scene(data,camera=camera)
++            imageio.imwrite(args.input/(name+'.png'),renderer.render())
++    (args.input/'render_notes.json').write_text(json.dumps(dict(renderer='MuJoCo',native_robocasa_assets=False,
++        kitchen='approximate fixture envelopes',furniture='generated room geometry',walls='cutaway height 0.64m'),indent=2))
++    print(args.input/'mujoco_3d.png')
++
++
++if __name__=='__main__':main()

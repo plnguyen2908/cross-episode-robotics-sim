@@ -1,0 +1,36 @@
+{
+  "base_episode": "base_episodes/breakfast_gathered",
+  "seed": 17,
+  "machine_x": 2.48,
+  "hopper_xy": [
+    2.12,
+    -0.52
+  ],
+  "lid_parking_xy": [
+    1.82,
+    -0.5
+  ],
+  "dosing_parking_xy": [
+    3.84,
+    -0.52
+  ],
+  "dosing_yaw_deg": 180.0,
+  "dosing_container": "small_box",
+  "particle_count": 32,
+  "minimum_hopper_fraction": 0.8,
+  "maximum_spill_fraction": 0.1,
+  "brew_seconds": 5.0,
+  "pour_angles_deg": [
+    0,
+    15,
+    30,
+    45,
+    60,
+    75,
+    90,
+    105,
+    120
+  ],
+  "pour_hold_seconds": 0.35,
+  "pour_lip_clearance_m": 0.035
+}

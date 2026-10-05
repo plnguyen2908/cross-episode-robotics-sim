@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cross-episode-sim"
+version = "0.1.0"
+description = "Multi-room RoboCasa household tasks for a TidyBot++/Franka mobile manipulator, with oracle demonstrations, a policy environment and dataset export."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Le Thien Phuc Nguyen" }]
+dependencies = [
+    "molmo-spaces @ git+https://github.com/allenai/molmospaces@735138876887eb64650742631b8dda841dd264bf",
+    "mujoco==3.5.0",
+    "nvidia-curobo==1.0",
+    "torch>=2.7",
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "gymnasium>=1.0",
+    "h5py>=3.10",
+    "imageio[ffmpeg]",
+    "networkx",
+    "opencv-python",
+    "pillow",
+    "trimesh",
+]
+
+[project.optional-dependencies]
+# Re-convert the espresso machine from MoonlakeAI's USDZ (the data bundle ships the result).
+coffee-asset = ["usd-core", "vhacdx"]
+dev = ["pytest>=8", "ruff==0.15.0"]
+
+[project.urls]
+Repository = "https://github.com/plnguyen2908/cross-episode-robotics-sim"
+
+[tool.setuptools.packages.find]
+include = ["cross_episode_sim*"]
+
+[tool.setuptools.package-data]
+cross_episode_sim = ["assets/**/*", "configs/*.json"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["data", "runs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E701", "E702", "E731", "E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

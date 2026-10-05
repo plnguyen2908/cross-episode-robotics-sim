@@ -1,0 +1,136 @@
+<mujoco><asset>
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/door.obj" name="stove_main_group_door_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/door_Clear.obj" name="stove_main_group_door_Clear_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/knob_center.obj" name="stove_main_group_knob_center_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/knob_front_left.obj" name="stove_main_group_knob_front_left_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/knob_front_right.obj" name="stove_main_group_knob_front_right_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/knob_rear_left.obj" name="stove_main_group_knob_rear_left_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/knob_rear_right.obj" name="stove_main_group_knob_rear_right_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/knob_temp.obj" name="stove_main_group_knob_temp_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/knob_time.obj" name="stove_main_group_knob_time_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/rack0.obj" name="stove_main_group_rack0_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/Body001.obj" name="stove_main_group_Body001_vis" scale="1.0 1.0 1.0" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_Body001_material" type="2d" />
+    <material name="stove_main_group_Body001_material" rgba="1 1 1 1.0" texture="stove_main_group_Body001_material" shininess="0.1" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_door_material" type="2d" />
+    <material name="stove_main_group_door_material" rgba="1 1 1 1.0" texture="stove_main_group_door_material" shininess="0.1" specular="5" />
+    <material name="stove_main_group_door_Clear_material" rgba="0.055541425943374634 0.055541425943374634 0.055541425943374634 0.8" shininess="0.4472135901451111" specular="0.3103448502657381" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_knob_center_material" type="2d" />
+    <material name="stove_main_group_knob_center_material" rgba="1 1 1 1.0" texture="stove_main_group_knob_center_material" shininess="0.1" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_knob_front_left_material" type="2d" />
+    <material name="stove_main_group_knob_front_left_material" rgba="1 1 1 1.0" texture="stove_main_group_knob_front_left_material" shininess="0.1" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_knob_front_right_material" type="2d" />
+    <material name="stove_main_group_knob_front_right_material" rgba="1 1 1 1.0" texture="stove_main_group_knob_front_right_material" shininess="0.1" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_knob_rear_left_material" type="2d" />
+    <material name="stove_main_group_knob_rear_left_material" rgba="1 1 1 1.0" texture="stove_main_group_knob_rear_left_material" shininess="0.1" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_knob_rear_right_material" type="2d" />
+    <material name="stove_main_group_knob_rear_right_material" rgba="1 1 1 1.0" texture="stove_main_group_knob_rear_right_material" shininess="0.1" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_knob_temp_material" type="2d" />
+    <material name="stove_main_group_knob_temp_material" rgba="1 1 1 1.0" texture="stove_main_group_knob_temp_material" shininess="0.1" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_knob_time_material" type="2d" />
+    <material name="stove_main_group_knob_time_material" rgba="1 1 1 1.0" texture="stove_main_group_knob_time_material" shininess="0.1" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/stoves/Stove002/visuals/T_BC001.png" name="stove_main_group_rack0_material" type="2d" />
+    <material name="stove_main_group_rack0_material" rgba="1 1 1 1.0" texture="stove_main_group_rack0_material" shininess="0.1" specular="5" />
+  </asset>
+  <worldbody><body name="stove_main_group_main">
+        <geom mesh="stove_main_group_Body001_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_Body001_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g0" />
+        <geom type="box" pos="6.490154191851616e-07 0.30399298667907715 -0.0001319174189120531" size="0.37950000166893005 0.030633658170700073 0.4929412603378296" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g1" />
+        <geom type="box" pos="9.247881962437532e-07 0.01607316918671131 0.38297146558761597" size="0.37950047850608826 0.3185533583164215 0.01605180837213993" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g2" />
+        <geom type="box" pos="-0.3719644546508789 0.005501424893736839 -0.09880691766738892" size="0.007534903474152088 0.2695953845977783 0.3942725956439972" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g3" />
+        <geom type="box" pos="0.3719663619995117 0.005501288454979658 -0.0988069400191307" size="0.007534792181104422 0.2695951461791992 0.3942723870277405" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g4" />
+        <geom type="box" pos="-0.0003282291581854224 0.002114064060151577 0.28348594903945923" size="0.37917107343673706 0.26609471440315247 0.009091421961784363" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g5" />
+        <geom type="box" pos="-0.0003283511323388666 0.0025597289204597473 -0.2571186423301697" size="0.3791711926460266 0.26564887166023254 0.01277067605406046" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g6" />
+        <geom type="box" pos="-0.00032822907087393105 -0.017137626186013222 -0.38388580083847046" size="0.37917107343673706 0.28534603118896484 0.10918741673231125" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g7" />
+        <geom type="box" pos="9.200302883982658e-07 0.2244304120540619 -0.02571159601211548" size="0.37950021028518677 0.042242273688316345 0.3127388656139374" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g8" />
+        <geom type="box" pos="5.369074642658234e-07 0.016116617247462273 -0.39065417647361755" size="0.3794998526573181 0.318509578704834 0.10241959244012833" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g9" />
+        <geom type="box" pos="0.0002088821493089199 0.002356607234105468 0.4074528217315674" size="0.3397592306137085 0.2768365144729614 0.008890227414667606" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g10" />
+        <geom type="box" pos="0.35568249225616455 -0.04684135317802429 0.024103298783302307" size="0.009308365173637867 0.2168421894311905 0.005590522196143866" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g11" />
+        <geom type="box" pos="-0.35767704248428345 -0.04684135317802429 0.024103298783302307" size="0.009308365173637867 0.2168421894311905 0.005590518936514854" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g12" />
+        <geom type="box" pos="9.133765388469328e-07 0.01607316918671131 0.33178508281707764" size="0.37950047850608826 0.3185533583164215 0.03513485565781593" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g13" />
+        <body name="stove_main_group_door">
+          <joint axis="1.0 0.0 0.0" pos="6.915070116519928e-07 -0.2990294098854065 -0.2656201124191284" limited="true" name="stove_main_group_door_joint" range="0.0 1.5707963267948966" type="hinge" damping="1" frictionloss="1" armature=".01" stiffness="0.05" />
+          <geom mesh="stove_main_group_door_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_door_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g14" />
+          <geom type="box" pos="-0.0003282262769062072 -0.28507494926452637 0.009530797600746155" size="0.37917107343673706 0.016665976494550705 0.2750031352043152" quat="1.0 0.0 0.0 0.0" name="stove_main_group_door_main" group="0" rgba="0.5 0 0 0.5" />
+          <geom type="box" pos="-0.3148961663246155 -0.30137747526168823 0.2613299787044525" size="0.022222768515348434 0.0024574706330895424 0.01903548277914524" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g16" />
+          <geom type="box" pos="-0.270940363407135 -0.30515754222869873 0.26056957244873047" size="0.0024574636481702323 0.02222257107496262 0.0205561351031065" quat="0.6362748742103577 0.0 0.0 -0.7714624404907227" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g17" />
+          <geom type="box" pos="-0.22743520140647888 -0.3138009309768677 0.26056957244873047" size="0.0024574636481702323 0.02222257107496262 0.0205561351031065" quat="0.6362748742103577 0.0 0.0 -0.7714624404907227" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g18" />
+          <geom type="box" pos="-0.1837860643863678 -0.32179611921310425 0.26056957244873047" size="0.0024574636481702328 0.02222257666289806 0.0205561351031065" quat="0.6439476609230042 0.0 0.0 -0.7650695443153381" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g19" />
+          <geom type="box" pos="-0.13977670669555664 -0.3284947872161865 0.26056957244873047" size="0.002457463648170233 0.02222256734967232 0.0205561351031065" quat="0.6602786183357239 0.0 0.0 -0.7510207295417786" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g20" />
+          <geom type="box" pos="-0.09539932012557983 -0.33354467153549194 0.26056957244873047" size="0.002457463648170233 0.022222572937607765 0.0205561351031065" quat="0.678578794002533 0.0 0.0 -0.7345276474952698" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g21" />
+          <geom type="box" pos="-0.05112898722290993 -0.3366588354110718 0.26056957244873047" size="0.0024574636481702323 0.02222257293760777 0.0205561351031065" quat="0.6858806014060974 0.0 0.0 -0.7277140617370605" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g22" />
+          <geom type="box" pos="-0.0066461567766964436 -0.3383820056915283 0.26056957244873047" size="0.0024574636481702328 0.022222572937607765 0.0205561351031065" quat="0.7013971209526062 0.0 0.0 -0.7127707004547119" name="stove_main_group_door_handle_main" group="0" rgba="0.5 0 0 0.5" />
+          <geom type="box" pos="0.03728786110877991 -0.33745628595352173 0.26056957244873047" size="0.022292759269475937 0.0032048900611698627 0.0205561351031065" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g24" />
+          <geom type="box" pos="0.08173882961273193 -0.335046648979187 0.26056957244873047" size="0.0024574636481702328 0.022222574800252914 0.0205561351031065" quat="0.7337282299995422 0.0 0.0 -0.6794430613517761" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g25" />
+          <geom type="box" pos="0.1260986328125 -0.3303929567337036 0.26056957244873047" size="0.0024574636481702328 0.022222571074962616 0.0205561351031065" quat="0.7502427101135254 0.0 0.0 -0.6611624956130981" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g26" />
+          <geom type="box" pos="0.17006200551986694 -0.32435983419418335 0.26056957244873047" size="0.0024574636481702323 0.022222578525543213 0.0205561351031065" quat="0.7568084001541138 0.0 0.0 -0.6536368131637573" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g27" />
+          <geom type="box" pos="0.21386264264583588 -0.3166324496269226 0.26056957244873047" size="0.0024574636481702328 0.022222574800252914 0.0205561351031065" quat="0.7731620073318481 0.0 0.0 -0.6342085599899292" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g28" />
+          <geom type="box" pos="0.25716614723205566 -0.30790263414382935 0.26056957244873047" size="0.0024574636481702328 0.022222574800252914 0.0205561351031065" quat="0.7731620073318481 0.0 0.0 -0.6342085599899292" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g29" />
+          <geom type="box" pos="0.3008153438568115 -0.300037145614624 0.26056957244873047" size="0.0024574636481702336 0.022222571074962616 0.0205561351031065" quat="0.7578297257423401 0.0 0.0 -0.6524524092674255" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g30" />
+          <geom type="box" pos="0.3170894980430603 -0.3001844882965088 0.2613299787044525" size="0.022301524877548218 0.003322553588077426 0.01903529278934002" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g31" />
+          <body name="stove_main_group_door_Clear">
+            <geom mesh="stove_main_group_door_Clear_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_door_Clear_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g32" />
+            <geom type="box" pos="-0.0018881545402109623 -0.2838437557220459 0.02219078131020069" size="0.3464679718017578 0.010744373314082623 0.21997284889221191" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g33" />
+          </body>
+        </body>
+        <body name="stove_main_group_knob_center">
+          <joint axis="0.0 -1.0 0.0" pos="0.11236615478992462 -0.3173580765724182 0.3298296332359314" limited="true" name="stove_main_group_knob_center_joint" range="0.0 3.141592653589793" type="hinge" damping="0.05" armature="1" frictionloss="0.75" />
+          <geom mesh="stove_main_group_knob_center_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_knob_center_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g34" />
+          <geom type="cylinder" pos="0.11202891170978546 -0.30954474210739136 0.3293464183807373" size="0.021778227761387825 0.005089934915304184" quat="0.5 0.5 0.4999999701976776 -0.5" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g35" />
+          <geom type="box" pos="0.11229107528924942 -0.32348543405532837 0.3294242024421692" size="0.008317040279507637 0.008900513872504234 0.021573316305875778" quat="1.0 0.0 0.0 0.0" name="stove_main_group_knob_center_main" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="stove_main_group_knob_front_left">
+          <joint axis="0.0 -1.0 0.0" pos="-0.10567551106214523 -0.3173580765724182 0.32953786849975586" limited="true" name="stove_main_group_knob_front_left_joint" range="0.0 3.141592653589793" type="hinge" damping="0.05" armature="1" frictionloss="0.75" />
+          <geom mesh="stove_main_group_knob_front_left_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_knob_front_left_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g37" />
+          <geom type="cylinder" pos="-0.10575403273105621 -0.30954474210739136 0.3293464183807373" size="0.021778227761387825 0.005089934915304184" quat="0.5 0.5 0.4999999701976776 -0.5" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g38" />
+          <geom type="box" pos="-0.10549186915159225 -0.32348543405532837 0.3294242024421692" size="0.00831700675189495 0.008900513872504234 0.021573182195425034" quat="1.0 0.0 0.0 0.0" name="stove_main_group_knob_front_left_main" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="stove_main_group_knob_front_right">
+          <joint axis="0.0 -1.0 0.0" pos="0.3330467939376831 -0.3173580765724182 0.32981473207473755" limited="true" name="stove_main_group_knob_front_right_joint" range="0.0 3.141592653589793" type="hinge" damping="0.05" armature="1" frictionloss="0.75" />
+          <geom mesh="stove_main_group_knob_front_right_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_knob_front_right_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g40" />
+          <geom type="cylinder" pos="0.3326355814933777 -0.30954474210739136 0.3293464183807373" size="0.021778227761387825 0.005089934915304184" quat="0.5 0.5 0.4999999701976776 -0.5" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g41" />
+          <geom type="box" pos="0.33289772272109985 -0.32348543405532837 0.3294242024421692" size="0.008317043073475361 0.008900513872504234 0.021573327481746674" quat="1.0 0.0 0.0 0.0" name="stove_main_group_knob_front_right_main" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="stove_main_group_knob_rear_left">
+          <joint axis="0.0 -1.0 0.0" pos="0.0019752737134695053 -0.3173580765724182 0.32953786849975586" limited="true" name="stove_main_group_knob_rear_left_joint" range="0.0 3.141592653589793" type="hinge" damping="0.05" armature="1" frictionloss="0.75" />
+          <geom mesh="stove_main_group_knob_rear_left_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_knob_rear_left_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g43" />
+          <geom type="cylinder" pos="0.0017690521199256182 -0.30954474210739136 0.3293464183807373" size="0.021778227761387825 0.005089934915304184" quat="0.5 0.5 0.4999999701976776 -0.5" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g44" />
+          <geom type="box" pos="0.002031215699389577 -0.32348543405532837 0.3294242024421692" size="0.008317045867443085 0.008900513872504234 0.021573340520262718" quat="1.0 0.0 0.0 0.0" name="stove_main_group_knob_rear_left_main" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="stove_main_group_knob_rear_right">
+          <joint axis="0.0 -1.0 0.0" pos="0.22260557115077972 -0.3173580765724182 0.33012378215789795" limited="true" name="stove_main_group_knob_rear_right_joint" range="0.0 3.141592653589793" type="hinge" damping="0.05" armature="1" frictionloss="0.75" />
+          <geom mesh="stove_main_group_knob_rear_right_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_knob_rear_right_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g46" />
+          <geom type="cylinder" pos="0.2225378006696701 -0.30954474210739136 0.3296049237251282" size="0.021778227761387825 0.005089934915304184" quat="0.5 0.5 0.4999999701976776 -0.5" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g47" />
+          <geom type="box" pos="0.22279995679855347 -0.32348543405532837 0.32968267798423767" size="0.008317049592733383 0.008900513872504234 0.021573353558778763" quat="1.0 0.0 0.0 0.0" name="stove_main_group_knob_rear_right_main" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="stove_main_group_knob_temp">
+          <joint axis="0.0 1.0 0.0" pos="-0.3297589421272278 -0.3173580765724182 0.32753875851631165" limited="true" name="stove_main_group_knob_temp_joint" range="0.0 4.363323129985823" type="hinge" damping="0.05" armature="1" frictionloss="0.75" />
+          <geom mesh="stove_main_group_knob_temp_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_knob_temp_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g49" />
+          <geom type="cylinder" pos="-0.32981687784194946 -0.3096262216567993 0.3276185989379883" size="0.017223043367266655 0.004585263319313526" quat="0.21008674800395966 0.21008668839931488 0.675176739692688 -0.6751766800880432" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g50" />
+          <geom type="box" pos="-0.3298744559288025 -0.3233341574668884 0.3275153636932373" size="0.009020081721246243 0.006863096263259648 0.01700630784034729" quat="0.6268596053123474 -0.3271808326244354 0.3271809220314026 -0.6268591284751892" name="stove_main_group_knob_temp_main" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="stove_main_group_knob_time">
+          <joint axis="0.0 1.0 0.0" pos="-0.21431638300418854 -0.31687605381011963 0.3258565068244934" limited="true" name="stove_main_group_knob_time_joint" range="0.0 4.014257279586958" type="hinge" damping="0.05" armature="1" frictionloss="0.75" />
+          <geom mesh="stove_main_group_knob_time_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_knob_time_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g52" />
+          <geom type="cylinder" pos="-0.21430985629558563 -0.308935284614563 0.325877845287323" size="0.01915778405964375 0.005100345704704523" quat="0.5018575191497803 0.5019059181213379 -0.4980872869491577 0.4981350600719452" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g53" />
+          <geom type="box" pos="-0.21436633169651031 -0.3239622116088867 0.32633745670318604" size="0.007558888290077448 0.009881828911602497 0.018647173419594765" quat="1.0 0.0 0.0 0.0" name="stove_main_group_knob_time_main" friction="100 0.5 0.01" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="stove_main_group_rack0">
+          <geom name="stove_main_group_reg_rack0" type="box" pos="-0.001135304570198059 -0.04560874402523041 0.154441449791193" size="0.3418627361059189 0.2033354321718216 0.11046699604392052" group="1" conaffinity="0" contype="0" rgba="0.0 1.0 0.0 0.0" />
+          <joint axis="0.0 -1.0 0.0" pos="-0.0014163809828460217 -0.045786283910274506 0.03486105799674988" limited="true" name="stove_main_group_rack0_joint" range="0.0 0.35" type="slide" damping="1" frictionloss="1" armature=".01" stiffness="0.05" />
+          <geom mesh="stove_main_group_rack0_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="stove_main_group_rack0_material" conaffinity="0" contype="0" group="1" name="stove_main_group_g56" />
+          <geom type="box" pos="-0.001008454943075776 -0.04573242366313934 0.034881461411714554" size="0.3534037172794342 0.20836016535758972 0.004014792386442423" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="stove_main_group_g57" />
+        </body>
+        <geom name="stove_main_group_reg_int" type="box" pos="-0.001135304570198059 -0.040598347783088684 0.01787400245666504" size="0.3418627361059189 0.21815886890888214 0.2517888078689575" group="1" conaffinity="0" contype="0" rgba="0.0 1.0 0.0 0.0" />
+        <site type="cylinder" rgba="0.3 0.4 1 0.5" size="0.04910412058234215 0.009300893172621727" pos="-0.1791195273399353 0.08587392419576645 0.402950257062912" name="stove_main_group_burner_on_rear_left" />
+        <site type="cylinder" rgba="0.3 0.4 1 0.5" size="0.04910412058234215 0.009300893172621727" pos="0.17771181464195251 0.08587392419576645 0.402950257062912" name="stove_main_group_burner_on_rear_right" />
+        <site type="cylinder" rgba="0.3 0.4 1 0.5" size="0.04910412058234215 0.009300893172621727" pos="0.1781647503376007 -0.11547911912202835 0.402950257062912" name="stove_main_group_burner_on_front_right" />
+        <site type="cylinder" rgba="0.3 0.4 1 0.5" size="0.03738318011164665 0.009300893172621727" pos="0.0014605133328586817 -0.017544277012348175 0.40311214327812195" name="stove_main_group_burner_on_center" />
+        <site type="cylinder" rgba="0.3 0.4 1 0.5" size="0.04910412058234215 0.009300893172621727" pos="-0.17922016978263855 -0.11620382219552994 0.402950257062912" name="stove_main_group_burner_on_front_left" />
+        <site type="cylinder" rgba="0.5 0 0 0" size="0.04910412058234215 5.000006785849109e-05" pos="-0.17922018468379974 -0.11620383709669113 0.41639259457588196" name="stove_main_group_burner_front_left_place_site" />
+        <site type="cylinder" rgba="0.5 0 0 0" size="0.04910413175821304 5.000006785849109e-05" pos="0.1777118295431137 0.08587393909692764 0.41639259457588196" name="stove_main_group_burner_rear_right_place_site" />
+        <site type="cylinder" rgba="0.5 0 0 0" size="0.04910412058234215 5.000006785849109e-05" pos="-0.1791195422410965 0.08587393909692764 0.41639259457588196" name="stove_main_group_burner_rear_left_place_site" />
+        <site type="cylinder" rgba="0.5 0 0 0" size="0.04910412058234215 5.000002420274541e-05" pos="0.1781647503376007 -0.11547911912202835 0.41639256477355957" name="stove_main_group_burner_front_right_place_site" />
+        <site type="cylinder" rgba="0.5 0 0 0" size="0.03738318011164665 4.998933945898898e-05" pos="0.0014605133328586817 -0.017544277012348175 0.41639259457588196" name="stove_main_group_burner_center_place_site" />
+        <geom name="stove_main_group_reg_main" type="box" pos="7.003545761108398e-07 0.016073167324066162 -0.047034651041030884" size="0.38050003147125244 0.31955309009552 0.44703851437568665" group="1" conaffinity="0" contype="0" rgba="0.0 1.0 0.0 0.0" />
+      <site pos="0.0 0.0 0.0" size="0.002 0.002 0.002" rgba="1 0 0 0" type="sphere" group="0" name="stove_main_group_default_site" /></body>
+    </worldbody></mujoco>

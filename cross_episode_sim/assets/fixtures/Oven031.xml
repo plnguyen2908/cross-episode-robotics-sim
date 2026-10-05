@@ -1,0 +1,96 @@
+<mujoco><asset>
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/door.obj" name="oven_test_door_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/door_Clear.obj" name="oven_test_door_Clear_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/knob_temp.obj" name="oven_test_knob_temp_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/knob_time.obj" name="oven_test_knob_time_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/Body001.obj" name="oven_test_Body001_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/rack0.obj" name="oven_test_rack0_vis" scale="1.0 1.0 1.0" />
+    <mesh file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/rack1.obj" name="oven_test_rack1_vis" scale="1.0 1.0 1.0" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/T_BC001.png" name="oven_test_Body001_material" type="2d" />
+    <material name="oven_test_Body001_material" rgba="1 1 1 1.0" texture="oven_test_Body001_material" shininess="0.4472135901451111" specular="0.3103448502657381" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/T_BC001.png" name="oven_test_door_material" type="2d" />
+    <material name="oven_test_door_material" rgba="1 1 1 1.0" texture="oven_test_door_material" shininess="0.4472135901451111" specular="0.3103448502657381" />
+    <material name="oven_test_door_Clear_material" rgba="0.026161950081586838 0.021754005923867226 0.023210933431982994 0.699999988079071" shininess="0.4472135901451111" specular="0.3103448502657381" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/T_BC001.png" name="oven_test_knob_temp_material" type="2d" />
+    <material name="oven_test_knob_temp_material" rgba="1 1 1 1.0" texture="oven_test_knob_temp_material" shininess="0.4472135901451111" specular="0.3103448502657381" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/T_BC001.png" name="oven_test_knob_time_material" type="2d" />
+    <material name="oven_test_knob_time_material" rgba="1 1 1 1.0" texture="oven_test_knob_time_material" shininess="0.4472135901451111" specular="0.3103448502657381" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/T_BC001.png" name="oven_test_rack0_material" type="2d" />
+    <material name="oven_test_rack0_material" rgba="1 1 1 1.0" texture="oven_test_rack0_material" shininess="0.4472135901451111" specular="5" />
+    <texture file="${ROBOCASA_DIR}/models/assets/fixtures/ovens/Oven031/visuals/T_BC001.png" name="oven_test_rack1_material" type="2d" />
+    <material name="oven_test_rack1_material" rgba="1 1 1 1.0" texture="oven_test_rack1_material" shininess="0.4472135901451111" specular="5" />
+  </asset>
+  <worldbody><body name="oven_test_main">
+        <geom mesh="oven_test_Body001_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="oven_test_Body001_material" conaffinity="0" contype="0" group="1" name="oven_test_g0" />
+        <geom type="box" pos="-0.00193664 0.02093323 -0.28613102" size="0.2864971458911896 0.22578129172325134 0.013247320428490639" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g1" />
+        <geom type="box" pos="-0.00154104 0.22769734 -0.04044235" size="0.28295621275901794 0.01902342401444912 0.24726203083992004" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g2" />
+        <geom type="box" pos="-0.00069794 -0.21607623 0.24334489" size="0.29655829071998596 0.002629518276080489 0.059013936668634415" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g3" />
+        <geom type="box" pos="-0.00193662 0.09791662 0.19807979" size="0.2865249812602997 0.1488170027732849 0.035443782806396484" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g4" />
+        <geom type="box" pos="-0.27291391 0.02141622 -0.0505269" size="0.015519815497100353 0.2251206785440445 0.24085582792758942" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g5" />
+        <geom type="box" pos="0.27439969 0.02141622 -0.0505269" size="0.010160770267248154 0.22512070834636688 0.24085582792758942" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g6" />
+        <geom type="box" pos="-0.0019366 -0.11972154 0.21378756" size="0.2864971160888672 0.0827447921037674 0.05115167796611786" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g7" />
+        <geom type="box" pos="-0.23913118 -0.18324842 0.00186868" size="0.01999048702418804 0.0023430667351931334 0.0029860620852559805" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g8" />
+        <geom type="box" pos="-0.23913118 0.19480319 0.00186868" size="0.01999048702418804 0.002343070227652788 0.0029860620852559805" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g9" />
+        <geom type="box" pos="-0.22218245 0.00660851 0.00186868" size="0.004632970783859491 0.1872706115245819 0.0029860620852559805" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g10" />
+        <geom type="box" pos="-0.22218245 0.00660851 -0.17770423" size="0.004632970783859491 0.1872706115245819 0.0029860620852559805" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g11" />
+        <geom type="box" pos="-0.23913118 0.19480319 -0.17770423" size="0.01999048702418804 0.002343070227652788 0.0029860620852559805" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g12" />
+        <geom type="box" pos="-0.23913118 -0.18324842 -0.17770423" size="0.01999048702418804 0.0023430667351931334 0.0029860620852559805" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g13" />
+        <geom type="box" pos="0.2451346 -0.18324842 -0.17770423" size="0.01999048702418804 0.002343066968023777 0.002986062318086624" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g14" />
+        <geom type="box" pos="0.2451346 0.19480319 -0.17770424" size="0.01999048702418804 0.002343070227652788 0.002986062318086624" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g15" />
+        <geom type="box" pos="0.22818587 0.00660851 -0.17770424" size="0.004632970783859491 0.1872706115245819 0.00298607861623168" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g16" />
+        <geom type="box" pos="0.22818587 0.00660851 0.00186867" size="0.004632970783859491 0.1872706115245819 0.00298607861623168" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g17" />
+        <geom type="box" pos="0.2451346 0.19480319 0.00186866" size="0.01999048702418804 0.002343070227652788 0.002986062318086624" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g18" />
+        <geom type="box" pos="0.2451346 -0.18324842 0.00186868" size="0.01999048702418804 0.002343066968023777 0.002986062318086624" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g19" />
+        <body name="oven_test_door">
+          <joint axis="1.0 0.0 0.0" pos="-5.3e-05 -0.21782134 -0.29972702" limited="true" name="oven_test_door_joint" range="0.0 1.15" type="hinge" damping="5" frictionloss="1" armature=".01" stiffness="0.05" />
+          <geom mesh="oven_test_door_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="oven_test_door_material" conaffinity="0" contype="0" group="1" name="oven_test_g20" />
+          <geom type="box" pos="0.00046126 -0.21861249 -0.05492104" size="0.21909628808498383 0.0013980461517348886 0.1593700349330902" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g21" />
+          <geom type="box" pos="-0.00091096 -0.21323308 0.14528914" size="0.2840000092983246 0.006776219699531794 0.03355890139937401" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g22" />
+          <geom type="box" pos="-0.24717758 -0.23204103 0.14453034" size="0.016126926988363266 0.013960613869130611 0.014420450665056705" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g23" />
+          <geom type="box" pos="-0.0015577 -0.24055816 0.14364417" size="0.22725321352481842 0.004590313881635666 0.01625778339803219" quat="1.0 0.0 0.0 0.0" name="oven_test_door_handle_main" group="0" rgba="0.5 0 0 0.5" />
+          <geom type="box" pos="0.24643572 -0.23150447 0.14453034" size="0.016126926988363266 0.013424050994217396 0.014420450665056705" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g25" />
+          <geom type="box" pos="-0.00091096 -0.21323371 -0.25923872" size="0.2840000092983246 0.006776845082640648 0.038145940750837326" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g26" />
+          <geom type="box" pos="0.25887435 -0.21322887 -0.05012046" size="0.031093288213014603 0.006772010587155819 0.1800360381603241" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g27" />
+          <geom type="box" pos="-0.25794844 -0.21323371 -0.05012046" size="0.031093288213014603 0.006776842754334211 0.1800360381603241" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g28" />
+          <geom type="box" pos="0.00205224 -0.21861187 -0.0596112" size="0.28721463680267334 0.001397435669787228 0.23735477030277252" quat="1.0 0.0 0.0 0.0" name="oven_test_door_main" group="0" rgba="0.5 0 0 0.5" />
+          <body name="oven_test_door_Clear">
+            <geom mesh="oven_test_door_Clear_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="oven_test_door_Clear_material" conaffinity="0" contype="0" group="1" name="oven_test_g30" />
+            <geom type="box" pos="0.00046126 -0.21861249 -0.05492104" size="0.21909628808498383 0.0013980461517348886 0.1593700349330902" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g31" />
+          </body>
+        </body>
+        <body name="oven_test_knob_temp">
+          <joint axis="0.0 1.0 0.0" pos="-0.20488144 -0.22651148 0.24171561" limited="true" name="oven_test_knob_temp_joint" range="0.0 5.672320068981571" type="hinge" damping="0.05" armature="0.001" />
+          <geom mesh="oven_test_knob_temp_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="oven_test_knob_temp_material" conaffinity="0" contype="0" group="1" name="oven_test_g32" />
+          <geom type="cylinder" pos="-0.20504267 -0.22058901 0.24150233" size="0.016261283308267593 0.001246029743924737" quat="-8.429378084429118e-08 1.910639753077703e-07 -0.7071066498756409 -0.70710688829422" group="0" rgba="0.5 0 0 0.5" name="oven_test_g33" />
+          <geom type="box" pos="-0.20502606 -0.22822505 0.24170913" size="0.006453981623053551 0.006868559401482344 0.014491677284240723" quat="1.0 0.0 0.0 0.0" name="oven_test_knob_temp_main" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="oven_test_knob_time">
+          <joint axis="0.0 -1.0 0.0" pos="0.20878408 -0.22651148 0.24171561" limited="true" name="oven_test_knob_time_joint" range="-1.0471975511965976 3.141592653589793" type="hinge" damping="0.05" armature="0.001" />
+          <geom mesh="oven_test_knob_time_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="oven_test_knob_time_material" conaffinity="0" contype="0" group="1" name="oven_test_g35" />
+          <geom type="cylinder" pos="0.20840985 -0.22024779 0.24223804" size="0.016933094710111618 0.0013718231348320842" quat="0.7071068286895752 -0.7071067690849304 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g36" />
+          <geom type="box" pos="0.20839458 -0.22804213 0.24201801" size="0.006867044139653444 0.007157900836318731 0.015419172123074532" quat="1.0 0.0 0.0 0.0" name="oven_test_knob_time_main" group="0" rgba="0.5 0 0 0.5" />
+        </body>
+        <body name="oven_test_rack0">
+          <geom name="oven_test_reg_rack0" type="box" pos="0.003379884999999999 0.005310549999999997 -0.085907325" size="0.197394195 0.17918464 0.080419655" group="1" conaffinity="0" contype="0" rgba="0.0 1.0 0.0 0.0" />
+          <joint axis="0.0 -1.0 0.0" pos="-0.00092675 0.0055517 -0.17236303" limited="true" name="oven_test_rack0_joint" range="0.0 0.27" type="slide" damping="1" frictionloss="1" armature=".01" stiffness="0.05" />
+          <geom mesh="oven_test_rack0_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="oven_test_rack0_material" conaffinity="0" contype="0" group="1" name="oven_test_g39" />
+          <geom type="box" pos="-0.00159401 0.00519057 -0.17242928" size="0.23539897799491882 0.18345101177692413 0.001996527658775449" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g40" />
+        </body>
+        <body name="oven_test_rack1">
+          <geom name="oven_test_reg_rack1" type="box" pos="0.003424935000000004 0.0053681549999999995 0.08215494500000001" size="0.200198225 0.15334683500000001 0.074994115" group="1" conaffinity="0" contype="0" rgba="0.0 1.0 0.0 0.0" />
+          <joint axis="0.0 -1.0 0.0" pos="0.00297933 0.00590479 0.00490891" limited="true" name="oven_test_rack1_joint" range="0.0 0.27" type="slide" damping="1" frictionloss="1" armature=".01" stiffness="0.05" />
+          <geom mesh="oven_test_rack1_vis" type="mesh" solimp="0.998 0.998 0.001" solref="0.001 1" friction="0.95 0.3 0.1" material="oven_test_rack1_material" conaffinity="0" contype="0" group="1" name="oven_test_g42" />
+          <geom type="box" pos="0.00324421 -0.15580751 0.00485241" size="0.2191382348537445 0.005386208649724722 0.0009753355407156052" quat="0.9696114659309387 -0.2446499913930893 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g43" />
+          <geom type="box" pos="0.00324421 0.1698131 0.00563697" size="0.2191382497549057 0.006257435772567987 0.0009753394406288863" quat="0.9829722046852112 0.1837543398141861 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g44" />
+          <geom type="box" pos="0.21439539 0.00759415 0.00494021" size="0.008255455642938612 0.1678769439458847 0.0007354598492383959" quat="0.992330014705658 0.0 -0.12361680716276169 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g45" />
+          <geom type="box" pos="-0.20759888 0.00759415 0.00532137" size="0.008255454711616038 0.1678769439458847 0.0007354590343311426" quat="0.9903293251991272 0.0 0.13873645663261414 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g46" />
+          <geom type="box" pos="-0.2242078 0.00759608 0.00672018" size="0.008488689549267292 0.1679811328649521 0.0009384853765368462" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g47" />
+          <geom type="box" pos="0.23071461 0.00759608 0.00672018" size="0.008488678373396397 0.1679813414812088 0.0009384852019138634" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g48" />
+          <geom type="box" pos="0.0032442 0.18186837 0.00672018" size="0.2354736030101776 0.006032333709299564 0.0009753384510986507" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g49" />
+          <geom type="box" pos="0.0032442 -0.16847777 0.00672018" size="0.2354736030101776 0.007855944335460663 0.0009753387421369553" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g50" />
+          <geom type="box" pos="0.00324421 0.00548179 0.00257051" size="0.20255522429943085 0.157713383436203 0.0005935628432780504" quat="1.0 0.0 0.0 0.0" group="0" rgba="0.5 0 0 0.5" name="oven_test_g51" />
+        </body>
+        <geom name="oven_test_reg_int" type="box" pos="0.0036051 0.0057488599999999945 -0.05434541999999999" size="0.24546082 0.19720932 0.21202566" group="1" conaffinity="0" contype="0" rgba="0.0 1.0 0.0 0.0" />
+        <geom name="oven_test_reg_main" type="box" pos="-5.302000000001472e-05 0.01335668000000001 -3.00000000119649e-08" size="0.29853068 0.23436725 0.30335881" group="1" conaffinity="0" contype="0" rgba="0.0 1.0 0.0 0.0" />
+      <site pos="0.0 0.0 0.0" size="0.002 0.002 0.002" rgba="1 0 0 0" type="sphere" group="0" name="oven_test_default_site" /></body>
+    </worldbody></mujoco>

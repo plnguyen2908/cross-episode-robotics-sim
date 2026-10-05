@@ -1,0 +1,64 @@
+{
+  "base_episode": "base_episodes/breakfast_three_room",
+  "seed": 17,
+  "people": 2,
+  "cleanup": false,
+  "desk_translation_m": [
+    0.1,
+    0.08
+  ],
+  "side_table_translation_m": [
+    0.04,
+    0.04
+  ],
+  "object_yaw_jitter_deg": 4.0,
+  "source_fraction_jitter": 0.025,
+  "source_position_sampling": "uniform_reachable_edge",
+  "source_fraction_range": [
+    0.08,
+    0.92
+  ],
+  "source_inset_range_m": [
+    0.025,
+    0.1
+  ],
+  "destination_fraction_jitter": 0.015,
+  "clutter_count_per_room": [
+    0,
+    2
+  ],
+  "change_period_days": {
+    "objects": 1,
+    "furniture": 2,
+    "clutter": 2
+  },
+  "variants": [
+    {
+      "name": "office_baseline",
+      "day": 0,
+      "objects": true,
+      "furniture": false,
+      "clutter": false,
+      "already_correct": []
+    },
+    {
+      "name": "office_objects",
+      "day": 1,
+      "objects": true,
+      "furniture": false,
+      "clutter": true,
+      "already_correct": []
+    },
+    {
+      "name": "office_shifted_desk",
+      "day": 2,
+      "objects": true,
+      "furniture": true,
+      "clutter": true,
+      "already_correct": [
+        "cup_one",
+        "bowl_one"
+      ]
+    }
+  ]
+}
