@@ -14,6 +14,8 @@ The repository provides
   from three rooms, a person fills them, serve them) and making espresso;
 - **ten atomic skill families** they are built from: navigation, pick and place, doors, drawers,
   knobs, levers, buttons, insertion, sliding racks and lids, each validated on at least one fixture;
+- **a template task** (`tidy_up`: return a mug and a book to their rooms) that shows how tasks are
+  composed from the skills;
 - **a Gymnasium environment** where a learned policy drives the same robot and is scored by the
   same measured goal predicates;
 - **dataset export** from demonstrations to robomimic-style HDF5, with a minimal behavior
@@ -94,6 +96,16 @@ scripts/                          data install, skill launcher, policy rollouts,
 examples/                         replay policy, behavior cloning
 third_party/robocasa/             three-room house patch for RoboCasa
 ```
+
+## Development
+
+```bash
+pytest                 # unit tests: geometry, state logic, skill wiring
+ruff check . && ruff format --check .
+```
+
+Full demonstrations are the integration tests: run breakfast, coffee and `scripts/run_skill.sh`
+for each skill, and check `report.json` for `"success": true`.
 
 ## Status and scope
 

@@ -42,6 +42,14 @@ def finger_contact_bodies(controller):
     return touched
 
 
+def room_of(controller, info):
+    """Task room whose support currently holds the object, or None (held, fallen)."""
+    try:
+        return controller.current_room(info)
+    except StopIteration:
+        return None
+
+
 # -- breakfast: gather empty vessels, a person fills them, serve them ------
 def build_breakfast(output, seed, options):
     from cross_episode_sim.tasks.breakfast.episode import build_controller
@@ -64,7 +72,7 @@ def breakfast_after_step(controller):
         return
     vessels = {controller.model.body(i["body"]).id for i in controller.manifest["bindings"]}
     in_hand = finger_contact_bodies(controller) & vessels
-    if in_hand or not all(controller.is_filling_site(controller.current_room(i)) for i in controller.manifest["bindings"]):
+    if in_hand or not all(controller.is_filling_site(room_of(controller, i)) for i in controller.manifest["bindings"]):
         return
     controller.fill_physical_contents()
     controller.configure_phase("SERVE")
@@ -82,6 +90,24 @@ def breakfast_goals(controller):
     return goals
 
 
+# -- tidy up: the template task from docs/adding_a_task.md -----------------
+def build_tidy_up(output, seed, options):
+    from cross_episode_sim.tasks.breakfast.episode import build_controller
+    from cross_episode_sim.tasks.tidy_up import TidyUp, prepare
+
+    return build_controller(output, prepare(output), episode_class=TidyUp)
+
+
+def tidy_up_goals(controller):
+    from cross_episode_sim.tasks.tidy_up import ROLES
+
+    goals = {role: controller.verify_role(role) for role in ROLES}
+    bodies = {controller.model.body(i["body"]).id for i in controller.manifest["bindings"]}
+    goals["empty_hand"] = not finger_contact_bodies(controller) & bodies
+    return goals
+
+
 TASKS = {
     "breakfast": TaskSpec("breakfast", build_breakfast, breakfast_goals, breakfast_after_step),
+    "tidy_up": TaskSpec("tidy_up", build_tidy_up, tidy_up_goals),
 }

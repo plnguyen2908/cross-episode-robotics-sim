@@ -836,7 +836,11 @@ class BreakfastEpisode(CrossRoomManipulation):
         return 0 if CompositeEpisode(self,operations,goal).run('breakfast_for_two',steps) else 1
 
 
-def run(output, manifest, validate_only=False, episode_class=BreakfastEpisode):
+def build_controller(output, manifest, episode_class=BreakfastEpisode, overrides=None):
+    """Load the episode's scene with the robot at its start pose and return the controller.
+
+    `overrides` sets controller arguments (see controller.navigation.parse_args).
+    """
     import random
     import torch
     random.seed(manifest['seed']);np.random.seed(manifest['seed']);torch.manual_seed(manifest['seed'])
@@ -868,5 +872,10 @@ def run(output, manifest, validate_only=False, episode_class=BreakfastEpisode):
     selection=dict(selected_objects=manifest['bindings'],tables=tables,
                    empty_robot_stances={body:[spawn] for body in SUPPORTS.values()},scene_xml=scene)
     (output/'adapter.json').write_text(json.dumps(selection,indent=2))
-    runner=episode_class(args,selection,manifest)
-    return runner.run_test(validate_only)
+    for key,value in (overrides or {}).items():setattr(args,key,value)
+    return episode_class(args,selection,manifest)
+
+
+def run(output, manifest, validate_only=False, episode_class=BreakfastEpisode):
+    """Run the scripted demonstration for a prepared episode; returns a process exit code."""
+    return build_controller(output, manifest, episode_class).run_test(validate_only)

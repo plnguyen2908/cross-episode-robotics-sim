@@ -11,7 +11,7 @@ Action (float32 vector, absolute targets):
     [10]    gripper command in [0, 1]: 0 open, 1 closed
 
 Observation (dict):
-    "state":  float32 [base x, y, yaw, 7 arm joints, gripper opening in [0, 1]]
+    "state":  float32 [base x, y, yaw, 7 arm joints, gripper command in [0, 1]]
     "<camera>": uint8 HxWx3 image for each name in `cameras`
 
 `info` carries the task's measured goal predicates ("goals"), and
@@ -120,9 +120,13 @@ class TaskEnv(gym.Env):
         return np.concatenate(list(frames.values()), axis=1) if frames else None
 
     def close(self):
+        # Release GL contexts explicitly; freeing them during interpreter
+        # shutdown raises EGL errors.
         if self.renderer is not None:
             self.renderer.close()
             self.renderer = None
+        if self.controller is not None and getattr(self.controller, "renderer", None) is not None:
+            self.controller.renderer.close()
         self.controller = None
 
     # -- observations ------------------------------------------------------

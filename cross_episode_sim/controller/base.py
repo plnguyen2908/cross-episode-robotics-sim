@@ -764,6 +764,9 @@ class FridgeTransfer:
                         "time": float(self.data.time),
                         "stage": self.stage,
                         "qpos": self.data.qpos.tolist(),
+                        # Actuator commands at this instant: the actions a learned
+                        # policy imitates (see data/export.py).
+                        "ctrl": self.data.ctrl.tolist(),
                         "bread_pose": self.bread_pose().tolist(),
                         "tcp": self.tcp().tolist(),
                         "finger_contacts": contact["fingers"],

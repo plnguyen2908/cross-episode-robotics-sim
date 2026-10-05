@@ -49,5 +49,14 @@ extend-exclude = ["data", "runs"]
 select = ["E", "F", "W", "I"]
 ignore = ["E501", "E701", "E702", "E731", "E741"]
 
+[tool.ruff.lint.per-file-ignores]
+# Re-exports the edge-access helpers used by the thin-object pick skill.
+"cross_episode_sim/manipulation/thin_edge_pick.py" = ["F401"]
+# Set MUJOCO_GL / sys.path before importing MuJoCo or RoboSuite.
+"cross_episode_sim/grasping/*.py" = ["E402"]
+"cross_episode_sim/controller/base.py" = ["E402"]
+"cross_episode_sim/controller/doors.py" = ["E402"]
+"cross_episode_sim/manipulation/robocasa.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

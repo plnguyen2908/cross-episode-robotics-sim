@@ -51,7 +51,7 @@ done, storage closed and no vessel in the gripper. The person fills the vessels 
 four stand on kitchen filling surfaces and none is in the gripper, after which the serving
 phase begins.
 
-Currently registered tasks: `breakfast`. Coffee runs as a demonstration only: its machine model
+Currently registered tasks: `breakfast` and `tidy_up`. Coffee runs as a demonstration only: its machine model
 still reads the demonstrator's internal phase flags.
 
 ## Rolling out a policy

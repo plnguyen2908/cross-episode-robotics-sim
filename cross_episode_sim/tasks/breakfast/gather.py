@@ -425,6 +425,22 @@ class GatherBreakfast(OfficeBreakfastEpisode):
         return 0 if CompositeEpisode(self,ops,goal).run('breakfast_gather_fill_serve',steps) else 1
 
 
+def prepare_episode(output, seed=None, people=None, sources=None, config_path=DEFAULT_CONFIG):
+    """Author and settle a breakfast episode in `output`; returns its manifest.
+
+    `sources='storage'` starts one mug in a drawer and one bowl in a cabinet.
+    """
+    config=json.loads(Path(config_path).read_text())
+    if people is not None:config['people']=people
+    if seed is not None:config['seed']=seed
+    roles=vessel_roles(config['people'])
+    config['initial_sources']={r:config['initial_sources'][r] for r in roles}
+    if sources=='storage':
+        config['initial_sources'].update(cup_one='drawer',bowl_one='cabinet')
+    config['storage_profile']=sources or config.get('storage_profile','rooms')
+    return prepare(config,Path(output).resolve())
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,default=DEFAULT_CONFIG)
@@ -434,17 +450,10 @@ def main():
     parser.add_argument('--sources',choices=('rooms','storage'),default=None)
     parser.add_argument('--prepare-only',action='store_true')
     parser.add_argument('--validate-only',action='store_true')
-    args=parser.parse_args();config=json.loads(args.config.read_text())
-    if args.people is not None:config['people']=args.people
-    if args.seed is not None:config['seed']=args.seed
-    roles=vessel_roles(config['people'])
-    config['initial_sources']={r:config['initial_sources'][r] for r in roles}
-    if args.sources=='storage':
-        config['initial_sources'].update(cup_one='drawer',bowl_one='cabinet')
-    config['storage_profile']=args.sources or config.get('storage_profile','rooms')
+    args=parser.parse_args()
     output=args.output.resolve()
-    manifest=prepare(config,output)
-    print(json.dumps({'prepared':str(output),'initial_sources':config['initial_sources'],
+    manifest=prepare_episode(output,args.seed,args.people,args.sources,args.config)
+    print(json.dumps({'prepared':str(output),'initial_sources':{i['role']:i['initial_source'] for i in manifest['bindings']},
         'content_model':manifest['content_model']}),flush=True)
     if args.prepare_only:return 0
     result=run(output,manifest,args.validate_only,episode_class=GatherBreakfast)
