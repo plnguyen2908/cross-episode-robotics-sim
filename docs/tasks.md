@@ -107,6 +107,19 @@ Each skill family is validated on at least one fixture and object. Launch a demo
 | Slide racks | [oven-rack](videos/oven-rack.mp4), [oven-pick-place](videos/oven-pick-place.mp4) | Oven031 upper rack, empty and loaded |
 | Open/close lids | [blender-lid](videos/blender-lid.mp4) | Blender008 lid removed, set down and reseated |
 
+Time-lapse previews (click a name for the full video, or see the
+[project page](https://plnguyen2908.github.io/cross-episode-robotics-sim/)):
+
+| | |
+|---|---|
+| ![cross-room](previews/cross-room.gif)<br>[cross-room](videos/cross-room.mp4) | ![drawer-pick-place](previews/drawer-pick-place.gif)<br>[drawer-pick-place](videos/drawer-pick-place.mp4) |
+| ![oven-pick-place](previews/oven-pick-place.gif)<br>[oven-pick-place](videos/oven-pick-place.mp4) | ![cabinet-transfer](previews/cabinet-transfer.gif)<br>[cabinet-transfer](videos/cabinet-transfer.mp4) |
+| ![cabinet-door](previews/cabinet-door.gif)<br>[cabinet-door](videos/cabinet-door.mp4) | ![oven-rack](previews/oven-rack.gif)<br>[oven-rack](videos/oven-rack.mp4) |
+| ![drawer](previews/drawer.gif)<br>[drawer](videos/drawer.mp4) | ![drawer-loop](previews/drawer-loop.gif)<br>[drawer-loop](videos/drawer-loop.mp4) |
+| ![stove-knob](previews/stove-knob.gif)<br>[stove-knob](videos/stove-knob.mp4) | ![faucet](previews/faucet.gif)<br>[faucet](videos/faucet.mp4) |
+| ![toaster-lever](previews/toaster-lever.gif)<br>[toaster-lever](videos/toaster-lever.mp4) | ![microwave-button](previews/microwave-button.gif)<br>[microwave-button](videos/microwave-button.mp4) |
+| ![toaster-insertion](previews/toaster-insertion.gif)<br>[toaster-insertion](videos/toaster-insertion.mp4) | ![blender-lid](previews/blender-lid.gif)<br>[blender-lid](videos/blender-lid.mp4) |
+
 These are the tested ranges, not promises for every RoboCasa asset: the drawer travelled 20 cm
 (35 cm in the transfer setup), the oven door opened 65.9° within its 1.15 rad limit and the rack
 extended about 15 cm.

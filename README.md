@@ -21,13 +21,14 @@ The repository provides
 - **dataset export** from demonstrations to robomimic-style HDF5, with a minimal behavior
   cloning example.
 
-Watch every demonstration, including the atomic skills, in the browser on the
-[project page](https://claude.ai/artifact/8VJiwTU1tpKnBtSsYZWN36#skills). The video files are also in
-[`docs/videos/`](docs/videos).
+Watch every demonstration, including the 14 atomic skills, on the
+[project page](https://plnguyen2908.github.io/cross-episode-robotics-sim/). The previews below
+are time-lapses; the full videos (3× speed) are in [`docs/videos/`](docs/videos).
 
 | Breakfast for two | Making espresso |
 |---|---|
-| [▶ breakfast.mp4](docs/videos/breakfast.mp4) · 816 s simulated, shown at 3× | [▶ coffee.mp4](docs/videos/coffee.mp4) · 330 s simulated, shown at 3× |
+| ![Breakfast for two, time-lapse](docs/previews/breakfast.gif) | ![Making espresso, time-lapse](docs/previews/coffee.gif) |
+| [▶ breakfast.mp4](docs/videos/breakfast.mp4) · 816 s simulated | [▶ coffee.mp4](docs/videos/coffee.mp4) · 330 s simulated |
 | Collect two mugs and two bowls from three rooms, wait while a person fills them with randomly chosen food, then carry each filled vessel to the office desk (the dining-room table). | Twist out the portafilter, pour 32 grounds from a box, reinstall and lock it, put a cup under the spout, press power, then brew. |
 
 ## Why

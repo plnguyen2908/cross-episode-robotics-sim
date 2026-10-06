@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cross-Episode Robotics Sim</title>
+<style>
+:root{--bg:#f3f5f4;--panel:#fff;--ink:#18201d;--muted:#5d6a65;--rule:#d5dcd9;--accent:#0f6e64}
+@media (prefers-color-scheme:dark){:root{--bg:#111715;--panel:#18201d;--ink:#e3ebe7;--muted:#97a6a0;--rule:#2c3733;--accent:#4fbfb0;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;padding:32px 16px 64px}
+main{max-width:1120px;margin:0 auto;display:grid;gap:32px}
+h1{font-size:2rem;margin:0}
+h2{font-size:1.3rem;margin:0;border-bottom:1px solid var(--rule);padding-bottom:6px}
+p{margin:0;max-width:70ch;color:var(--muted)}
+a{color:var(--accent)}
+section{display:grid;gap:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:14px}
+.wide{grid-template-columns:1fr}
+figure{margin:0;background:var(--panel);border:1px solid var(--rule);border-radius:6px;overflow:hidden}
+video{width:100%;display:block;background:#000}
+figcaption{padding:10px 12px;display:grid;gap:2px}
+figcaption b{font-size:1rem}
+figcaption span{font-size:.85rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<header style="display:grid;gap:8px">
+  <h1>Cross-Episode Robotics Sim</h1>
+  <p>Household tasks for a TidyBot++/Franka mobile manipulator in a three-room RoboCasa house. Every video is a full oracle demonstration rendered after physics ends, shown at 3× speed. Source and setup: <a href="https://github.com/plnguyen2908/cross-episode-robotics-sim">GitHub</a>.</p>
+</header>
+
+<section>
+  <h2>Composite tasks</h2>
+  <div class="grid wide">
+    <figure><video src="videos/breakfast.mp4" controls muted playsinline preload="metadata"></video>
+      <figcaption><b>Breakfast for two</b><span>Collect two mugs and two bowls from three rooms, wait while a person fills them with food, then serve them at the office desk. 816 s simulated.</span></figcaption></figure>
+    <figure><video src="videos/coffee.mp4" controls muted playsinline preload="metadata"></video>
+      <figcaption><b>Making espresso</b><span>Remove the portafilter, dose 32 grounds, reinstall and lock it, place a cup, power on and brew. 330 s simulated.</span></figcaption></figure>
+  </div>
+</section>
+
+<section>
+  <h2>Atomic skills</h2>
+  <div class="grid" id="skills"></div>
+</section>
+</main>
+<script>
+const skills=[
+ ['cross-room','Cross-room carry','Pick a honey bottle in the dining room, carry it to the kitchen, place it.'],
+ ['drawer-pick-place','Drawer pick and place','Pick an egg from an open drawer and put it back.'],
+ ['oven-pick-place','Oven pick and place','Dining table to the oven rack and back.'],
+ ['cabinet-transfer','Cabinet round trip','Place an egg on a cabinet shelf, close, reopen, retrieve, carry to the table.'],
+ ['cabinet-door','Cabinet door','Open, release, regrasp and close a native cabinet door.'],
+ ['oven-rack','Oven rack','Open the oven, pull the rack, push it back, close the oven.'],
+ ['drawer','Drawer','Open, release, regrasp and close a kitchen drawer.'],
+ ['drawer-loop','Drawer round trip','Closed drawer to the dining table and back.'],
+ ['stove-knob','Stove knob','Turn a burner knob on and off.'],
+ ['faucet','Faucet','Lever the faucet on, release, regrasp, off.'],
+ ['toaster-lever','Toaster lever','Press the toaster lever, release and tuck.'],
+ ['microwave-button','Microwave buttons','Press Start, release, press Stop.'],
+ ['toaster-insertion','Toaster insertion','Pick a bread slice and insert it into the toaster.'],
+ ['blender-lid','Blender lid','Remove the lid, set it down and reseat it.']];
+document.getElementById('skills').innerHTML=skills.map(([f,t,d])=>
+ `<figure><video src="videos/${f}.mp4" controls muted playsinline preload="metadata"></video><figcaption><b>${t}</b><span>${d}</span></figcaption></figure>`).join('');
+</script>
+</body>
+</html>
