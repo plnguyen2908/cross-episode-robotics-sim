@@ -33,7 +33,7 @@ git -C external/robocasa checkout 4f8a298
 git -C external/robocasa apply "$PWD/third_party/robocasa/three_room_house.patch"
 pip install -e external/robosuite -e external/robocasa
 python -m robocasa.scripts.setup_macros
-python -m robocasa.scripts.download_kitchen_assets   # about 10 GB
+python -m robocasa.scripts.download_kitchen_assets   # about 23 GB on disk
 deactivate
 ```
 
@@ -49,7 +49,7 @@ pip install -e ".[dev]"
 
 This installs MolmoSpaces from GitHub at the pinned commit `7351388`, which supplies the FR3 and
 Robotiq models, MolmoSpaces object assets and the A* planner. MolmoSpaces downloads its assets
-on first use into `~/.cache/molmo-spaces-resources` and `~/.cache/molmospaces/assets`; set
+(about 20 GB) on first use into `~/.cache/molmo-spaces-resources` and `~/.cache/molmospaces/assets`; set
 `MLSPACES_CACHE_DIR` and `MLSPACES_ASSETS_DIR` to put them elsewhere. Asset versions are pinned
 by MolmoSpaces, so a scene authored on one machine resolves to the same files on another.
 

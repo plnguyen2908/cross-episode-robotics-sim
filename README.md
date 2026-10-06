@@ -67,7 +67,7 @@ git -C external/robocasa checkout 4f8a298
 git -C external/robocasa apply "$PWD/third_party/robocasa/three_room_house.patch"
 pip install -e external/robosuite -e external/robocasa
 python -m robocasa.scripts.setup_macros
-python -m robocasa.scripts.download_kitchen_assets      # ~10 GB
+python -m robocasa.scripts.download_kitchen_assets      # ~23 GB on disk
 deactivate
 
 # This package (environment: sim; needs a CUDA GPU for cuRobo)
@@ -75,6 +75,10 @@ python3.11 -m venv ~/.venvs/sim && source ~/.venvs/sim/bin/activate
 pip install -e ".[dev]"
 export ROBOCASA_DIR="$PWD/external/robocasa/robocasa"   # the inner package directory
 python scripts/install_data.py                           # starting scenes, grasp registry (~500 MB)
+# MolmoSpaces downloads robot models and object assets (~20 GB) on first use into ~/.cache;
+# to put them elsewhere, set these before the first run:
+#   export MLSPACES_CACHE_DIR=/big/disk/molmo-spaces-resources
+#   export MLSPACES_ASSETS_DIR=/big/disk/molmospaces-assets
 
 # Run demonstrations (headless rendering through EGL)
 export MUJOCO_GL=egl
