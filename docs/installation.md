@@ -20,14 +20,18 @@ named by `ROBOCASA_DIR`.
 ## 2. RoboCasa with the three-room house
 
 The house used by every task joins a native RoboCasa kitchen to a furnished dining room and
-living room. That extension is a patch against RoboCasa commit `4f8a298`:
+living room. That extension is a patch against RoboCasa commit `4f8a298`. Run this from the
+root of this checkout; the clones go into the git-ignored `external/` directory, because clones
+directly in the root would shadow the installed `robocasa` and `robosuite` packages on import:
 
 ```bash
 python3.11 -m venv ~/.venvs/robocasa && source ~/.venvs/robocasa/bin/activate
-git clone https://github.com/ARISE-Initiative/robosuite && git -C robosuite checkout 5ce6643
-git clone https://github.com/robocasa/robocasa && git -C robocasa checkout 4f8a298
-git -C robocasa apply /path/to/cross-episode-robotics-sim/third_party/robocasa/three_room_house.patch
-pip install -e robosuite -e robocasa
+git clone https://github.com/ARISE-Initiative/robosuite external/robosuite
+git -C external/robosuite checkout 5ce6643
+git clone https://github.com/robocasa/robocasa external/robocasa
+git -C external/robocasa checkout 4f8a298
+git -C external/robocasa apply "$PWD/third_party/robocasa/three_room_house.patch"
+pip install -e external/robosuite -e external/robocasa
 python -m robocasa.scripts.setup_macros
 python -m robocasa.scripts.download_kitchen_assets   # about 10 GB
 deactivate
@@ -40,7 +44,6 @@ registry entries and two preview scripts (`python -m robocasa.scripts.preview_ki
 
 ```bash
 python3.11 -m venv ~/.venvs/sim && source ~/.venvs/sim/bin/activate
-cd cross-episode-robotics-sim
 pip install -e ".[dev]"
 ```
 
@@ -53,7 +56,7 @@ by MolmoSpaces, so a scene authored on one machine resolves to the same files on
 ## 4. Data bundle
 
 ```bash
-export ROBOCASA_DIR=/path/to/robocasa/robocasa     # inner package directory, contains models/
+export ROBOCASA_DIR="$PWD/external/robocasa/robocasa"   # inner package directory, contains models/
 python scripts/install_data.py
 ```
 

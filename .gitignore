@@ -10,3 +10,5 @@ dist/
 /data/
 /runs/
 /datasets/
+# RoboCasa and robosuite clones
+/external/

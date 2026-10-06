@@ -54,19 +54,26 @@ Two Python 3.11 environments are used, because RoboCasa pins `mujoco==3.3.1` whi
 simulator here uses `mujoco==3.5.0`. The RoboCasa environment is only needed to download its
 assets and to regenerate starting scenes.
 
+Run these from the root of this checkout. robosuite and robocasa are cloned into `external/`
+(git-ignored); cloning them directly into the root would shadow the installed packages on import.
+
 ```bash
 # RoboCasa at the tested commit, with the three-room house patch (environment: robocasa)
-git clone https://github.com/ARISE-Initiative/robosuite && git -C robosuite checkout 5ce6643
-git clone https://github.com/robocasa/robocasa && git -C robocasa checkout 4f8a298
-git -C robocasa apply ../cross-episode-robotics-sim/third_party/robocasa/three_room_house.patch
-pip install -e robosuite -e robocasa
+python3.11 -m venv ~/.venvs/robocasa && source ~/.venvs/robocasa/bin/activate
+git clone https://github.com/ARISE-Initiative/robosuite external/robosuite
+git -C external/robosuite checkout 5ce6643
+git clone https://github.com/robocasa/robocasa external/robocasa
+git -C external/robocasa checkout 4f8a298
+git -C external/robocasa apply "$PWD/third_party/robocasa/three_room_house.patch"
+pip install -e external/robosuite -e external/robocasa
 python -m robocasa.scripts.setup_macros
 python -m robocasa.scripts.download_kitchen_assets      # ~10 GB
+deactivate
 
 # This package (environment: sim; needs a CUDA GPU for cuRobo)
-cd cross-episode-robotics-sim
+python3.11 -m venv ~/.venvs/sim && source ~/.venvs/sim/bin/activate
 pip install -e ".[dev]"
-export ROBOCASA_DIR=/path/to/robocasa/robocasa           # the inner package directory
+export ROBOCASA_DIR="$PWD/external/robocasa/robocasa"   # the inner package directory
 python scripts/install_data.py                           # starting scenes, grasp registry (~500 MB)
 
 # Run demonstrations (headless rendering through EGL)
