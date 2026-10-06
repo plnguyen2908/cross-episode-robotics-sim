@@ -97,7 +97,7 @@ Each skill family is validated on at least one fixture and object. Launch a demo
 | Family | Skill demos (video) | Validated on |
 |---|---|---|
 | Navigation | [cross-room](videos/cross-room.mp4) | same-room and cross-room routes, empty and carrying, honey bottle |
-| Pick and place | [cross-room](videos/cross-room.mp4), [drawer-pick-place](videos/drawer-pick-place.mp4), [oven-pick-place](videos/oven-pick-place.mp4), `cabinet-transfer`¹ | table, counter, drawer and oven rack; honey bottle and egg |
+| Pick and place | [cross-room](videos/cross-room.mp4), [drawer-pick-place](videos/drawer-pick-place.mp4), [oven-pick-place](videos/oven-pick-place.mp4), [cabinet-transfer](videos/cabinet-transfer.mp4) | table, counter, drawer and oven rack; honey bottle and egg |
 | Open/close doors | [cabinet-door](videos/cabinet-door.mp4), [oven-rack](videos/oven-rack.mp4) | native cabinet door; Oven031 drop-down door |
 | Open/close drawers | [drawer](videos/drawer.mp4), [drawer-loop](videos/drawer-loop.mp4) | one native kitchen drawer, with release and regrasp |
 | Twist knobs | [stove-knob](videos/stove-knob.mp4) | Stove002 burner knob on and off |
@@ -106,10 +106,6 @@ Each skill family is validated on at least one fixture and object. Launch a demo
 | Insertion | [toaster-insertion](videos/toaster-insertion.mp4) | SandwichBread005 into Toaster033 |
 | Slide racks | [oven-rack](videos/oven-rack.mp4), [oven-pick-place](videos/oven-pick-place.mp4) | Oven031 upper rack, empty and loaded |
 | Open/close lids | [blender-lid](videos/blender-lid.mp4) | Blender008 lid removed, set down and reseated |
-
-¹ Known issue: the cabinet round trip (open, place the egg on the shelf, close, reopen, retrieve,
-carry to the dining table) currently fails on its final lift because cuRobo finds no plan. The
-other 13 demonstrations pass with the current code.
 
 These are the tested ranges, not promises for every RoboCasa asset: the drawer travelled 20 cm
 (35 cm in the transfer setup), the oven door opened 65.9° within its 1.15 rad limit and the rack

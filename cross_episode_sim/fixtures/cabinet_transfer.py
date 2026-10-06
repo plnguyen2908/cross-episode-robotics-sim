@@ -27,6 +27,8 @@ class CabinetTransfer(CabinetDoorTest):
     # Rounded objects can roll after release; destination support is checked
     # before and after withdrawal instead of requiring instant stillness.
     allow_supported_release_motion = True
+    # Gap between a single released object and the shelf's front edge.
+    shelf_front_clearance = .06
 
     def run_composite_plan(self, task_id, steps, verify_goal):
         """Run grounded cabinet steps without the hard-coded round-trip sequence.
@@ -239,7 +241,8 @@ class CabinetTransfer(CabinetDoorTest):
 
     def move(self, stage, pose):
         if stage in ('align bottle in front of cabinet opening',
-                     'insert object through cabinet opening', 'withdraw empty fingers from cabinet'):
+                     'insert object through cabinet opening', 'withdraw empty fingers from cabinet',
+                     'extract held bottle from cabinet'):
             try:
                 return super().move(stage, pose)
             except RuntimeError as exc:
@@ -273,7 +276,7 @@ class CabinetTransfer(CabinetDoorTest):
         if self.source == SHELF and stage == 'lift bread':
             extracted = self.tcp().copy()
             extracted[1, 3] = min(extracted[1, 3]-.28, -.82)
-            super().move('extract held bottle from cabinet', extracted)
+            self.move('extract held bottle from cabinet', extracted)
             pose = extracted.copy()
             pose[2, 3] = self.pickup_start_height + .14 + (extracted[2, 3]-self.bread_pose()[2, 3])
             return super().move('raise extracted bottle', pose)
@@ -304,14 +307,20 @@ class CabinetTransfer(CabinetDoorTest):
         self.destination_pose[2, 3] = top-bottom
         self.placement_pose_options = []
 
-    def shelf_release_ready(self):
-        """Use measured object geometry, not a fixed insertion depth."""
+    def shelf_release_ready(self, front_clearance=.005):
+        """Use measured object geometry, not a fixed insertion depth.
+
+        front_clearance is the gap required between the object and the shelf's
+        front edge (local -y); every other edge keeps a 5 mm margin.
+        """
         gid = self.model.geom(SHELF_GEOM).id
         rotation = self.data.geom_xmat[gid].reshape(3, 3)
         points = (self.bread_vertices()-self.data.geom_xpos[gid]) @ rotation
         half = self.model.geom_size[gid]
         margin = .005
-        inside = np.all(points[:, :2].min(axis=0) >= -half[:2]+margin) and np.all(
+        low = -half[:2]+margin
+        low[1] = -half[1]+front_clearance
+        inside = np.all(points[:, :2].min(axis=0) >= low) and np.all(
             points[:, :2].max(axis=0) <= half[:2]-margin)
         gap = float(points[:, 2].min()-half[2])
         return bool(inside and -.002 <= gap <= .03)
@@ -356,16 +365,30 @@ class CabinetTransfer(CabinetDoorTest):
         self.move('align bottle in front of cabinet opening', pose @ np.linalg.inv(self.grasp_relative))
         # Stop at the first wholly supported object pose. A 41 mm step can
         # overshoot that release window and drive the gripper into the shelf.
-        for y in np.linspace(-.67, -.465, 22)[1:]:
-            if self.shelf_release_ready():
+        # A single object goes well behind the front edge: a rounded one (the
+        # egg) rolls a few centimetres as the fingers open, and released 5 mm
+        # inside the edge it rolls off. Slot packing keeps its validated depth.
+        front_clearance = .005 if slot_count is not None else self.shelf_front_clearance
+        deepest = -.465 if slot_count is not None else -.40
+        for y in np.linspace(-.67, deepest, 1+int(round((deepest+.67)/.00976)))[1:]:
+            if self.shelf_release_ready(front_clearance):
                 break
             pose[1, 3] = y
             if slot_count is None:
                 pose[0, 3] = 2.49 + lateral_offset + .035*np.clip((y+.62)/.155, 0., 1.)
-            self.move('insert object through cabinet opening', pose @ np.linalg.inv(self.grasp_relative))
+            try:
+                self.move('insert object through cabinet opening', pose @ np.linalg.inv(self.grasp_relative))
+            except RuntimeError as exc:
+                # Going deeper is a margin, not a requirement: once the object
+                # is wholly over the shelf, release where the hand still fits.
+                if slot_count is not None or not self.shelf_release_ready():
+                    raise
+                self.record(deeper_insertion_rejected=str(exc))
+                break
         if not self.shelf_release_ready():
             raise RuntimeError('No supported cabinet release pose reached')
-        self.record(cabinet_release_ready=True, object_position=self.bread_pose()[:3, 3].tolist())
+        self.record(cabinet_release_ready=True, object_position=self.bread_pose()[:3, 3].tolist(),
+                    shelf_front_clearance_reached=bool(self.shelf_release_ready(front_clearance)))
         self.holding_loaf = False
         self.release_cabinet_gripper()
         self.tick(1.)
@@ -395,6 +418,23 @@ class CabinetTransfer(CabinetDoorTest):
         else:
             self.embodiment.open_gripper(self)
 
+    def withdraw_along_candidates(self, offsets, rejected):
+        """Withdraw 20 cm straight back along the first mesh-clear offset."""
+        start = self.tcp().copy()
+        for dx, dz in offsets:
+            candidate = start.copy()
+            candidate[:3, 3] += [dx, -.20, dz]
+            try:
+                path = self.plan_contact_path('withdraw empty fingers from cabinet', candidate)
+            except RuntimeError as exc:
+                rejected.append(str(exc))
+                continue
+            self.record(cabinet_withdrawal_offset=[dx, -.20, dz],
+                        rejected_withdrawal_paths=rejected)
+            self.mesh_contact_move('withdraw empty fingers from cabinet', candidate, path=path)
+            return
+        raise RuntimeError(f'No mesh-clear empty-hand cabinet withdrawal: {rejected}')
+
     def withdraw_after_cabinet_placement(self):
         retreat = self.tcp().copy()
         sideways = -.035
@@ -405,25 +445,20 @@ class CabinetTransfer(CabinetDoorTest):
             sideways = float(np.clip(self.data.geom_xpos[gid, 0]-retreat[0, 3], -.03, .03))
         retreat[:2, 3] += [sideways, -.20]
         if getattr(self, 'cabinet_slot_count', None):
-            start = self.tcp().copy()
-            rejected = []
-            for dx, dz in ((0., 0.), (sideways, 0.), (-sideways, 0.),
-                           (0., .015), (0., -.015)):
-                candidate = start.copy()
-                candidate[:3, 3] += [dx, -.20, dz]
-                try:
-                    path = self.plan_contact_path('withdraw empty fingers from cabinet', candidate)
-                except RuntimeError as exc:
-                    rejected.append(str(exc))
-                    continue
-                self.record(cabinet_withdrawal_offset=[dx, -.20, dz],
-                            rejected_withdrawal_paths=rejected)
-                self.mesh_contact_move('withdraw empty fingers from cabinet', candidate, path=path)
-                break
-            else:
-                raise RuntimeError(f'No mesh-clear empty-hand cabinet withdrawal: {rejected}')
+            self.withdraw_along_candidates(((0., 0.), (sideways, 0.), (-sideways, 0.),
+                                            (0., .015), (0., -.015)), [])
         else:
-            self.move('withdraw empty fingers from cabinet', retreat)
+            try:
+                self.move('withdraw empty fingers from cabinet', retreat)
+            except RuntimeError as exc:
+                if not any(message in str(exc) for message in (
+                        'cuRobo failed to plan', 'No nearby placement IK')):
+                    raise
+                # A deep release leaves the wrist near its orientation limit
+                # for the straight retreat; try nearby straight-back offsets.
+                self.withdraw_along_candidates(((0., 0.), (-sideways, 0.), (sideways, .015),
+                                                (sideways, -.015), (0., .015), (0., -.015)),
+                                               [str(exc)])
         self.embodiment.open_gripper(self)
         self.tick(.2)
         self.tuck_for_navigation()
