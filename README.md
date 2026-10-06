@@ -60,7 +60,7 @@ python scripts/install_data.py                           # starting scenes, gras
 export MUJOCO_GL=egl
 python -m cross_episode_sim.tasks.breakfast.gather --seed 17 --output runs/breakfast
 python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee
-scripts/run_skill.sh drawer runs/drawer
+scripts/run_skill.sh drawer runs/drawer      # any of the 14 skill demos, see docs/tasks.md
 ```
 
 Each run directory holds `report.json` (measured outcome and every stage), `trace.json`
@@ -116,7 +116,9 @@ for each skill, and check `report.json` for `"success": true`.
 - The policy environment supports **breakfast**. Coffee's machine model still reads the
   demonstrator's internal phase flags, so coffee runs as a demonstration only for now.
 - Composite tasks are validated on the seeds listed in [docs/tasks.md](docs/tasks.md); atomic
-  skills on the fixture and object listed there, not on every RoboCasa asset.
+  skills on the fixture and object listed there, not on every RoboCasa asset. 13 of the 14 skill
+  demonstrations pass with the current code; the cabinet round trip fails on its final lift
+  (see docs/tasks.md).
 
 ## Acknowledgments
 

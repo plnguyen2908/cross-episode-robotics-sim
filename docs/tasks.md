@@ -94,18 +94,22 @@ state model with no fluid or heat simulation.
 Each skill family is validated on at least one fixture and object. Launch a demonstration with
 `scripts/run_skill.sh <skill> [output_dir]`.
 
-| Family | Skill demo | Validated on |
+| Family | Skill demos (video) | Validated on |
 |---|---|---|
-| Navigation | `cross-room` | same-room and cross-room routes, empty and carrying, honey bottle |
-| Pick and place | `cross-room`, `cabinet-transfer`, `drawer-pick-place`, `oven-pick-place` | table, counter, cabinet shelf, drawer and oven rack; honey bottle and egg |
-| Open/close doors | `cabinet-door`, `oven-rack` | native cabinet door; Oven031 drop-down door |
-| Open/close drawers | `drawer`, `drawer-loop` | one native kitchen drawer, with release and regrasp |
-| Twist knobs | `stove-knob` | Stove002 burner knob on and off |
-| Turn levers | `faucet`, `toaster-lever` | sink faucet on and off; Toaster033 lever |
-| Press buttons | `microwave-button` | microwave Start and Stop |
-| Insertion | `toaster-insertion` | SandwichBread005 into Toaster033 |
-| Slide racks | `oven-rack`, `oven-pick-place` | Oven031 upper rack, empty and loaded |
-| Open/close lids | `blender-lid` | Blender008 lid removed, set down and reseated |
+| Navigation | [cross-room](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_cross-room.mp4) | same-room and cross-room routes, empty and carrying, honey bottle |
+| Pick and place | [cross-room](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_cross-room.mp4), [drawer-pick-place](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_drawer-pick-place.mp4), [oven-pick-place](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_oven-pick-place.mp4), `cabinet-transfer`¹ | table, counter, drawer and oven rack; honey bottle and egg |
+| Open/close doors | [cabinet-door](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_cabinet-door.mp4), [oven-rack](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_oven-rack.mp4) | native cabinet door; Oven031 drop-down door |
+| Open/close drawers | [drawer](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_drawer.mp4), [drawer-loop](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_drawer-loop.mp4) | one native kitchen drawer, with release and regrasp |
+| Twist knobs | [stove-knob](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_stove-knob.mp4) | Stove002 burner knob on and off |
+| Turn levers | [faucet](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_faucet.mp4), [toaster-lever](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_toaster-lever.mp4) | sink faucet on and off; Toaster033 lever |
+| Press buttons | [microwave-button](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_microwave-button.mp4) | microwave Start and Stop |
+| Insertion | [toaster-insertion](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_toaster-insertion.mp4) | SandwichBread005 into Toaster033 |
+| Slide racks | [oven-rack](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_oven-rack.mp4), [oven-pick-place](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_oven-pick-place.mp4) | Oven031 upper rack, empty and loaded |
+| Open/close lids | [blender-lid](https://github.com/plnguyen2908/cross-episode-robotics-sim/releases/download/data-v1/skill_blender-lid.mp4) | Blender008 lid removed, set down and reseated |
+
+¹ Known issue: the cabinet round trip (open, place the egg on the shelf, close, reopen, retrieve,
+carry to the dining table) currently fails on its final lift because cuRobo finds no plan. The
+other 13 demonstrations pass with the current code.
 
 These are the tested ranges, not promises for every RoboCasa asset: the drawer travelled 20 cm
 (35 cm in the transfer setup), the oven door opened 65.9° within its 1.15 rad limit and the rack
