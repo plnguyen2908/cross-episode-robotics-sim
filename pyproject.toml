@@ -13,7 +13,7 @@ authors = [{ name = "Le Thien Phuc Nguyen" }]
 dependencies = [
     "molmo-spaces @ git+https://github.com/allenai/molmospaces@735138876887eb64650742631b8dda841dd264bf",
     "mujoco==3.5.0",
-    "nvidia-curobo==1.0",
+    "nvidia-curobo[cu12] @ git+https://github.com/NVlabs/curobo@78fd485fa82d9b9a063fb4985e371814587e666a",
     "torch>=2.7",
     "numpy>=2.0",
     "scipy>=1.14",
