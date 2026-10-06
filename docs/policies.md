@@ -112,11 +112,22 @@ Each episode directory gets `rollout.mp4` and `result.json` (steps, success, goa
        --policy-arg dataset=datasets/breakfast.hdf5 --output runs/replay_check
    ```
 
-## Where cross-episode memory fits
+## Using past episodes
 
-The intended setup keeps the low-level policy fixed and adds memory at the planning level:
-retrieval of earlier episodes in the same house informs which subtask to do next, with which
-parameters and from which base pose. The demonstrator's composite episodes already expose that
-level. Each `CompositeEpisode` step is a named operation with arguments, and `report.json`
-records every operation's arguments, the candidates tried and the one accepted, so a memory
-module can be trained or evaluated on the same structure the demonstrations use.
+The goal of the project is to finish the current episode using experience from past ones,
+retrieved by similarity or taken in full. Keep the low-level policy fixed and let past episodes
+inform the planning level: which subtask to do next, with which arguments, from which base pose,
+and which candidates to skip because they failed before.
+
+The recorded episodes expose exactly that level. In every run directory:
+
+- `instruction.txt` and `task_manifest.json` describe the task and the scene it ran in;
+- `composite_execution.json` lists the plan as named operations with arguments, with timing and
+  outcome for each;
+- `report.json` holds every stage's measurements, the candidates each skill tried, the one it
+  accepted, and the measured goal evidence;
+- `rejected_trials/` keeps the failed attempts with their reasons;
+- `trace.json` is the full state trajectory, exportable as training data.
+
+To evaluate, run the same new episode with and without access to the past ones and compare
+success, time to completion and the number of failed attempts.

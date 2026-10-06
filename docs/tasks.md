@@ -54,9 +54,9 @@ happened, storage is closed and the hand is empty.
 
 **Variation.** `--seed` selects food fillings, source positions along reachable table edges and
 small furniture offsets. `configs/breakfast_gather_fill_serve.json` defines a schedule of
-day-to-day changes (objects every day, furniture and clutter every two days) for repeated
-episodes in the same house. `--people 1` serves one setting; `--sources storage` starts one
-mug in a drawer and one bowl in a cabinet.
+day-to-day changes (objects every day, furniture and clutter every two days), producing a
+history of past episodes in the same house. `--people 1` serves one setting; `--sources storage`
+starts one mug in a drawer and one bowl in a cabinet.
 
 **Validated.** Seed 17 (816 s simulated, 13 trips, no in-place turns); seeds 17 and 18 for
 randomized fillings.

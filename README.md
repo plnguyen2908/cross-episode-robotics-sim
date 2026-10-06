@@ -1,7 +1,7 @@
 # Cross-Episode Robotics Sim
 
 Multi-room household tasks for a mobile manipulator in [RoboCasa](https://robocasa.ai), built
-for studying robots that get better at the same task each time they repeat it.
+for studying how a robot can use its past episodes to finish the current one.
 
 A TidyBot++ holonomic base carries a Franka FR3 arm with a Robotiq 2F-85 gripper through a
 kitchen, dining room and living room. Everything is physically simulated in MuJoCo: objects move
@@ -28,12 +28,21 @@ The repository provides
 
 ## Why
 
-Physical agents today pair a planner with skill policies and start every episode from scratch.
-The hypothesis behind this project is that an episodic memory over a fixed base policy can
-replace search with recall: which dock works beside a crowded counter, which grasp failed
-yesterday, where the mugs were put away. Existing benchmarks evaluate each query once. These
-tasks are meant to be repeated over many simulated days in the same house, so improvement
-across episodes can be measured.
+Given past episodes, either the most similar ones or all of them, how can a robot use that
+experience to finish the current episode?
+
+Physical agents today pair a planner with skill policies and start every episode from scratch,
+even when they have done something similar before. A past episode records what worked and what
+did not: the sequence of subtasks that completed a similar task, which dock reached a crowded
+counter, which grasp slipped, where the mugs were put away, how long the machine took to warm up.
+Retrieving that experience should let the robot replace search with recall in the current
+episode.
+
+The tasks here generate those episodes. Every run is a complete record (the instruction, the
+plan of operations, every action and measured outcome, and the attempts that failed and were
+rolled back) in a house whose layout and objects change from day to day. That gives both the
+experience to retrieve from and a way to measure whether using it helps finish a new episode,
+compared with starting from scratch.
 
 ## Quick start
 
