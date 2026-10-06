@@ -59,7 +59,9 @@ history of past episodes in the same house. `--people 1` serves one setting; `--
 starts one mug in a drawer and one bowl in a cabinet.
 
 **Validated.** Seed 17 (816 s simulated, 13 trips, no in-place turns); seeds 17 and 18 for
-randomized fillings.
+randomized fillings; seed 17 with `--sources storage` (1381 s simulated: drawer and cabinet
+opened, emptied and closed; [preview](previews/breakfast-storage.gif),
+[video](videos/breakfast-storage.mp4)).
 
 ## Making espresso
 

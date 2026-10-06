@@ -124,11 +124,13 @@ def approach_drawer_pickup(controller):
     rejected=[]
     chosen = getattr(controller, '_trial_storage_dock', None)
     docks = [chosen] if chosen is not None else drawer_pickup_stances(controller)
+    blocked=[]
     for dock in docks:
         try:
             route=controller.plan_route(dock[:2],False,face=float(dock[2]))
         except RuntimeError as exc:
-            rejected.append(dict(dock=dock.tolist(),reason=str(exc)));continue
+            rejected.append(dict(dock=dock.tolist(),reason=str(exc)))
+            blocked.append(dock);continue
         controller.record(drawer_pickup_dock=dock.tolist(),
             reused_opening_stance=bool(np.linalg.norm(dock-controller.base_pose())<.005),
             rejected_drawer_docks=rejected)
@@ -136,7 +138,40 @@ def approach_drawer_pickup(controller):
         controller._accepted_route=route
         controller.task_navigate(dock[:2],False,face=float(dock[2]))
         return
+    # Only when no dock has a direct route, reach one through another stance.
+    for dock in blocked:
+        if via_drawer_pickup_stance(controller,dock,rejected):
+            return
     raise RuntimeError(f'No swept-clear empty-hand drawer pickup dock: {rejected}')
+
+
+def via_drawer_pickup_stance(controller,dock,rejected):
+    """Reach a dock whose direct route is blocked through another pickup stance.
+
+    Beside the open drawer and the wall there is no room to turn straight into
+    the closest stance from the opening stance; it is reachable after first
+    stepping to a neighbouring stance. Each leg keeps the full swept checks.
+    """
+    current=controller.base_pose().copy()
+    vias=sorted((s for s in drawer_pickup_stances(controller)
+                 if np.linalg.norm(s-current)>.005 and np.linalg.norm(s-dock)>.005),
+                key=lambda s:np.linalg.norm(s[:2]-dock[:2]))
+    for via in vias:
+        try:
+            route=controller.plan_route(via[:2],False,face=float(via[2]))
+        except RuntimeError:
+            continue
+        controller._accepted_route=route
+        controller.task_navigate(via[:2],False,face=float(via[2]))
+        # Once the base has moved, a failed second leg is a failed trial; the
+        # storage pickup skill restores the checkpoint before the next dock.
+        route=controller.plan_route(dock[:2],False,face=float(dock[2]))
+        controller.record(drawer_pickup_dock=dock.tolist(),drawer_pickup_via=via.tolist(),
+            reused_opening_stance=False,rejected_drawer_docks=rejected)
+        controller._accepted_route=route
+        controller.task_navigate(dock[:2],False,face=float(dock[2]))
+        return True
+    return False
 
 
 def cabinet_pickup_stances(controller):
@@ -180,9 +215,20 @@ def drawer_departure_contact_view(controller,data,carrying):
                 if depths.get(key,0.)<=initial+1e-6}
     for key in separating:previous[key]=min(previous[key],depths.get(key,0.))
     # Pass all other contacts unchanged through the existing collision policy.
+    keep=np.array([tuple(sorted((int(c.geom1),int(c.geom2)))) not in separating
+                   for c in data.contact],dtype=bool)
+    class Contacts:
+        """The kept contacts, iterable per contact and as field arrays like MjContactList."""
+        def __init__(self):
+            self._items=[c for c,k in zip(data.contact,keep) if k]
+        def __iter__(self):return iter(self._items)
+        def __len__(self):return len(self._items)
+        def __getitem__(self,index):return self._items[index]
+        def __getattr__(self,name):return np.asarray(getattr(data.contact,name))[keep]
     class ContactView:
         def __init__(self):
-            self.contact=[c for c in data.contact if tuple(sorted((int(c.geom1),int(c.geom2)))) not in separating]
+            self.contact=Contacts()
+            self.ncon=len(self.contact)
         def __getattr__(self,name):return getattr(data,name)
     return ContactView()
 
@@ -212,6 +258,35 @@ def retrieve_from_storage(controller, info):
             return StoragePickupSkill(self, cabinet_pickup_stances(self)).run()
 
         deliver_payload=BreakfastEpisode.deliver_payload
+
+        def execute_transfer(self):
+            """Re-pick with another rim grasp if the carried vessel drops.
+
+            A rim grasp can pass the two-second hold and still slip out while the
+            base moves. Delivery retries restart from the post-pickup checkpoint
+            with that same grasp, so a drop rolls back to before the pickup and
+            excludes the grasp. The exclusion list lives outside the controller
+            because rollback restores every controller attribute.
+            """
+            from cross_episode_sim.skills.atomic import CallbackSkill
+            dropped=set()
+
+            def execute(attempt):
+                self._dropped_grasp_variants=set(dropped)
+                try:
+                    return CabinetTransfer.execute_transfer(self)
+                except RuntimeError as exc:
+                    variant=getattr(self,'selected_annotation_variant',None)
+                    if 'Object dropped after clearing pickup support' in str(exc) and variant is not None:
+                        dropped.add(variant)
+                    raise
+
+            def rebuild():
+                self.planner=self.make_planner();self.arm_aids=self.actuator_ids(self.planner.names)
+                self.load_world()
+
+            return CallbackSkill(self,'storage_transfer',range(3),execute,
+                                 verify=lambda:bool(self.report.get('success')),rebuild=rebuild).run()
 
         def transport_payload(self):
             info=self.object_info[self.object_name]
@@ -310,6 +385,11 @@ def retrieve_from_storage(controller, info):
                 self.record(cabinet_rotated_rim_candidates=len(rim),physically_qualified=False,
                             rim_grasp_insertion_offset_m=.015)
             self.annotation_candidate_budget=96
+            # Grasps that dropped the vessel in an earlier carry; regenerated
+            # from the same restored state, their indices are unchanged.
+            self.physically_rejected_annotation_variants=(
+                set(getattr(self,'physically_rejected_annotation_variants',set()))
+                |set(getattr(self,'_dropped_grasp_variants',set())))
 
         def cabinet_dock(self,carrying):
             if carrying:return super().cabinet_dock(carrying)
@@ -374,6 +454,11 @@ def retrieve_from_storage(controller, info):
             self.annotation_standoff=.12
             self.annotation_standoffs=(.12,.08)
             self.args.lift_height=.20
+            # Breakfast's lower-rim recovery offsets are for vessels on open
+            # tables. In a drawer they triple the library candidates with
+            # contacts that drive the fingers toward its floor, and the bounded
+            # planning budget runs out before the plain annotations.
+            self.annotation_recovery_vertical_offsets=(0.,)
 
         def grasp_recovery_stances(self):
             current=self.base_pose()

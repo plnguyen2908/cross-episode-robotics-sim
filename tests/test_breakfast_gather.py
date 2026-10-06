@@ -170,6 +170,22 @@ def test_drawer_rejected_dock_tries_alternatives_without_executing_failure():
     assert len(c.record.call_args.kwargs['rejected_drawer_docks'])==1
 
 
+def test_drawer_blocked_dock_is_reached_through_another_stance():
+    from cross_episode_sim.tasks.breakfast.storage import approach_drawer_pickup
+    start=np.array([.5,-1.5,np.pi/2]);via=np.array([.45,-1.47,np.pi/2]);close=np.array([.35,-1.37,np.pi/2])
+    base={'pose':start}
+    def plan_route(xy,carrying,face):
+        if np.allclose(xy,close[:2]) and np.allclose(base['pose'],start):raise RuntimeError('turn touches wall')
+        return [base['pose'],np.array([*xy,face])]
+    def task_navigate(xy,carrying,face):base['pose']=np.array([*xy,face])
+    c=SimpleNamespace(base_pose=lambda:base['pose'],record=MagicMock(),_trial_storage_dock=close,
+                      plan_route=MagicMock(side_effect=plan_route),task_navigate=MagicMock(side_effect=task_navigate))
+    with patch('cross_episode_sim.tasks.breakfast.storage.drawer_pickup_stances',side_effect=lambda c:iter([start,via,close])):
+        approach_drawer_pickup(c)
+    assert [tuple(call.args[0]) for call in c.task_navigate.call_args_list]==[tuple(via[:2]),tuple(close[:2])]
+    assert np.allclose(c.record.call_args.kwargs['drawer_pickup_via'],via)
+
+
 def test_drawer_alternate_docks_follow_open_drawer_geometry():
     from cross_episode_sim.tasks.breakfast.storage import drawer_pickup_stances
     pose=np.eye(4);pose[:3,3]=[.35,-.85,.79]
@@ -223,14 +239,14 @@ def test_departure_separates_but_rejects_new_and_worsening_contacts():
     data=SimpleNamespace(contact=[existing,new],time=9.,
         body=lambda name:SimpleNamespace(xpos=np.array([0.,0.,.805])))
     view=drawer_departure_contact_view(c,data,True)
-    assert view.contact==[new] and view.time==9.
+    assert list(view.contact)==[new] and view.time==9.
     assert data.contact==[existing,new]  # Scratch and physical contacts are unchanged.
     existing.dist=-.00004  # Below initial depth, but increasing since last sample.
-    assert drawer_departure_contact_view(c,data,True).contact==[existing,new]
+    assert list(drawer_departure_contact_view(c,data,True).contact)==[existing,new]
     data.contact=[]
-    assert drawer_departure_contact_view(c,data,True).contact==[]
+    assert list(drawer_departure_contact_view(c,data,True).contact)==[]
     data.contact=[existing]  # Re-entry after separating is also rejected.
-    assert drawer_departure_contact_view(c,data,True).contact==[existing]
+    assert list(drawer_departure_contact_view(c,data,True).contact)==[existing]
 
 
 @pytest.mark.parametrize('loaded,dz,active',[(False,.005,True),(True,-.005,True),
