@@ -44,10 +44,16 @@ registry entries and two preview scripts (`python -m robocasa.scripts.preview_ki
 
 ```bash
 python3.11 -m venv ~/.venvs/sim && source ~/.venvs/sim/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements-lock.txt -e ".[dev]"
 ```
 
-This installs MolmoSpaces from GitHub at the pinned commit `7351388`, which supplies the FR3 and
+`requirements-lock.txt` holds the exact package versions of the environment every demonstration
+was validated in. Install from it: with only the ranges in `pyproject.toml`, pip picks newer
+releases (Warp, trimesh, OpenCV, ...), and newer cuRobo builds choose different arm postures, which
+makes several skills fail. cuRobo is pinned to NVlabs commit `a35a708` (older run reports call it
+`nvidia-curobo 1.0`, from a fork's tag on the same commit).
+
+This installs MolmoSpaces from GitHub at the pinned commit `cortexairobot/molmospaces@d03a259`, which supplies the FR3 and
 Robotiq models, MolmoSpaces object assets and the A* planner. MolmoSpaces downloads its assets
 (about 20 GB) on first use into `~/.cache/molmo-spaces-resources` and `~/.cache/molmospaces/assets`; set
 `MLSPACES_CACHE_DIR` and `MLSPACES_ASSETS_DIR` to put them elsewhere. Asset versions are pinned

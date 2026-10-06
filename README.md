@@ -72,7 +72,7 @@ deactivate
 
 # This package (environment: sim; needs a CUDA GPU for cuRobo)
 python3.11 -m venv ~/.venvs/sim && source ~/.venvs/sim/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements-lock.txt -e ".[dev]"     # exact versions the demos were validated with
 export ROBOCASA_DIR="$PWD/external/robocasa/robocasa"   # the inner package directory
 python scripts/install_data.py                           # starting scenes, grasp registry (~500 MB)
 # MolmoSpaces downloads robot models and object assets (~20 GB) on first use into ~/.cache;
