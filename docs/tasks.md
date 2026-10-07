@@ -91,6 +91,15 @@ state model with no fluid or heat simulation.
 
 **Validated.** One run, 330 s simulated, 32/32 granules captured, none spilled.
 
+**Placement.** `--machine-slot main_counter|right_counter [--placement-seed N]` places the
+apparatus at a random spot in a counter slot, or `--machine-offset DX DY` shifts it exactly.
+The machine, portafilter, grounds box, mug spot and the robot's starting dock move together
+(`tasks/coffee/placement.py`), so the episode is a rigid copy of the validated one. The main
+counter slot spans -0.25 to +0.22 m between the sink and the stove (the paper towel holder is
+removed when in the way); the right counter slot spans +1.53 to +1.60 m between the stove and the
+fridge (its toaster and knife block are removed). Validated at -0.25, -0.08, 0, +0.08 and
++0.22 m on the main counter and +1.53 and +1.60 m on the right counter, 330-342 s each.
+
 ## Atomic skills
 
 Each skill family is validated on at least one fixture and object. Launch a demonstration with

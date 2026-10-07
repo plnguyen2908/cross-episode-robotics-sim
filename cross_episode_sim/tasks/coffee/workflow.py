@@ -27,6 +27,7 @@ from cross_episode_sim.paths import COFFEE_DIR, DATA_DIR
 from cross_episode_sim.tasks.coffee.pour import MoonlakeRobotPour, prepare as prepare_pour
 from cross_episode_sim.tasks.coffee.machine import PORTAFILTER, CENTER, RIM, BOTTOM, INNER_RADIUS, numbers
 from cross_episode_sim.tasks.coffee.native_scene import COFFEE
+from cross_episode_sim.tasks.coffee.placement import LID_PARKING, SLOTS, VALIDATED_MOUNT, offset, sample_offset, shift
 from cross_episode_sim.tasks.coffee.brew import BrewActions, prepare_brew, POWER_BUTTON
 from cross_episode_sim.tasks.coffee.grounds import PARTICLE_RADIUS, grain_inventory
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode
@@ -41,8 +42,9 @@ def body_pose(data, name):
     return t
 
 
-def prepare(run, asset, out):
-    manifest, selection=prepare_pour(run,asset,out)
+def prepare(run, asset, out, machine_offset=(0., 0.)):
+    manifest, selection=prepare_pour(run,asset,out,machine_offset)
+    off=offset(manifest['coffee'])
     root=ET.parse(out/'robocasa_scene.xml').getroot(); world=root.find('worldbody')
     # Dense Jacobians reduce factorization cost for this contact island while
     # retaining the original Newton solver, timestep and convergence settings.
@@ -51,7 +53,7 @@ def prepare(run, asset, out):
     root.findall('option')[-1].set('jacobian','dense')
     root.findall('option')[-1].set('noslip_iterations','5')
     basket=root.find(f".//body[@name='{PORTAFILTER}']")
-    seated=np.array(manifest['coffee']['portafilter_original_pose']); seated[:3,3]+=[2.1373,-.245,.922]
+    seated=np.array(manifest['coffee']['portafilter_original_pose']); seated[:3,3]+=shift(VALIDATED_MOUNT,off)
     basket.set('pos',numbers(seated[:3,3]));basket.set('quat',numbers(Rotation.from_matrix(seated[:3,:3]).as_quat(scalar_first=True)))
     ET.SubElement(basket,'freejoint',name=PORTAFILTER+'_free')
     eq=root.find('equality')
@@ -72,13 +74,13 @@ def prepare(run, asset, out):
     world.remove(holder)
     boxname=manifest['coffee']['dosing_body']; box=root.find(f".//body[@name='{boxname}']")
     oldpos=np.fromstring(box.get('pos'),sep=' ');oldR=Rotation.from_quat(np.fromstring(box.get('quat'),sep=' '),scalar_first=True).as_matrix()
-    boxpos=np.array([2.39,-.53,.960]);boxR=Rotation.from_euler('z',-139.2678933,degrees=True).as_matrix()
+    boxpos=shift([2.39,-.53,.960],off);boxR=Rotation.from_euler('z',-139.2678933,degrees=True).as_matrix()
     box.set('pos',numbers(boxpos));box.set('quat',numbers(Rotation.from_matrix(boxR).as_quat(scalar_first=True)))
     for name in manifest['coffee']['grains']:
         g=root.find(f".//body[@name='{name}']"); pos=np.fromstring(g.get('pos'),sep=' ')
         g.set('pos',numbers(boxpos+boxR@oldR.T@(pos-oldpos)))
     # Park the legacy lid away from the current apparatus.
-    lid=root.find(".//body[@name='skill_blender_lid_main']");lid.set('pos','2.65 -.3 .96')
+    lid=root.find(".//body[@name='skill_blender_lid_main']");lid.set('pos',numbers(LID_PARKING))
     local=np.eye(4);local[:3,:3]=Rotation.from_euler("y",65,degrees=True).as_matrix();local[:3,3]=[-.145,0,.040]
     annotations=out/'portafilter_grasps.npz';np.savez(annotations,transforms=np.array([local]))
     info=dict(body=PORTAFILTER,asset='MoonlakePortafilter',key='moonlake__portafilter',role='portafilter',
@@ -98,7 +100,7 @@ def prepare(run, asset, out):
     (out/'MOONLAKE_NOTICE').write_text((asset/'NOTICE.txt').read_text()+'\nWorkflow adaptations: free portafilter, measured-state bayonet coupling, direct countertop support, passive spring-return button, internal button/housing collision exclusion, finite rubber-pad torsional contacts, five friction postprocessing iterations. Robot contacts remain physical.\n')
     ET.ElementTree(root).write(out/'robocasa_scene.xml')
     model=mujoco.MjModel.from_xml_path(str(out/'robocasa_scene.xml'));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
-    counter=object_bodies(model,'counter_main_main_group_main')
+    counter=object_bodies(model,manifest['supports']['kitchen'])
     groups=model.geom_group.copy();model.geom_group[:]=5
     for gid in range(model.ngeom):
         if model.geom_bodyid[gid] in counter and (model.geom_contype[gid] or model.geom_conaffinity[gid]):model.geom_group[gid]=4
@@ -176,19 +178,19 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
 
     def update_recording_cameras(self):
         super().update_recording_cameras()
-        self.cameras[1].lookat[:]=[2.12,-.40,1.08]
+        self.cameras[1].lookat[:]=shift([2.12,-.40,1.08],offset(self.spec))
         self.cameras[1].distance=.80
         self.cameras[1].azimuth=90.
         self.cameras[1].elevation=-35.
         phase=getattr(self,'review_phase','')
         if 'BUTTON' in phase:
-            self.cameras[1].lookat[:]=[2.12,-.30,1.19]
+            self.cameras[1].lookat[:]=shift([2.12,-.30,1.19],offset(self.spec))
             self.cameras[1].distance=.60;self.cameras[1].azimuth=135.;self.cameras[1].elevation=-15.
         elif 'CUP' in phase:
             self.cameras[1].lookat[:]=self.data.body('cup_one_test_object_main').xpos+[0,0,.04]
             self.cameras[1].distance=.75;self.cameras[1].azimuth=45.;self.cameras[1].elevation=-30.
         elif 'BREW' in phase:
-            self.cameras[1].lookat[:]=[2.12,-.30,1.07]
+            self.cameras[1].lookat[:]=shift([2.12,-.30,1.07],offset(self.spec))
             self.cameras[1].distance=.60;self.cameras[1].azimuth=130.;self.cameras[1].elevation=-35.
 
     def inventory_for(self,data):
@@ -524,8 +526,14 @@ def main():
     p.add_argument('--resume-from',type=Path,help='Diagnostic initial-state checkpoint; final qualification runs without this')
     p.add_argument('--start',choices=['dose','reinstall','cup','power','press','brew'],default='dose')
     p.add_argument('--removal-witness',type=Path,help='Diagnostic removal checkpoint supplying an arm seed')
+    p.add_argument('--machine-offset',type=float,nargs=2,metavar=('DX','DY'),help='Shift the coffee apparatus along the counter (metres)')
+    p.add_argument('--machine-slot',choices=sorted(SLOTS),help='Place the apparatus at a random spot in this counter slot (uses --placement-seed)')
+    p.add_argument('--placement-seed',type=int,default=0)
     args=p.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
-    manifest,selection=prepare(args.run,args.asset,out)
+    machine_offset=(0.,0.)
+    if args.machine_slot:machine_offset=tuple(sample_offset(np.random.default_rng(args.placement_seed),args.machine_slot)[1])
+    if args.machine_offset:machine_offset=tuple(args.machine_offset)
+    manifest,selection=prepare(args.run,args.asset,out,machine_offset)
     prepare_brew(out,manifest,selection)
     sources={}
     for source in (Path(__file__),Path(__file__).with_name('pour.py'),Path(__file__).with_name('brew.py')):
@@ -535,7 +543,7 @@ def main():
         qualification='diagnostic checkpoint resume' if args.resume_from else 'continuous empty-hand start'),indent=2))
     prior=json.loads((args.run/'report.json').read_text());manifest['box_grasp']=prior['annotation_selection']['local_transform']
     (out/'task_manifest.json').write_text(json.dumps(manifest,indent=2))
-    ca=SimpleNamespace(**prior['arguments']);ca.output=out;ca.assets=Path(ca.assets);ca.scene_xml=manifest['scene_xml'];ca.spawn=[2.12,-.94,np.pi/2]
+    ca=SimpleNamespace(**prior['arguments']);ca.output=out;ca.assets=Path(ca.assets);ca.scene_xml=manifest['scene_xml'];ca.spawn=[*shift([2.12,-.94],machine_offset),np.pi/2]
     ca.dynamic_objects=list(ca.dynamic_objects)+[PORTAFILTER,BUTTON,POWER_BUTTON]
     import torch
     random.seed(manifest['seed']);np.random.seed(manifest['seed']);torch.manual_seed(manifest['seed'])

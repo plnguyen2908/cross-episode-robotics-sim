@@ -23,13 +23,22 @@ from cross_episode_sim.tasks.coffee.native_scene import COFFEE
 from cross_episode_sim.tasks.coffee.grounds import PARTICLE_RADIUS, grain_inventory
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
 from cross_episode_sim.tasks.coffee.machine import PORTAFILTER, CENTER, RIM, BOTTOM, INNER_RADIUS, numbers
+from cross_episode_sim.tasks.coffee.placement import VALIDATED_MOUNT, blocking_fixtures, counter_for, shift as shift_point, shift_spec
 
 
-def prepare(run, asset, output):
+def prepare(run, asset, output, machine_offset=(0., 0.)):
     manifest = json.loads((run/'task_manifest.json').read_text())
     selection = json.loads((run/'adapter.json').read_text())
     root = ET.parse(run/'robocasa_scene.xml').getroot()
     world, assets = root.find('worldbody'), root.find('asset')
+    off = np.array([*machine_offset, 0.])
+    shift_spec(manifest['coffee'], off)
+    # The coffee workflow works on 'kitchen' support: the counter under the apparatus.
+    manifest['supports']['kitchen'] = counter_for(off)
+    for name in blocking_fixtures(root, off):
+        node = root.find(f".//body[@name='{name}']")
+        next(p for p in root.iter() if node in list(p)).remove(node)
+        manifest['coffee'].setdefault('removed_fixtures', []).append(name)
     for name in [COFFEE, 'coffee_grounds_hopper']:
         node = root.find(f".//body[@name='{name}']")
         parent = next(p for p in root.iter() if node in list(p)); parent.remove(node)
@@ -43,7 +52,7 @@ def prepare(run, asset, output):
     conversion = json.loads((asset/'conversion.json').read_text())
     basket_pose = np.array(conversion['body_world_poses'][PORTAFILTER])
     # Reuse the validated loading height, with the actual 58 mm basket.
-    center = np.array([2.12, -.52]); rim = 1.022
+    center = shift_point([2.12, -.52], off); rim = 1.022
     shift = np.r_[center-CENTER, rim-RIM]
     basket_pose[:3, 3] += shift
     basket_pose[:3, :3] = Rotation.from_euler('z', -50, degrees=True).as_matrix() @ basket_pose[:3, :3]
@@ -56,7 +65,7 @@ def prepare(run, asset, output):
         ET.SubElement(cradle, 'geom', name=f'portafilter_holder_{group}', type='box',
                       pos='0 0 .02085', size='.026 .026 .02085', rgba='.18 .19 .22 1',
                       group=group, contype=str(int(colliding)), conaffinity=str(int(colliding)))
-    mount = ET.SubElement(world, 'body', name=COFFEE, pos='2.1373 -.245 .922')
+    mount = ET.SubElement(world, 'body', name=COFFEE, pos=numbers(shift_point(VALIDATED_MOUNT, off)))
     mount.extend(copy.deepcopy(list(machine.find('worldbody'))))
     # Retain the existing controller's contact-button lookup; this trial does
     # not operate it or make a brewing claim.

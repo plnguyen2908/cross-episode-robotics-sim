@@ -7,6 +7,7 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from cross_episode_sim.tasks.coffee.placement import offset, shift
 from cross_episode_sim.manipulation.edge_access import collision_vertices, object_bodies
 from cross_episode_sim.manipulation.physical_contents import cavity_geometry
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode
@@ -49,6 +50,9 @@ class MachineCycle:
         return None
 
 
+# Coffee spout axis in the validated machine placement.
+SPOUT_XY=(2.12,-.2643)
+
 def prepare_brew(out, manifest, selection):
     """Retain native cup scale, make the second source button passive, add sites."""
     tree=ET.parse(out/'robocasa_scene.xml');root=tree.getroot()
@@ -58,7 +62,8 @@ def prepare_brew(out, manifest, selection):
     ET.SubElement(root.find('contact'),'exclude',body1=POWER_BUTTON,body2='base_frame_002')
     mug=root.find(f".//body[@name='{MUG}']")
     mug.set('quat','0.7071067811865476 0 0 -0.7071067811865476')
-    mug.set('pos','2.43 -.36 .9746')
+    off=offset(manifest['coffee'])
+    mug.set('pos',' '.join(map(str,shift([2.43,-.36,.9746],off))))
     tree.write(out/'robocasa_scene.xml')
     model=mujoco.MjModel.from_xml_path(str(out/'robocasa_scene.xml'));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
     cavity=cavity_geometry(model,data,MUG)
@@ -69,20 +74,20 @@ def prepare_brew(out, manifest, selection):
     tray=collision_vertices(model,data,object_bodies(model,TRAY))
     top=float(tray[:,2].max())
     target=np.eye(4);target[:3,:3]=Rotation.from_euler('z',-45,degrees=True).as_matrix()
-    target[:2,3]=np.array([2.12,-.2643])-(target[:3,:3]@center_local)[:2]
+    target[:2,3]=shift(SPOUT_XY,off)-(target[:3,:3]@center_local)[:2]
     target[2,3]=top-float((local@reference.T)[:,2].min())+.0005
     ET.SubElement(mug,'site',name='moonlake_coffee_fill',type='cylinder',
                   pos=' '.join(map(str,[*center_local[:2],cavity['bottom_z']+.002])),
                   size=f"{cavity['radius']*.83} .001",rgba='.19 .07 .02 0',group='1')
     ET.SubElement(root.find('worldbody'),'site',name='moonlake_coffee_stream',type='cylinder',
-                  pos='2.12 -.2643 1.04',size='.002 .025',rgba='.22 .09 .03 0',group='1')
+                  pos=' '.join(map(str,shift([*SPOUT_XY,1.04],off))),size='.002 .025',rgba='.22 .09 .03 0',group='1')
     tree.write(out/'robocasa_scene.xml')
     spec=manifest['coffee']
     spec.update(mug_target_pose=target.tolist(),mug_local_vertices=local.tolist(),mug_cavity=cavity,
                 mug_center_local=center_local.tolist(),tray_top_z=top,brew_seconds=8.,
                 button_roles={'power':POWER_BUTTON,'brew':BREW_BUTTON})
     for info in manifest['bindings']:
-        if info['body']==MUG:info.update(source='kitchen',position=[2.43,-.36,.9746])
+        if info['body']==MUG:info.update(source='kitchen',position=shift([2.43,-.36,.9746],off).tolist())
     selection['selected_objects']=manifest['bindings']
     manifest['instruction']='Remove portafilter onto counter, dose from box, reinstall, place cup, power on, start and finish simulated brewing.'
     manifest['simulation_contract']['brewing']='Timed state model with visible fill/stream sites; no fluid, heating, pressure or extraction physics'
@@ -109,7 +114,7 @@ class BrewActions:
                     (self.model.geom_bodyid[c.geom2] in own and self.model.geom_bodyid[c.geom1] in tray) for c in self.data.contact)
         b=self.data.body(MUG);R=b.xmat.reshape(3,3)
         center=b.xpos+R@np.asarray(self.spec['mug_center_local'])
-        return bool(support and np.linalg.norm(center[:2]-[2.12,-.2643])<.012 and R[2,2]>.995
+        return bool(support and np.linalg.norm(center[:2]-shift(SPOUT_XY,offset(self.spec)))<.012 and R[2,2]>.995
                     and not (self.holding_loaf and self.object_name==MUG))
 
     def place_cup(self):
@@ -123,12 +128,13 @@ class BrewActions:
         # The native mug nearly fills the gap. Enter beside the low forward
         # handle, then slide laterally below the basket; avoid tilting its rim.
         target=target.copy();target[2,3]-=.0003
-        front=target.copy();front[0,3]=2.20;front[1,3]=-.46
+        off=offset(self.spec)
+        front=target.copy();front[:2,3]=shift([2.20,-.46],off)
         self.grasp_relative=np.linalg.inv(self.tcp())@self.bread_pose()
         self.arm('approach beside portafilter handle',front@np.linalg.inv(self.grasp_relative),True)
         self.held_pose('level cup beside machine',front)
         self.allow_support=True
-        side=front.copy();side[1,3]=-.31
+        side=front.copy();side[1,3]=-.31+off[1]
         self.held_pose('insert cup beside portafilter handle',side)
         under=side.copy();under[0,3]=target[0,3]
         self.held_pose('slide cup below portafilter basket',under)
@@ -190,7 +196,7 @@ class BrewActions:
         cup=self.data.body(MUG)
         surface=cup.xpos+cup.xmat.reshape(3,3)@np.array([*self.spec['mug_center_local'][:2],bottom+height])
         spout_z=1.0701
-        self.model.site_pos[stream,:]=[2.12,-.2643,(spout_z+surface[2])/2]
+        self.model.site_pos[stream,:]=[*shift(SPOUT_XY,offset(self.spec)),(spout_z+surface[2])/2]
         self.model.site_size[stream,1]=max(.001,(spout_z-surface[2])/2)
         # The older scene's marker is not this machine's dispensing indicator.
         self.model.site_rgba[self.model.site('task_coffee_surface').id,3]=0.
