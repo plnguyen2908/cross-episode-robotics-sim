@@ -23,22 +23,28 @@ from cross_episode_sim.tasks.coffee.native_scene import COFFEE
 from cross_episode_sim.tasks.coffee.grounds import PARTICLE_RADIUS, grain_inventory
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
 from cross_episode_sim.tasks.coffee.machine import PORTAFILTER, CENTER, RIM, BOTTOM, INNER_RADIUS, numbers
-from cross_episode_sim.tasks.coffee.placement import VALIDATED_MOUNT, blocking_fixtures, counter_for, shift as shift_point, shift_spec
+from cross_episode_sim.tasks.coffee.placement import (
+    VALIDATED_MOUNT, blocking_fixtures, counter_for, loose_objects_in_footprint, place_spec, to_world, yaw_degrees)
 
 
-def prepare(run, asset, output, machine_offset=(0., 0.)):
+def prepare(run, asset, output, machine_offset=(0., 0.), support=None):
+    """machine_offset is (dx, dy) along the counter or a full (dx, dy, dz, yaw) pose."""
     manifest = json.loads((run/'task_manifest.json').read_text())
     selection = json.loads((run/'adapter.json').read_text())
     root = ET.parse(run/'robocasa_scene.xml').getroot()
     world, assets = root.find('worldbody'), root.find('asset')
-    off = np.array([*machine_offset, 0.])
-    shift_spec(manifest['coffee'], off)
-    # The coffee workflow works on 'kitchen' support: the counter under the apparatus.
-    manifest['supports']['kitchen'] = counter_for(off)
-    for name in blocking_fixtures(root, off):
+    pose = tuple(machine_offset) + (0., 0.) if len(machine_offset) == 2 else tuple(machine_offset)
+    spec = manifest['coffee']
+    place_spec(spec, pose)
+    off = np.array([pose[0], pose[1], 0.])
+    # The coffee workflow works on 'kitchen' support: the surface under the apparatus.
+    manifest['supports']['kitchen'] = support or counter_for(off)
+    removed = blocking_fixtures(root, off) if pose[2:] == (0., 0.) else []
+    removed += loose_objects_in_footprint(root, spec, keep=set(manifest['supports'].values()))
+    for name in removed:
         node = root.find(f".//body[@name='{name}']")
         next(p for p in root.iter() if node in list(p)).remove(node)
-        manifest['coffee'].setdefault('removed_fixtures', []).append(name)
+        spec.setdefault('removed_fixtures', []).append(name)
     for name in [COFFEE, 'coffee_grounds_hopper']:
         node = root.find(f".//body[@name='{name}']")
         parent = next(p for p in root.iter() if node in list(p)); parent.remove(node)
@@ -52,31 +58,33 @@ def prepare(run, asset, output, machine_offset=(0., 0.)):
     conversion = json.loads((asset/'conversion.json').read_text())
     basket_pose = np.array(conversion['body_world_poses'][PORTAFILTER])
     # Reuse the validated loading height, with the actual 58 mm basket.
-    center = shift_point([2.12, -.52], off); rim = 1.022
-    shift = np.r_[center-CENTER, rim-RIM]
+    validated_center = np.array([2.12, -.52]); rim = 1.022
+    shift = np.r_[validated_center-CENTER, rim-RIM]
     basket_pose[:3, 3] += shift
     basket_pose[:3, :3] = Rotation.from_euler('z', -50, degrees=True).as_matrix() @ basket_pose[:3, :3]
+    basket_pose = to_world(spec, basket_pose)
+    center = to_world(spec, validated_center); rim += pose[2]
     basket.set('pos', numbers(basket_pose[:3, 3])); basket.set('quat', numbers(Rotation.from_matrix(basket_pose[:3, :3]).as_quat(scalar_first=True)))
     world.append(basket)
     # Fixed workholding block beneath the metal cup, visibly distinct from the
     # portafilter receiving geometry. It contains no grounds-receiving cavity.
-    cradle = ET.SubElement(world, 'body', name='moonlake_portafilter_holder', pos=numbers([*center, .922]))
+    cradle = ET.SubElement(world, 'body', name='moonlake_portafilter_holder', pos=numbers(to_world(spec, [2.12, -.52, .922])))
     for group, colliding in [('0', True), ('1', False)]:
         ET.SubElement(cradle, 'geom', name=f'portafilter_holder_{group}', type='box',
                       pos='0 0 .02085', size='.026 .026 .02085', rgba='.18 .19 .22 1',
                       group=group, contype=str(int(colliding)), conaffinity=str(int(colliding)))
-    mount = ET.SubElement(world, 'body', name=COFFEE, pos=numbers(shift_point(VALIDATED_MOUNT, off)))
+    mount = ET.SubElement(world, 'body', name=COFFEE, pos=numbers(to_world(spec, VALIDATED_MOUNT)),
+                          quat=numbers(Rotation.from_euler('z', pose[3]).as_quat(scalar_first=True)))
     mount.extend(copy.deepcopy(list(machine.find('worldbody'))))
     # Retain the existing controller's contact-button lookup; this trial does
     # not operate it or make a brewing claim.
     for geom in mount.iter('geom'):
         if geom.get('name', '').startswith('button_01_cage_001_collision'):
             geom.set('name', 'coffee_machine_start_button_'+geom.get('name'))
-    spec = manifest['coffee']
     spec.update(receiver_kind='moonlake_portafilter', minimum_hopper_fraction=1., maximum_spill_fraction=0.,
                 pour_angles_deg=list(range(0, 106, 5)), pour_lip_clearance_m=.010,
                 pour_corner_sign=-1., pour_yaws_deg=[-90., 0., 45., -45., 90., 135., -135., 180.])
-    spec['hopper'] = dict(body=PORTAFILTER, center_xy=center.tolist(), bottom_z=BOTTOM+shift[2],
+    spec['hopper'] = dict(body=PORTAFILTER, center_xy=center.tolist(), bottom_z=BOTTOM+shift[2]+pose[2],
                           top_z=rim, half_width=INNER_RADIUS, radius=INNER_RADIUS)
     spec['portafilter_reference_pose'] = basket_pose.tolist()
     spec['portafilter_original_pose'] = conversion['body_world_poses'][PORTAFILTER]
@@ -137,7 +145,8 @@ class MoonlakeRobotPour(CoffeeEpisode):
         cavity, target = self.spec['dosing_cavity'], self.spec['hopper']
         x, y = cavity['half_width_xy']; x *= self.spec['pour_corner_sign']
         corner = np.array([x, y, cavity['rim_z']])
-        heading = Rotation.from_euler('z', yaw, degrees=True).as_matrix()
+        # Pour yaws are relative to the machine, as validated facing -y.
+        heading = Rotation.from_euler('z', yaw+yaw_degrees(self.spec), degrees=True).as_matrix()
         rotation = heading @ Rotation.from_euler('x', -angle, degrees=True).as_matrix() @ Rotation.from_euler('z', np.arctan2(x, y)).as_matrix()
         height = .12-(.12-.025)*np.clip((angle-35)/40, 0, 1)-.015*np.clip((angle-90)/15, 0, 1)
         lip = np.array([*target['center_xy'], target['top_z']+height+lift]) + heading @ np.array([0, -.006, 0])

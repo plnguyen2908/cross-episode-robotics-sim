@@ -100,6 +100,19 @@ removed when in the way); the right counter slot spans +1.53 to +1.60 m between 
 fridge (its toaster and knife block are removed). Validated at -0.25, -0.08, 0, +0.08 and
 +0.22 m on the main counter and +1.53 and +1.60 m on the right counter, 330-342 s each.
 
+The apparatus can also stand on another surface at any facing:
+`--machine-pose DX DY DZ YAW_DEG --support BODY` turns it about the machine mount and moves it,
+and `placement.surface_placement(edge_point, outward, surface_z)` computes the pose that sets it
+at a surface edge facing out, with the edge as far in front of the machine as the counter edge
+was. All coffee geometry is expressed in the machine's frame (portafilter withdrawal, button
+press, mug insertion, pour yaws, docks, robot spawn, cameras), and loose objects standing where
+the apparatus goes are removed. A placement is rejected before the run when a room wall enters
+the robot's working area (0.7 m left to 0.9 m right of the mount, from behind the dock to the
+back wall line). Validated on the dining table's north edge at three spots along it (turned
+180°, 9 cm lower) and the living-room side table's west edge (turned 270°, 14 cm lower),
+322-337 s each; the side table's other edges are rejected for the east wall, and the dining
+table's other edges have a chair where the robot parks.
+
 ## Atomic skills
 
 Each skill family is validated on at least one fixture and object. Launch a demonstration with

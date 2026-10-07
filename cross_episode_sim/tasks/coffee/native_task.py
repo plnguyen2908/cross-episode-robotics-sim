@@ -14,6 +14,7 @@ from cross_episode_sim.fixtures.blender_load import align_disk_center
 from cross_episode_sim.tasks.coffee.native_scene import prepare, DEFAULT_CONFIG, COFFEE
 from cross_episode_sim.tasks.coffee.grounds import BrewState, grain_inventory, pour_pose, HOPPER
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
+from cross_episode_sim.tasks.coffee.placement import VALIDATED_FRONT_EDGE_Y, to_validated, to_world
 from cross_episode_sim.manipulation.cross_room import CrossRoomManipulation
 from cross_episode_sim.manipulation.edge_access import object_bodies, collision_vertices
 
@@ -215,11 +216,13 @@ class CoffeeEpisode(BreakfastEpisode):
             yield from self.docks_on_surface_side(room,point,outward,pickup)
             return
         if room in ('hopper','coffee_machine'):
-            # Appliance coordinates must not place the base under the countertop.
+            # Appliance coordinates must not place the base under the surface.
+            # Docks stand in front of the surface edge in the machine's frame
+            # (validated facing -y), so they follow any machine placement.
+            local=to_validated(self.spec,point[:2])
             for offset in (.35,.30,.40,.26,.45):
-                edge=support_bounds(self.model,self.data,self.counter)[0][1]
                 for lateral in (0.,.08,-.08):
-                    xy=np.array([point[0]+lateral,edge-offset])
+                    xy=to_world(self.spec,[local[0]+lateral,VALIDATED_FRONT_EDGE_Y-offset])
                     if self.room_id(xy)==self.room_id(point[:2]):
                         yield np.r_[xy,np.arctan2(point[1]-xy[1],point[0]-xy[0])]
             return

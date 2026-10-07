@@ -27,7 +27,9 @@ from cross_episode_sim.paths import COFFEE_DIR, DATA_DIR
 from cross_episode_sim.tasks.coffee.pour import MoonlakeRobotPour, prepare as prepare_pour
 from cross_episode_sim.tasks.coffee.machine import PORTAFILTER, CENTER, RIM, BOTTOM, INNER_RADIUS, numbers
 from cross_episode_sim.tasks.coffee.native_scene import COFFEE
-from cross_episode_sim.tasks.coffee.placement import LID_PARKING, SLOTS, VALIDATED_MOUNT, offset, sample_offset, shift
+from cross_episode_sim.tasks.coffee.placement import (
+    LID_PARKING, SLOTS, VALIDATED_DOCK, VALIDATED_MOUNT, rotate, sample_offset, to_validated, to_world,
+    workspace_wall_conflicts, yaw_degrees)
 from cross_episode_sim.tasks.coffee.brew import BrewActions, prepare_brew, POWER_BUTTON
 from cross_episode_sim.tasks.coffee.grounds import PARTICLE_RADIUS, grain_inventory
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode
@@ -42,9 +44,9 @@ def body_pose(data, name):
     return t
 
 
-def prepare(run, asset, out, machine_offset=(0., 0.)):
-    manifest, selection=prepare_pour(run,asset,out,machine_offset)
-    off=offset(manifest['coffee'])
+def prepare(run, asset, out, machine_offset=(0., 0.), support=None):
+    manifest, selection=prepare_pour(run,asset,out,machine_offset,support)
+    spec=manifest['coffee']
     root=ET.parse(out/'robocasa_scene.xml').getroot(); world=root.find('worldbody')
     # Dense Jacobians reduce factorization cost for this contact island while
     # retaining the original Newton solver, timestep and convergence settings.
@@ -53,7 +55,7 @@ def prepare(run, asset, out, machine_offset=(0., 0.)):
     root.findall('option')[-1].set('jacobian','dense')
     root.findall('option')[-1].set('noslip_iterations','5')
     basket=root.find(f".//body[@name='{PORTAFILTER}']")
-    seated=np.array(manifest['coffee']['portafilter_original_pose']); seated[:3,3]+=shift(VALIDATED_MOUNT,off)
+    seated=np.array(manifest['coffee']['portafilter_original_pose']); seated[:3,3]+=VALIDATED_MOUNT; seated=to_world(spec,seated)
     basket.set('pos',numbers(seated[:3,3]));basket.set('quat',numbers(Rotation.from_matrix(seated[:3,:3]).as_quat(scalar_first=True)))
     ET.SubElement(basket,'freejoint',name=PORTAFILTER+'_free')
     eq=root.find('equality')
@@ -74,7 +76,7 @@ def prepare(run, asset, out, machine_offset=(0., 0.)):
     world.remove(holder)
     boxname=manifest['coffee']['dosing_body']; box=root.find(f".//body[@name='{boxname}']")
     oldpos=np.fromstring(box.get('pos'),sep=' ');oldR=Rotation.from_quat(np.fromstring(box.get('quat'),sep=' '),scalar_first=True).as_matrix()
-    boxpos=shift([2.39,-.53,.960],off);boxR=Rotation.from_euler('z',-139.2678933,degrees=True).as_matrix()
+    boxpos=to_world(spec,[2.39,-.53,.960]);boxR=rotate(spec,Rotation.from_euler('z',-139.2678933,degrees=True).as_matrix())
     box.set('pos',numbers(boxpos));box.set('quat',numbers(Rotation.from_matrix(boxR).as_quat(scalar_first=True)))
     for name in manifest['coffee']['grains']:
         g=root.find(f".//body[@name='{name}']"); pos=np.fromstring(g.get('pos'),sep=' ')
@@ -100,6 +102,8 @@ def prepare(run, asset, out, machine_offset=(0., 0.)):
     (out/'MOONLAKE_NOTICE').write_text((asset/'NOTICE.txt').read_text()+'\nWorkflow adaptations: free portafilter, measured-state bayonet coupling, direct countertop support, passive spring-return button, internal button/housing collision exclusion, finite rubber-pad torsional contacts, five friction postprocessing iterations. Robot contacts remain physical.\n')
     ET.ElementTree(root).write(out/'robocasa_scene.xml')
     model=mujoco.MjModel.from_xml_path(str(out/'robocasa_scene.xml'));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
+    walls=workspace_wall_conflicts(model,data,spec)
+    if walls:raise ValueError(f'Coffee placement leaves no room for the robot; walls in its working area: {walls}')
     counter=object_bodies(model,manifest['supports']['kitchen'])
     groups=model.geom_group.copy();model.geom_group[:]=5
     for gid in range(model.ngeom):
@@ -178,20 +182,20 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
 
     def update_recording_cameras(self):
         super().update_recording_cameras()
-        self.cameras[1].lookat[:]=shift([2.12,-.40,1.08],offset(self.spec))
+        self.cameras[1].lookat[:]=to_world(self.spec,[2.12,-.40,1.08])
         self.cameras[1].distance=.80
-        self.cameras[1].azimuth=90.
+        self.cameras[1].azimuth=90.+yaw_degrees(self.spec)
         self.cameras[1].elevation=-35.
         phase=getattr(self,'review_phase','')
         if 'BUTTON' in phase:
-            self.cameras[1].lookat[:]=shift([2.12,-.30,1.19],offset(self.spec))
-            self.cameras[1].distance=.60;self.cameras[1].azimuth=135.;self.cameras[1].elevation=-15.
+            self.cameras[1].lookat[:]=to_world(self.spec,[2.12,-.30,1.19])
+            self.cameras[1].distance=.60;self.cameras[1].azimuth=135.+yaw_degrees(self.spec);self.cameras[1].elevation=-15.
         elif 'CUP' in phase:
             self.cameras[1].lookat[:]=self.data.body('cup_one_test_object_main').xpos+[0,0,.04]
-            self.cameras[1].distance=.75;self.cameras[1].azimuth=45.;self.cameras[1].elevation=-30.
+            self.cameras[1].distance=.75;self.cameras[1].azimuth=45.+yaw_degrees(self.spec);self.cameras[1].elevation=-30.
         elif 'BREW' in phase:
-            self.cameras[1].lookat[:]=shift([2.12,-.30,1.07],offset(self.spec))
-            self.cameras[1].distance=.60;self.cameras[1].azimuth=130.;self.cameras[1].elevation=-35.
+            self.cameras[1].lookat[:]=to_world(self.spec,[2.12,-.30,1.07])
+            self.cameras[1].distance=.60;self.cameras[1].azimuth=130.+yaw_degrees(self.spec);self.cameras[1].elevation=-35.
 
     def inventory_for(self,data):
         inv=grain_inventory(self.model,data,self.spec,getattr(self,'grain_body_ids',None))
@@ -332,7 +336,9 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
             angle_error=float(np.rad2deg(Rotation.from_matrix(actual[:3,:3]@target[:3,:3].T).magnitude()))
             self.report.setdefault('payload_pose_checks',[]).append(dict(stage=stage,correction=correction,position_error_m=position_error,orientation_error_deg=angle_error))
             tight=self.object_name=='cup_one_test_object_main'
-            if position_error<=(.0005 if tight else .002) and angle_error<=(.1 if tight else 1.):return
+            # The mug nearly fills the gap under the basket: hold its position to
+            # 0.5 mm. 0.25 degrees tilts its rim by under 0.5 mm (mug_ready allows 5.7).
+            if position_error<=(.0005 if tight else .002) and angle_error<=(.25 if tight else 1.):return
             self.record(payload_pose_correction=correction+1,position_error_m=position_error,orientation_error_deg=angle_error)
         raise RuntimeError(f'Payload failed to follow gripper at {stage}: {position_error:.4f} m, {angle_error:.2f} degrees')
 
@@ -385,6 +391,11 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         target[:3,3]+=(-.09*target[:3,2] if retreat_delta is None else np.asarray(retreat_delta))
         self.arm(label,target);self.allow_support=False
 
+    def toward_loading(self,pose):
+        """Move a pose straight out of the machine to the loading spot's depth."""
+        local=to_validated(self.spec,pose);local[1,3]=to_validated(self.spec,self.loading)[1,3]
+        return to_world(self.spec,local)
+
     def pf_grasp(self):
         local=np.eye(4);local[:3,:3]=Rotation.from_euler('y',65,degrees=True).as_matrix();local[:3,3]=[-.145,0,.040];return local
 
@@ -401,7 +412,7 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         down=actual.copy()
         for amount in (.02,.04,.06,.08):
             p=down.copy();p[2,3]-=amount;self.held_pose('lower unlocked portafilter',p)
-        front=p.copy();front[1,3]=self.loading[1,3]
+        front=self.toward_loading(p)
         self.held_pose('withdraw portafilter from machine',front)
         hover=self.loading.copy();hover[2,3]+=.012;self.held_pose('position portafilter above counter',hover)
         self.held_pose('lower portafilter onto counter',self.loading)
@@ -447,7 +458,7 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         lift=self.bread_pose().copy();lift[2,3]+=.025;self.held_pose('lift loaded portafilter',lift);self.allow_support=False
         target=self.seated.copy();target[:3,:3]=Rotation.from_euler('z',-50,degrees=True).as_matrix()@self.seated[:3,:3]
         low=target.copy();low[2,3]-=.08
-        front=low.copy();front[1,3]=self.loading[1,3]
+        front=self.toward_loading(low)
         self.held_pose('align loaded portafilter in front of machine',front)
         self.held_pose('insert loaded portafilter below socket',low)
         for amount in (.06,.04,.02,0.):
@@ -476,7 +487,10 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         self.press_phase=True;self.rebuild()
         pad=object_bodies(self.model,self.profile.namespace+'gripper/left_pad')
         pad_local=(collision_vertices(self.model,self.data,pad)-self.tcp()[:3,3])@self.tcp()[:3,:3]
+        # Plan the press in the validated layout (button face toward -y), then
+        # map every pose into the machine's actual placement.
         points=collision_vertices(self.model,self.data,object_bodies(self.model,self.active_button_body))
+        points=np.array([to_validated(self.spec,point) for point in points])
         surface=(points.min(0)+points.max(0))/2;surface[1]=points[:,1].min()
         addresses=[self.model.jnt_qposadr[self.model.joint(self.profile.namespace+n).id] for n in self.planner.names]
         probe=mujoco.MjData(self.model)
@@ -490,11 +504,11 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
             pre=pose.copy();pre[1,3]-=.075
             for seed in seeds:
                 try:
-                    endpoint=self.nearby_ik(pre,seed,trust_radius=6.,preserve_self_clearance=True)
+                    endpoint=self.nearby_ik(to_world(self.spec,pre),seed,trust_radius=6.,preserve_self_clearance=True)
                     q=endpoint
                     for offset in np.linspace(-.075,.0015,17):
                         target=pose.copy();target[1,3]+=offset
-                        q=self.nearby_ik(target,q,preserve_self_clearance=True)
+                        q=self.nearby_ik(to_world(self.spec,target),q,preserve_self_clearance=True)
                         probe.qpos[:]=self.data.qpos;probe.qpos[addresses]=q
                         mujoco.mj_forward(self.model,probe)
                         if self.navigation_penetration(probe,False)>.001 or self.robot_self_penetration(probe)>.0005:
@@ -506,13 +520,13 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         if selected is None:raise RuntimeError('No checked arm posture for complete button press')
         pose,pre,path=selected
         self.record(button_approach_tilt_deg=tilt)
-        self.preplanned_moves['approach coffee button']=(pre,path)
-        self.arm('approach coffee button',pre,True)
+        self.preplanned_moves['approach coffee button']=(to_world(self.spec,pre),path)
+        self.arm('approach coffee button',to_world(self.spec,pre),True)
         for offset in (-.025,-.01,-.003,0.,.0005,.001,.0015):
-            target=pose.copy();target[1,3]+=offset;self.arm('press coffee button',target);self.tick(.15)
+            target=pose.copy();target[1,3]+=offset;self.arm('press coffee button',to_world(self.spec,target));self.tick(.15)
             if self.button_pressed:break
         else:raise RuntimeError('No measured passive button actuation')
-        self.arm('withdraw from coffee button',pre);self.tick(.5);self.press_phase=False
+        self.arm('withdraw from coffee button',to_world(self.spec,pre));self.tick(.5);self.press_phase=False
         if self.button_contact()[0]:raise RuntimeError('Finger remains on button')
         self.event('button_released',button=self.active_button_body,travel_m=float(self.data.joint(self.active_button_body.removesuffix('_001')).qpos[0]))
 
@@ -529,11 +543,14 @@ def main():
     p.add_argument('--machine-offset',type=float,nargs=2,metavar=('DX','DY'),help='Shift the coffee apparatus along the counter (metres)')
     p.add_argument('--machine-slot',choices=sorted(SLOTS),help='Place the apparatus at a random spot in this counter slot (uses --placement-seed)')
     p.add_argument('--placement-seed',type=int,default=0)
+    p.add_argument('--machine-pose',type=float,nargs=4,metavar=('DX','DY','DZ','YAW_DEG'),help='Full apparatus pose relative to the validated layout (yaw about the machine mount)')
+    p.add_argument('--support',help='Support body under the apparatus (default: the kitchen counter it is on)')
     args=p.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     machine_offset=(0.,0.)
     if args.machine_slot:machine_offset=tuple(sample_offset(np.random.default_rng(args.placement_seed),args.machine_slot)[1])
     if args.machine_offset:machine_offset=tuple(args.machine_offset)
-    manifest,selection=prepare(args.run,args.asset,out,machine_offset)
+    if args.machine_pose:machine_offset=(*args.machine_pose[:3],np.radians(args.machine_pose[3]))
+    manifest,selection=prepare(args.run,args.asset,out,machine_offset,args.support)
     prepare_brew(out,manifest,selection)
     sources={}
     for source in (Path(__file__),Path(__file__).with_name('pour.py'),Path(__file__).with_name('brew.py')):
@@ -543,7 +560,7 @@ def main():
         qualification='diagnostic checkpoint resume' if args.resume_from else 'continuous empty-hand start'),indent=2))
     prior=json.loads((args.run/'report.json').read_text());manifest['box_grasp']=prior['annotation_selection']['local_transform']
     (out/'task_manifest.json').write_text(json.dumps(manifest,indent=2))
-    ca=SimpleNamespace(**prior['arguments']);ca.output=out;ca.assets=Path(ca.assets);ca.scene_xml=manifest['scene_xml'];ca.spawn=[*shift([2.12,-.94],machine_offset),np.pi/2]
+    ca=SimpleNamespace(**prior['arguments']);ca.output=out;ca.assets=Path(ca.assets);ca.scene_xml=manifest['scene_xml'];ca.spawn=[*to_world(manifest['coffee'],VALIDATED_DOCK[:2]),VALIDATED_DOCK[2]+np.radians(yaw_degrees(manifest['coffee']))]
     ca.dynamic_objects=list(ca.dynamic_objects)+[PORTAFILTER,BUTTON,POWER_BUTTON]
     import torch
     random.seed(manifest['seed']);np.random.seed(manifest['seed']);torch.manual_seed(manifest['seed'])
