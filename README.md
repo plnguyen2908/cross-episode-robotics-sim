@@ -141,8 +141,9 @@ for each skill, and check `report.json` for `"success": true`.
 - The policy environment supports **breakfast**. Coffee's machine model still reads the
   demonstrator's internal phase flags, so coffee runs as a demonstration only for now.
 - Composite tasks are validated on the seeds listed in [docs/tasks.md](docs/tasks.md); atomic
-  skills on the fixture and object listed there, not on every RoboCasa asset. All 14 skill
-  demonstrations pass with the current code.
+  skills on the fixture and object listed there, not on every RoboCasa asset. 13 of the 14 skill
+  demonstrations pass reliably; the cabinet round trip is unreliable because the object is
+  released tilted on the shelf (see docs/tasks.md).
 
 ## Acknowledgments
 

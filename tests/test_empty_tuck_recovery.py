@@ -7,6 +7,8 @@ from cross_episode_sim.controller.navigation import NavigationTransfer
 
 def controller(reject_all=False):
     c = NavigationTransfer.__new__(NavigationTransfer)
+    # This stand-in lacks the live state adaptive settling reads; test the fixed waits.
+    c.adaptive_motion_settling = False
     c.profile = SimpleNamespace(arm_joints=['wrist'], arm_actuators=['act'],
                                 torso_joints=[], torso_actuators=[])
     c.embodiment = SimpleNamespace(travel_posture=lambda: [0.])

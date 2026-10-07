@@ -125,7 +125,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
             ),
             navigation_method="SE(2) A*: turn in place, then drive forward; MuJoCo swept-pose probes",
             navigation_version=2,
-            base_motion=getattr(args, "base_motion", "turn_drive"),
+            base_motion=getattr(args, "base_motion", "blended"),
             nav_mean_speed_m_s=args.nav_speed,
             turn_mean_speed_rad_s=args.turn_speed,
             max_allowed_heading_error_deg=args.max_heading_error,
@@ -1159,7 +1159,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
         path = self.plan_route(goal, carrying, face=face)
         self.record(navigation_path_xy_yaw=[p.tolist() for p in path], carrying=carrying)
         segments = None
-        if getattr(self.args, "base_motion", "turn_drive") == "blended":
+        if getattr(self.args, "base_motion", "blended") == "blended":
             segments = blend_route(
                 path, float(self.base_pose()[2]), self.route_pose_clear(carrying),
                 nav_speed=self.args.nav_speed, turn_speed=self.args.turn_speed,
@@ -1433,10 +1433,10 @@ def parse_args(argv=None):
     p.add_argument("--table-y-offset", type=float, default=-2.0)
     p.add_argument("--nav-speed", type=float, default=0.12, help="Mean segment speed in m/s")
     p.add_argument(
-        "--turn-speed", type=float, default=0.08, help="Mean in-place turn speed in rad/s"
+        "--turn-speed", type=float, default=0.4, help="Mean in-place turn speed in rad/s"
     )
     p.add_argument(
-        "--base-motion", choices=("turn_drive", "blended"), default="turn_drive",
+        "--base-motion", choices=("turn_drive", "blended"), default="blended",
         help="turn_drive: stop and turn in place before each forward drive. "
              "blended: holonomic base rotates while translating and slides "
              "short docking hops; falls back to turn_drive where not swept-clear.")

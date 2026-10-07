@@ -99,7 +99,7 @@ Each skill family is validated on at least one fixture and object. Launch a demo
 | Family | Skill demos (video) | Validated on |
 |---|---|---|
 | Navigation | [cross-room](videos/cross-room.mp4) | same-room and cross-room routes, empty and carrying, honey bottle |
-| Pick and place | [cross-room](videos/cross-room.mp4), [drawer-pick-place](videos/drawer-pick-place.mp4), [oven-pick-place](videos/oven-pick-place.mp4), [cabinet-transfer](videos/cabinet-transfer.mp4) | table, counter, drawer and oven rack; honey bottle and egg |
+| Pick and place | [cross-room](videos/cross-room.mp4), [drawer-pick-place](videos/drawer-pick-place.mp4), [oven-pick-place](videos/oven-pick-place.mp4), [cabinet-transfer](videos/cabinet-transfer.mp4)¹ | table, counter, drawer and oven rack; honey bottle and egg |
 | Open/close doors | [cabinet-door](videos/cabinet-door.mp4), [oven-rack](videos/oven-rack.mp4) | native cabinet door; Oven031 drop-down door |
 | Open/close drawers | [drawer](videos/drawer.mp4), [drawer-loop](videos/drawer-loop.mp4) | one native kitchen drawer, with release and regrasp |
 | Twist knobs | [stove-knob](videos/stove-knob.mp4) | Stove002 burner knob on and off |
@@ -126,6 +126,30 @@ These are the tested ranges, not promises for every RoboCasa asset: the drawer t
 (35 cm in the transfer setup), the oven door opened 65.9° within its 1.15 rad limit and the rack
 extended about 15 cm.
 
+### ¹ Known issue: cabinet round trip is unreliable
+
+`cabinet-transfer` passed once with the old slow motion profile, and 1 of 6 runs with the shared
+fast profile. It fails at one of two points, depending on where the object comes to rest after it
+is released on the shelf:
+
+- **The object is released tilted, so it rolls or tips.** The hand stays horizontal to fit the
+  cabinet opening, which leaves the held object leaning (the egg's side grasp, or about 30° for the
+  honey bottle), and the gripper body hangs below the object, so it cannot be lowered onto the
+  shelf; it drops about 1.5 cm. The egg then rolled 4-6 cm forward or back at random; the bottle
+  tipped over toward the robot.
+- **Shallow releases fall off, deep releases are out of reach.** Released 5 mm inside the front
+  edge, the object rolls or tips off the shelf. Released 6 cm in, it can end up beyond the reach
+  of every cabinet dock, and retrieval finds no plannable grasp (`No saved grasp plan after
+  bounded alternate navigation stances`).
+
+Ruled out: the base yaw (blended turning leaves `base_theta` at -4.712 rad, but the planner uses
+the live base transform), the door (89° open in every run) and the grasp set (diagonal shelf
+grasps raised the retrieval hypotheses from 8 to 36 without a success).
+
+The fix is to release the object upright: choose the hand pitch, within the opening's limits,
+that makes the held object vertical, so it cannot tip or roll and a shallow placement stays put
+and within reach.
+
 ## How demonstrations are produced
 
 The demonstrator is an oracle: it reads object poses and collision geometry from the simulator,
@@ -134,3 +158,11 @@ cuRobo. Each skill is a transaction (see [architecture.md](architecture.md)): th
 checkpointed, a candidate dock or grasp is tried, a measured postcondition decides, and failures
 are rolled back before the next candidate. The saved trace therefore contains only the accepted
 branch; rejected tries are kept separately for analysis.
+
+Every task shares one motion profile. The base turns while it drives (`--base-motion blended`,
+falling back to turn-then-drive where a blended sweep is not clear) and turns at 0.4 rad/s. After
+each arm, gripper or base motion the controller advances as soon as the measured motion is
+finished instead of waiting a fixed time, bounded by the old fixed wait; while an object is held,
+the arm must be four times stiller (0.005 rad/s per joint) and the object itself at rest, so a
+released object is not knocked. Videos drop idle pauses. Compared with the earlier slow profile,
+the skill demonstrations take 1.0-4× less simulated time (about 105 min to 55 min in total).

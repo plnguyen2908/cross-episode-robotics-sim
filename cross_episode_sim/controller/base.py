@@ -258,6 +258,12 @@ SHELF_SUFFIX = os.environ.get("FRIDGE_SHELF", "FridgeBodyMeshf017e276Receptacle2
 
 
 class FridgeTransfer:
+    # Advance as soon as measured motion/release is ready (bounded by the old
+    # fixed waits) and drop idle pauses from rendered videos. First used by
+    # breakfast; every task inherits them.
+    adaptive_motion_settling = True
+    trim_video_pauses = True
+
     def __init__(self, args):
         self.args = args
         self.embodiment = embodiment_for(getattr(args, "robot", None) or RBY1M.name)

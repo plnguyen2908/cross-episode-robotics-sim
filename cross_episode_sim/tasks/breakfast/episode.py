@@ -21,8 +21,6 @@ class BreakfastEpisode(CrossRoomManipulation):
     task_outward = OUTWARD
     top_down_cone_degrees = 30.
     lower_vessel_release_fallback = True
-    adaptive_motion_settling = True
-    trim_video_pauses = True
 
     def __init__(self, args, selection, manifest):
         self.manifest = manifest

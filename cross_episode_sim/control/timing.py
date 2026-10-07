@@ -37,10 +37,26 @@ def wait_until_ready(controller, budget, ready, *, label, after_step=None):
     item["budget_exhausted"] += int(not satisfied)
 
 
+def payload_ready(controller, linear=.01, angular=.05):
+    """A held object can keep swinging in the grip after the arm has stopped."""
+    joint = getattr(controller, "object_joint", None)
+    if not getattr(controller, "holding_loaf", False) or joint is None:
+        return True
+    velocity = np.asarray(controller.data.joint(joint).qvel)
+    if velocity.size != 6:
+        return True
+    return bool(np.linalg.norm(velocity[:3]) <= linear and np.linalg.norm(velocity[3:]) <= angular)
+
+
 def arm_ready(controller, pose=None, position_tolerance=.005):
     names = controller.planner.names
     joints = [controller.data.joint(controller.profile.namespace + n) for n in names]
-    if any(abs(float(j.qvel[0])) > .02 for j in joints):
+    # A held object is released right after this kind of move; residual hand
+    # motion at release can knock it, so loaded moves settle more completely.
+    holding = getattr(controller, "holding_loaf", False)
+    if any(abs(float(j.qvel[0])) > (.005 if holding else .02) for j in joints):
+        return False
+    if not payload_ready(controller):
         return False
     if pose is not None:
         current = controller.tcp()

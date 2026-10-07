@@ -1376,7 +1376,7 @@ def main():
                         help='Native object pool; later work batches introduce unused objects')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--nav-speed', type=float, default=.25)
-    parser.add_argument('--turn-speed', type=float, default=.25)
+    parser.add_argument('--turn-speed', type=float, default=.4)
     parser.add_argument('--motion-slowdown', type=float, default=4.)
     cli = parser.parse_args()
     if cli.resume_dir:

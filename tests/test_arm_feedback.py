@@ -17,6 +17,7 @@ class ArmFeedbackTest(unittest.TestCase):
           </body></worldbody><actuator><position joint="robot_0/right_arm_0"
             kp="100" kv="10" ctrlrange="-1 .01"/></actuator></mujoco>''')
         c=FridgeTransfer.__new__(FridgeTransfer)
+        c.adaptive_motion_settling=False  # stand-in lacks the state adaptive settling reads
         c.embodiment=embodiment_for()
         c.model,c.data=model,mujoco.MjData(model);c.arm_aids=[0];c.attached=False;c.object_name="robot_0/hand"
         c.args=SimpleNamespace(kitchen=False,native_object=False,motion_slowdown=1.,move_retries=5)
@@ -52,6 +53,7 @@ class ArmFeedbackTest(unittest.TestCase):
           </body></worldbody><actuator><position joint="robot_0/right_arm_0"
             kp="10000" kv="200" ctrlrange="-1 1"/></actuator></mujoco>''')
         c=FridgeTransfer.__new__(FridgeTransfer)
+        c.adaptive_motion_settling=False  # stand-in lacks the state adaptive settling reads
         c.embodiment=embodiment_for()
         c.model,c.data=model,mujoco.MjData(model);c.arm_aids=[0];c.attached=False;c.object_name='robot_0/hand'
         c.args=SimpleNamespace(kitchen=False,native_object=False,motion_slowdown=1.,move_retries=6)
@@ -75,6 +77,7 @@ class ArmFeedbackTest(unittest.TestCase):
     def redundant_contact_robot(self):
         model = mujoco.MjModel.from_xml_string('<mujoco><worldbody>\n          <body><joint name="robot_0/right_arm_0" type="slide" axis="1 0 0" range="-1 1"/>\n            <geom size=".01" mass="1"/><body>\n              <joint name="robot_0/right_arm_1" type="slide" axis="1 0 0" range="-1 1"/>\n              <geom size=".01" mass="1"/><site name="robot_0/ee_site_r"/>\n            </body></body></worldbody></mujoco>')
         c = FridgeTransfer.__new__(FridgeTransfer)
+        c.adaptive_motion_settling=False  # stand-in lacks the state adaptive settling reads
         c.model, c.data = model, mujoco.MjData(model)
         c.data.qpos[:] = [-.1, .3]
         mujoco.mj_forward(model, c.data)
@@ -111,6 +114,7 @@ class ArmFeedbackTest(unittest.TestCase):
 
     def test_missing_contact_cache_cannot_trigger_replanning_or_motion(self):
         c = FridgeTransfer.__new__(FridgeTransfer)
+        c.adaptive_motion_settling=False  # stand-in lacks the state adaptive settling reads
         c.embodiment = embodiment_for()
         c.model = SimpleNamespace(opt=SimpleNamespace(timestep=.002))
         c.data = SimpleNamespace(joint=lambda name: SimpleNamespace(qpos=[0.]))
