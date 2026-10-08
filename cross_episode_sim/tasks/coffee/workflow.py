@@ -30,7 +30,7 @@ from cross_episode_sim.tasks.coffee.native_scene import COFFEE
 from cross_episode_sim.tasks.coffee.placement import (
     LID_PARKING, SLOTS, VALIDATED_DOCK, VALIDATED_MOUNT, rotate, sample_offset, to_validated, to_world,
     workspace_wall_conflicts, yaw_degrees)
-from cross_episode_sim.tasks.coffee.brew import BrewActions, DEFAULT_COFFEE_MUG, prepare_brew, POWER_BUTTON
+from cross_episode_sim.tasks.coffee.brew import BrewActions, DEFAULT_COFFEE_MUG, prepare_brew, POWER_BUTTON, SPOUT_XY
 from cross_episode_sim.tasks.coffee.grounds import PARTICLE_RADIUS, grain_inventory
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
@@ -566,6 +566,9 @@ def main():
     p.add_argument('--coffee-mug-yaw',type=float,help='Turn of the mug under the spout in degrees (default -45, validated for Mug_1)')
     p.add_argument('--second-mug-xy',type=float,nargs=2,default=[2.55,-.48],metavar=('X','Y'),help='Counter spot of the second mug, in the machine\'s validated frame (with --cups 2)')
     p.add_argument('--mug-navigation',choices=['auto','on','off'],default='auto',help='Drive to each mug before picking it and to its spot before setting it down, like the atomic pick and place (auto: on with --cups 2 or more)')
+    p.add_argument('--clutter',type=int,default=0,help='Loose objects on table and counter tops away from the machine (dining table, side table, right counter in turn)')
+    p.add_argument('--floor-objects',type=int,default=0,help='Loose objects on the floor, one room after another')
+    p.add_argument('--episode-label',help='Banner shown in the videos, e.g. "History 2 (given): coffee"')
     p.add_argument('--cups',type=int,default=1,help='Brew this many cups through the spout, one at a time, retrieving each to its counter spot (only with --through brew)')
     args=p.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     machine_offset=(0.,0.)
@@ -576,6 +579,20 @@ def main():
     if args.coffee_mug_yaw is not None:manifest['coffee']['mug_target_yaw_deg']=args.coffee_mug_yaw
     prepare_brew(out,manifest,selection,(args.coffee_mug,args.coffee_mug_grasp),mugs=args.cups,second_home=args.second_mug_xy)
     manifest['coffee']['navigate_to_mugs']=args.mug_navigation=='on' or (args.mug_navigation=='auto' and args.cups>1)
+    if args.clutter or args.floor_objects:
+        # Kept clear: the robot's dock, the machine, its parked parts and the mugs.
+        spec=manifest['coffee']
+        keep=[to_world(spec,VALIDATED_DOCK[:2]),to_world(spec,SPOUT_XY),to_world(spec,spec['hopper_xy']),
+              to_world(spec,spec['lid_parking_xy']),to_world(spec,spec['mug_home_xy'])]+([to_world(spec,args.second_mug_xy)] if args.cups>1 else [])
+        keep+=[i['position'][:2] for i in manifest['bindings'] if i.get('position')]
+        tops=[manifest['supports'][k] for k in ('dining','living','kitchen_right_counter') if k in manifest['supports']]
+        rooms={manifest['supports'].get('dining'):'dining',manifest['supports'].get('living'):'living'}
+        targets=[dict(room=rooms.get(t,'kitchen'),support=t) for t in (tops*args.clutter)[:args.clutter]]
+        targets+=[dict(room=('kitchen','dining','living')[i%3]) for i in range(args.floor_objects)]
+        from cross_episode_sim.tasks.floor_objects import scatter_objects
+        manifest['scattered_objects']=scatter_objects(Path(manifest['scene_xml']),targets,
+            args.placement_seed if args.placement_seed is not None else 0,avoid_xy=keep)
+    if args.episode_label:manifest['episode_label']=args.episode_label
     sources={}
     for source in (Path(__file__),Path(__file__).with_name('pour.py'),Path(__file__).with_name('brew.py')):
         destination=out/source.name;shutil.copyfile(source,destination)

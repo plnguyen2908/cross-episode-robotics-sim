@@ -24,6 +24,8 @@ class BreakfastEpisode(CrossRoomManipulation):
 
     def __init__(self, args, selection, manifest):
         self.manifest = manifest
+        # Banner in the videos naming a cross-episode role, e.g. "History 1 (given)".
+        self.episode_label = manifest.get("episode_label")
         self.task_supports = dict(manifest.get("supports", SUPPORTS))
         self.task_outward = dict(manifest.get("outward", OUTWARD))
         self._default_pickup_lift_height = args.lift_height

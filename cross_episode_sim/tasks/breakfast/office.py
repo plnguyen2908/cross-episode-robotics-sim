@@ -170,11 +170,13 @@ def prepare(config, variant, output):
     background=[]
     for room in SUPPORTS:
         pool=[i for i in manifest['background'] if i['room']==room]
-        if gathering:
+        if gathering and not variant['clutter']:
             # Exact counts: no other vessels, including decorative cup assets.
             for info in pool:world.remove(world.find(f"body[@name='{info['body']}']"))
             sampled['clutter'][room]=[]
             continue
+        # The house's clutter assets are condiments and spices, never vessels,
+        # so randomized clutter keeps a gathering task's cup and bowl counts exact.
         count=int(clutter.integers(config['clutter_count_per_room'][0],config['clutter_count_per_room'][1]+1)) if variant['clutter'] else len(pool)
         selected=set(clutter.choice(len(pool),size=count,replace=False).tolist()) if count else set()
         for index,info in enumerate(pool):

@@ -57,6 +57,10 @@ small furniture offsets. `configs/breakfast_gather_fill_serve.json` defines a sc
 day-to-day changes (objects every day, furniture and clutter every two days), producing a
 history of past episodes in the same house. `--people 1` serves one setting; `--sources storage`
 starts one mug in a drawer and one bowl in a cabinet.
+`--randomize` also moves the desk and side table and puts 1-2 clutter objects in every
+room; `--floor-objects N` scatters N loose objects on the floor (one room after another), each on
+clear floor away from doorways and the robot's start, settled at rest; `--episode-label TEXT`
+puts a banner in every video frame (blue for "History…", orange for "Current…").
 
 **Validated.** Seed 17 (816 s simulated, 13 trips, no in-place turns); seeds 17 and 18 for
 randomized fillings; seed 17 with `--sources storage` (1381 s simulated: drawer and cabinet
@@ -112,6 +116,10 @@ back wall line). Validated on the dining table's north edge at three spots along
 180°, 9 cm lower) and the living-room side table's west edge (turned 270°, 14 cm lower),
 322-337 s each; the side table's other edges are rejected for the east wall, and the dining
 table's other edges have a chair where the robot parks.
+
+**Clutter.** `--clutter N` puts N loose objects on the dining table, side table and right
+counter, `--floor-objects N` on the floor; both keep the dock, the machine, its parked parts and
+the mugs clear. `--episode-label TEXT` adds the video banner.
 
 **Two cups.** `--cups 2` brews two separate Mug_1 cups through the one spout. A second mug
 starts on the counter right of and in front of the first (`--second-mug-xy X Y` in the

@@ -237,7 +237,7 @@ from math import ceil
 
 import imageio.v2 as imageio
 from curobo._src.geom.types import Cuboid, Mesh, SceneCfg
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from scipy.spatial.transform import Rotation as R
 
 from cross_episode_sim.robot.arm_planner import RightArmPlanner
@@ -712,6 +712,19 @@ class FridgeTransfer:
         draw.text((650, 8), "Manipulation detail", fill="white")
         if len(frames) > 2:
             draw.text((1300, 8), "ROBOT CAMERA | raw view recorded separately", fill="white")
+        label = getattr(self, 'episode_label', None)
+        if label:
+            # Cross-episode runs mark which episode this is: a given history
+            # episode (blue) or the episode to be solved (orange).
+            try:
+                font = ImageFont.load_default(size=26)
+            except TypeError:
+                font = ImageFont.load_default()
+            box = draw.textbbox((0, 0), label, font=font)
+            width, height = box[2]-box[0]+28, box[3]-box[1]+18
+            color = (196, 92, 20) if label.lower().startswith('current') else (30, 90, 170)
+            draw.rectangle((frame.width-width-10, 56, frame.width-10, 56+height), fill=color)
+            draw.text((frame.width-width+4, 62), label, fill="white", font=font)
         self.writer.append_data(np.asarray(frame))
 
     def render_deferred_video(self):

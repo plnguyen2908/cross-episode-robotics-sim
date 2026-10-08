@@ -425,12 +425,18 @@ class GatherBreakfast(OfficeBreakfastEpisode):
         return 0 if CompositeEpisode(self,ops,goal).run('breakfast_gather_fill_serve',steps) else 1
 
 
-def prepare_episode(output, seed=None, people=None, sources=None, config_path=DEFAULT_CONFIG):
+def prepare_episode(output, seed=None, people=None, sources=None, config_path=DEFAULT_CONFIG,
+                    randomize=False, floor_objects=0, episode_label=None):
     """Author and settle a breakfast episode in `output`; returns its manifest.
 
     `sources='storage'` starts one mug in a drawer and one bowl in a cabinet.
+    `randomize` also moves the desk and side table and scatters table clutter;
+    `floor_objects` adds that many loose objects on the floor (rooms in turn).
     """
     config=json.loads(Path(config_path).read_text())
+    if randomize:
+        config['variants'][0].update(objects=True,furniture=True,clutter=True)
+        config['clutter_count_per_room']=[1,2]
     if people is not None:config['people']=people
     if seed is not None:config['seed']=seed
     roles=vessel_roles(config['people'])
@@ -438,7 +444,16 @@ def prepare_episode(output, seed=None, people=None, sources=None, config_path=DE
     if sources=='storage':
         config['initial_sources'].update(cup_one='drawer',bowl_one='cabinet')
     config['storage_profile']=sources or config.get('storage_profile','rooms')
-    return prepare(config,Path(output).resolve())
+    manifest=prepare(config,Path(output).resolve())
+    if floor_objects or episode_label:
+        if floor_objects:
+            from cross_episode_sim.tasks.floor_objects import add_floor_objects
+            rooms=[('kitchen','dining','living')[i%3] for i in range(floor_objects)]
+            keep=[manifest['robot_spawn'][:2]]+[i['position'][:2] for i in manifest['bindings']]
+            manifest['floor_objects']=add_floor_objects(Path(manifest['scene_xml']),rooms,config['seed'],avoid_xy=keep)
+        if episode_label:manifest['episode_label']=episode_label
+        (Path(output).resolve()/'task_manifest.json').write_text(json.dumps(manifest,indent=2))
+    return manifest
 
 
 def main():
@@ -448,11 +463,15 @@ def main():
     parser.add_argument('--people',type=int,choices=(1,2))
     parser.add_argument('--seed',type=int)
     parser.add_argument('--sources',choices=('rooms','storage'),default=None)
+    parser.add_argument('--randomize',action='store_true',help='Also move the desk and side table and scatter table clutter')
+    parser.add_argument('--floor-objects',type=int,default=0,help='Loose objects on the floor, one room after another')
+    parser.add_argument('--episode-label',help='Banner shown in the videos, e.g. "History 1 (given): breakfast"')
     parser.add_argument('--prepare-only',action='store_true')
     parser.add_argument('--validate-only',action='store_true')
     args=parser.parse_args()
     output=args.output.resolve()
-    manifest=prepare_episode(output,args.seed,args.people,args.sources,args.config)
+    manifest=prepare_episode(output,args.seed,args.people,args.sources,args.config,
+                             args.randomize,args.floor_objects,args.episode_label)
     print(json.dumps({'prepared':str(output),'initial_sources':{i['role']:i['initial_source'] for i in manifest['bindings']},
         'content_model':manifest['content_model']}),flush=True)
     if args.prepare_only:return 0
