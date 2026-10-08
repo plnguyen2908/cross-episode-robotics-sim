@@ -30,7 +30,7 @@ from cross_episode_sim.tasks.coffee.native_scene import COFFEE
 from cross_episode_sim.tasks.coffee.placement import (
     LID_PARKING, SLOTS, VALIDATED_DOCK, VALIDATED_MOUNT, rotate, sample_offset, to_validated, to_world,
     workspace_wall_conflicts, yaw_degrees)
-from cross_episode_sim.tasks.coffee.brew import BrewActions, prepare_brew, POWER_BUTTON
+from cross_episode_sim.tasks.coffee.brew import BrewActions, DEFAULT_COFFEE_MUG, prepare_brew, POWER_BUTTON
 from cross_episode_sim.tasks.coffee.grounds import PARTICLE_RADIUS, grain_inventory
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
@@ -159,12 +159,17 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         e=dict(event=name,time=float(self.data.time),**kw);self.workflow_events.append(e);self.record(workflow_event=e)
         (self.output/'workflow_events.json').write_text(json.dumps(self.workflow_events,indent=2))
         self.machine_event(name)
-        if name in ('portafilter_removed','empty_box_parked','portafilter_reinstalled','cup_placed','machine_ready'):
-            np.savez(self.output/(name+'_checkpoint.npz'),qpos=self.data.qpos,qvel=self.data.qvel,
+        if name in ('portafilter_removed','empty_box_parked','portafilter_reinstalled','cup_placed','machine_ready','cup_retrieved','next_cup'):
+            # Later cups get their own checkpoints rather than overwriting the first.
+            tag=name+(f'_{self.coffee_mugs().index(self.mug)+1}' if name in ('cup_placed','cup_retrieved') and len(self.coffee_mugs())>1 else '')
+            np.savez(self.output/(tag+'_checkpoint.npz'),qpos=self.data.qpos,qvel=self.data.qvel,
                      ctrl=self.data.ctrl,eq_active=self.data.eq_active,time=self.data.time,
                      machine_cycle=json.dumps(self.machine_cycle.__dict__) if hasattr(self,'machine_cycle') else '{}',
                      portafilter_pick_seed=np.array(getattr(self,'portafilter_pick_seed',[])),
-                     removal_tcp=np.array(getattr(self,'removal_tcp',[])),removal_joints=np.array(getattr(self,'removal_joints',[])))
+                     removal_tcp=np.array(getattr(self,'removal_tcp',[])),removal_joints=np.array(getattr(self,'removal_joints',[])),
+                     mug_state=json.dumps(dict(homes=getattr(self,'mug_homes',{}),release=getattr(self,'mug_release_tcp',{}),
+                                               filled=getattr(self,'coffee_filled',[]),active=getattr(self,'active_mug',None),
+                                               dock=getattr(self,'machine_dock',None))))
 
     def select_object(self,obj):
         super().select_object(obj)
@@ -190,8 +195,8 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         if 'BUTTON' in phase:
             self.cameras[1].lookat[:]=to_world(self.spec,[2.12,-.30,1.19])
             self.cameras[1].distance=.60;self.cameras[1].azimuth=135.+yaw_degrees(self.spec);self.cameras[1].elevation=-15.
-        elif 'CUP' in phase:
-            self.cameras[1].lookat[:]=self.data.body('cup_one_test_object_main').xpos+[0,0,.04]
+        elif 'CUP' in phase and hasattr(self,'machine_cycle'):
+            self.cameras[1].lookat[:]=self.data.body(self.mug).xpos+[0,0,.04]
             self.cameras[1].distance=.75;self.cameras[1].azimuth=45.+yaw_degrees(self.spec);self.cameras[1].elevation=-30.
         elif 'BREW' in phase:
             self.cameras[1].lookat[:]=to_world(self.spec,[2.12,-.30,1.07])
@@ -257,6 +262,9 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
             if carrying and ((a in payload and rb and self.embodiment.allows_payload_contact(nb)) or (b in payload and ra and self.embodiment.allows_payload_contact(na))):continue
             if self.allow_support and ((a in payload and b in (self.table_bids[self.counter]|getattr(self,'extra_support_bids',set()))) or (b in payload and a in (self.table_bids[self.counter]|getattr(self,'extra_support_bids',set())))):
                 if c.dist>=-.001:continue
+            # Bodies the payload may push against (the cup sliding out along the drip tray).
+            contact_ok=getattr(self,'payload_contact_ok_bids',set())
+            if (a in payload and b in contact_ok) or (b in payload and a in contact_ok):continue
             if ra != rb or carrying and ((a in payload)!=(b in payload)):
                 worst=max(worst,.001-float(c.dist))
         return worst
@@ -335,19 +343,27 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
             actual=self.bread_pose();position_error=float(np.linalg.norm(actual[:3,3]-target[:3,3]))
             angle_error=float(np.rad2deg(Rotation.from_matrix(actual[:3,:3]@target[:3,:3].T).magnitude()))
             self.report.setdefault('payload_pose_checks',[]).append(dict(stage=stage,correction=correction,position_error_m=position_error,orientation_error_deg=angle_error))
-            tight=self.object_name=='cup_one_test_object_main'
-            # The mug nearly fills the gap under the basket: hold its position to
-            # 0.5 mm. 0.25 degrees tilts its rim by under 0.5 mm (mug_ready allows 5.7).
-            if position_error<=(.0005 if tight else .002) and angle_error<=(.25 if tight else 1.):return
+            tight=self.object_name in self.coffee_mugs()
+            # With the drip tray 3 mm lower Mug_1 has ~2 mm above and below it under
+            # the basket; 1 mm / 0.5 degrees (rim rise under 0.8 mm) keeps that margin.
+            # A swapped, shorter mug has room for 1 mm / 1 degree.
+            mug_limit=(.001,.5) if 'coffee_mug_grasp_index' not in self.spec else (.001,1.)
+            limit=getattr(self,'payload_tolerance',None) or (mug_limit if tight else (.002,1.))
+            if position_error<=limit[0] and angle_error<=limit[1]:return
             self.record(payload_pose_correction=correction+1,position_error_m=position_error,orientation_error_deg=angle_error)
         raise RuntimeError(f'Payload failed to follow gripper at {stage}: {position_error:.4f} m, {angle_error:.2f} degrees')
 
-    def pickup(self,obj,local):
+    def pickup(self,obj,local,pre=None,approach_command=None):
+        """approach_command: gripper command for the approach instead of fully open."""
         self.select_object(obj);self.source=self.counter;self.destination=self.counter
         self.support_bids=(self.table_bids[self.counter]|getattr(self,'extra_support_bids',set()));self.table_gids={g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] in self.support_bids}
         self.initial_object_pose=self.bread_pose().copy();self.pickup_start_height=float(self.initial_object_pose[2,3]);self.transfer_start=self.data.joint(self.object_joint).qpos.copy()
-        self.allow_support=True;self.embodiment.open_gripper(self);self.tick(.4);self.rebuild()
-        target=self.bread_pose()@local;pre=target.copy();pre[:3,3]-=.04*pre[:3,2]
+        self.allow_support=True
+        if approach_command is None:self.embodiment.open_gripper(self)
+        else:self.embodiment.command_gripper(self.data,approach_command)
+        self.tick(.4);self.rebuild()
+        target=self.bread_pose()@local
+        if pre is None:pre=target.copy();pre[:3,3]-=.04*pre[:3,2]
         if obj==PORTAFILTER and self.fixture_phase=='released' and hasattr(self,'portafilter_pick_seed'):
             endpoint=self.nearby_ik(pre,self.portafilter_pick_seed,trust_radius=3.,preserve_self_clearance=True)
             path=self.planner.plan_joints(self.q(),endpoint)
@@ -387,7 +403,7 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         else:self.embodiment.open_gripper(self);self.tick(.7)
         self.event('release',body=self.object_name,pose=self.bread_pose().tolist(),counts={k:len(v) for k,v in self.inventory().items()})
         self.rebuild()
-        target=self.tcp().copy()
+        target=self.tcp().copy();self.last_release_tcp=target.copy()
         target[:3,3]+=(-.09*target[:3,2] if retreat_delta is None else np.asarray(retreat_delta))
         self.arm(label,target);self.allow_support=False
 
@@ -538,20 +554,28 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--through',choices=['remove','dose','reinstall','cup','power','press','brew'],default='brew')
     p.add_argument('--resume-from',type=Path,help='Diagnostic initial-state checkpoint; final qualification runs without this')
-    p.add_argument('--start',choices=['dose','reinstall','cup','power','press','brew'],default='dose')
+    p.add_argument('--start',choices=['dose','reinstall','cup','power','press','brew','next'],default='dose',help="'next' resumes a --cups run from a next_cup checkpoint, at placing the next mug")
     p.add_argument('--removal-witness',type=Path,help='Diagnostic removal checkpoint supplying an arm seed')
     p.add_argument('--machine-offset',type=float,nargs=2,metavar=('DX','DY'),help='Shift the coffee apparatus along the counter (metres)')
     p.add_argument('--machine-slot',choices=sorted(SLOTS),help='Place the apparatus at a random spot in this counter slot (uses --placement-seed)')
     p.add_argument('--placement-seed',type=int,default=0)
     p.add_argument('--machine-pose',type=float,nargs=4,metavar=('DX','DY','DZ','YAW_DEG'),help='Full apparatus pose relative to the validated layout (yaw about the machine mount)')
     p.add_argument('--support',help='Support body under the apparatus (default: the kitchen counter it is on)')
+    p.add_argument('--coffee-mug',default=DEFAULT_COFFEE_MUG[0],help='Qualified asset key for the coffee mug (default: Mug_1)')
+    p.add_argument('--coffee-mug-grasp',type=int,default=DEFAULT_COFFEE_MUG[1],help="Index into the mug's qualified grasps used to place it under the spout")
+    p.add_argument('--coffee-mug-yaw',type=float,help='Turn of the mug under the spout in degrees (default -45, validated for Mug_1)')
+    p.add_argument('--second-mug-xy',type=float,nargs=2,default=[2.55,-.48],metavar=('X','Y'),help='Counter spot of the second mug, in the machine\'s validated frame (with --cups 2)')
+    p.add_argument('--mug-navigation',choices=['auto','on','off'],default='auto',help='Drive to each mug before picking it and to its spot before setting it down, like the atomic pick and place (auto: on with --cups 2 or more)')
+    p.add_argument('--cups',type=int,default=1,help='Brew this many cups through the spout, one at a time, retrieving each to its counter spot (only with --through brew)')
     args=p.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     machine_offset=(0.,0.)
     if args.machine_slot:machine_offset=tuple(sample_offset(np.random.default_rng(args.placement_seed),args.machine_slot)[1])
     if args.machine_offset:machine_offset=tuple(args.machine_offset)
     if args.machine_pose:machine_offset=(*args.machine_pose[:3],np.radians(args.machine_pose[3]))
     manifest,selection=prepare(args.run,args.asset,out,machine_offset,args.support)
-    prepare_brew(out,manifest,selection)
+    if args.coffee_mug_yaw is not None:manifest['coffee']['mug_target_yaw_deg']=args.coffee_mug_yaw
+    prepare_brew(out,manifest,selection,(args.coffee_mug,args.coffee_mug_grasp),mugs=args.cups,second_home=args.second_mug_xy)
+    manifest['coffee']['navigate_to_mugs']=args.mug_navigation=='on' or (args.mug_navigation=='auto' and args.cups>1)
     sources={}
     for source in (Path(__file__),Path(__file__).with_name('pour.py'),Path(__file__).with_name('brew.py')):
         destination=out/source.name;shutil.copyfile(source,destination)
@@ -561,7 +585,7 @@ def main():
     prior=json.loads((args.run/'report.json').read_text());manifest['box_grasp']=prior['annotation_selection']['local_transform']
     (out/'task_manifest.json').write_text(json.dumps(manifest,indent=2))
     ca=SimpleNamespace(**prior['arguments']);ca.output=out;ca.assets=Path(ca.assets);ca.scene_xml=manifest['scene_xml'];ca.spawn=[*to_world(manifest['coffee'],VALIDATED_DOCK[:2]),VALIDATED_DOCK[2]+np.radians(yaw_degrees(manifest['coffee']))]
-    ca.dynamic_objects=list(ca.dynamic_objects)+[PORTAFILTER,BUTTON,POWER_BUTTON]
+    ca.dynamic_objects=list(ca.dynamic_objects)+[PORTAFILTER,BUTTON,POWER_BUTTON]+(['coffee_mug_two_test_object_main'] if args.cups>=2 else [])
     import torch
     random.seed(manifest['seed']);np.random.seed(manifest['seed']);torch.manual_seed(manifest['seed'])
     c=CoffeeWorkflow(ca,selection,manifest)
@@ -573,10 +597,15 @@ def main():
             c.data.qpos[:]=saved['qpos'];c.data.qvel[:]=saved['qvel'];c.data.ctrl[:]=saved['ctrl'];c.data.eq_active[:]=saved['eq_active'];c.data.time=float(saved['time'])
             c.next_trace=float(c.data.time);c.next_video_frame=float(c.data.time)
             mujoco.mj_forward(c.model,c.data)
-            c.fixture_phase='locked' if args.start in ('cup','power','press','brew') else 'released';c.poured=args.start!='dose'
+            c.fixture_phase='locked' if args.start in ('cup','power','press','brew','next') else 'released';c.poured=args.start!='dose'
             if 'portafilter_pick_seed' in saved and len(saved['portafilter_pick_seed']):c.portafilter_pick_seed=saved['portafilter_pick_seed'].tolist()
             if 'removal_tcp' in saved and len(saved['removal_tcp']):
                 c.removal_tcp=saved['removal_tcp'];c.removal_joints=saved['removal_joints']
+            if 'mug_state' in saved:
+                state=json.loads(str(saved['mug_state']))
+                c.mug_homes=state['homes'];c.mug_release_tcp=state['release'];c.coffee_filled=state['filled']
+                if state.get('active'):c.active_mug=state['active']
+                if state.get('dock'):c.machine_dock=state['dock']
             c.report['diagnostic_resume_from']=str(args.resume_from.resolve())
         if args.removal_witness:
             witness=np.load(args.removal_witness)
@@ -596,9 +625,16 @@ def main():
         cup=Operation(c.place_cup,c.mug_ready),
         power=Operation(lambda:c.operate_button('power'),lambda:c.machine_cycle.ready(c.data.time)),
         press=Operation(lambda:c.operate_button('brew'),lambda:c.button_pressed and not c.button_contact()[0]),
-        brew=Operation(c.finish_brew,lambda:c.machine_cycle.completed and c.mug_ready()))
+        brew=Operation(c.finish_brew,lambda:c.machine_cycle.completed and c.mug_ready()),
+        retrieve=Operation(c.retrieve_cup,lambda:not c.holding_loaf and c.machine_cycle.started_at is None),
+        next_mug=Operation(c.next_mug,lambda:True))
     names=['initialize','remove','dose','reinstall','cup','power','press','brew'];names=names[:names.index(args.through)+1]
-    if args.resume_from:names=['initialize']+names[names.index(args.start):]
+    if args.resume_from and args.start!='next':names=['initialize']+names[names.index(args.start):]
+    if args.start=='next':names=['initialize','cup','press','brew','retrieve']
+    elif args.cups>1:
+        if args.through!='brew':raise SystemExit('--cups needs --through brew')
+        # The same spout serves every cup: retrieve, place the next, press, brew; retrieve the last.
+        names+=['retrieve','next_mug','cup','press','brew']*(args.cups-1)+['retrieve']
     def goal():
         result=dict(empty_hand=not c.holding_loaf and not c.contacts(),
                     contact_clearance=bool(c.report['max_unintended_robot_penetration_m']<=.001 and
@@ -608,7 +644,12 @@ def main():
         if args.through in ['reinstall','cup','power','press','brew']:result['portafilter_locked']=c.installed()
         if args.through in ['press','brew']:result['button_pressed_and_released']=bool(c.button_pressed and not c.button_contact()[0] and abs(float(c.data.joint('button_01_press_pivot').qpos[0]))<.0002)
         if args.through in ['cup','power','press','brew']:result['cup_under_spout']=c.mug_ready()
-        if args.through=='brew':result['brew_completed']=c.machine_cycle.completed and not c.machine_cycle.aborted
+        if args.through=='brew' and args.cups==1:result['brew_completed']=c.machine_cycle.completed and not c.machine_cycle.aborted
+        if args.cups>1:
+            result['all_cups_brewed']=len(c.coffee_filled)==args.cups and not any(e['event']=='brew_aborted' for e in c.workflow_events)
+            result['cups_back_on_counter']=all(np.linalg.norm(body_pose(c.data,m)[:3,3]-np.array(p)[:3,3])<.02 for m,p in c.mug_homes.items())
+            result['every_cup_filled']=sorted(c.coffee_filled)==sorted(c.coffee_mugs())
+            result.pop('cup_under_spout',None)
         return result
     return 0 if CompositeEpisode(c,ops,goal).run('moonlake_robot_full_workflow',[dict(operation=n,arguments={}) for n in names]) else 1
 

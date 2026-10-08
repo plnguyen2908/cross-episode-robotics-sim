@@ -113,6 +113,32 @@ back wall line). Validated on the dining table's north edge at three spots along
 322-337 s each; the side table's other edges are rejected for the east wall, and the dining
 table's other edges have a chair where the robot parks.
 
+**Two cups.** `--cups 2` brews two separate Mug_1 cups through the one spout. A second mug
+starts on the counter right of and in front of the first (`--second-mug-xy X Y` in the
+machine's validated frame, default 2.55, -0.48). After the machine is prepared, each cup in
+turn is fetched, placed under the spout, brewed, taken back out and set down at its own counter
+spot; the power button is pressed once.
+
+The mugs are moved with the atomic pick-and-place skills instead of an arm-only reach. The robot
+tucks, docks beside the mug (`navigate_to_site`), grasps it by the top of the handle, folds it
+in by the torso with the standard loaded carry (`tuck_for_navigation`), and drives back to the
+machine dock; a brewed cup is carried folded to a dock beside its counter spot and set down.
+`--mug-navigation off` keeps the robot at the machine dock and reaches the mugs from there.
+
+Mug_1 is 104.2 mm tall and the spout leaves 105.1 mm above the drip tray, too little to take a
+cup back out reliably, so the drip tray is seated 3 mm lower (`TRAY_DROP` in `brew.py`). The
+cup slides out level at its resting height; pressing it down onto the tray tipped it, because it
+is held by the handle. Mug poses are held to 1 mm and 0.5° under the basket.
+
+**Success** with `--cups 2`: every cup brewed (two completed cycles, none aborted), every cup
+back at its counter spot within 2 cm, and the portafilter, button, empty hand and penetration
+checks above. Checkpoints are saved after each cup is placed and retrieved and at each switch
+to the next cup; `--resume-from X --start next` resumes at placing the next mug (diagnostic
+only: resumed runs are skipped by the data exporter).
+
+**Validated.** Driving to each mug: one run, 738 s simulated, both cups brewed and returned.
+Arm-only (`--mug-navigation off`): one run, 498 s simulated.
+
 ## Atomic skills
 
 Each skill family is validated on at least one fixture and object. Launch a demonstration with

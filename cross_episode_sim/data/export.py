@@ -154,7 +154,10 @@ def main():
     runs = []
     for run in args.runs:
         report = json.loads((run / "report.json").read_text())
-        if report.get("success") or args.include_failures:
+        if report.get("diagnostic_resume_from"):
+            # Starts mid-task from a checkpoint: not a complete demonstration.
+            print(f"skipping checkpoint-resumed run {run}")
+        elif report.get("success") or args.include_failures:
             runs.append(run)
         else:
             print(f"skipping unsuccessful run {run}")

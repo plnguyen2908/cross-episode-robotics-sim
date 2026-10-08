@@ -85,6 +85,7 @@ python scripts/install_data.py                           # starting scenes, gras
 export MUJOCO_GL=egl
 python -m cross_episode_sim.tasks.breakfast.gather --seed 17 --output runs/breakfast
 python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee
+python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee2 --cups 2   # two cups
 scripts/run_skill.sh drawer runs/drawer      # any of the 14 skill demos, see docs/tasks.md
 ```
 
