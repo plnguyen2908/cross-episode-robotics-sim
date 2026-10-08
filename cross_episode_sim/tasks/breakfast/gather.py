@@ -48,17 +48,17 @@ def validate_gather_config(config):
         raise ValueError('Invalid visual-content tilt rule')
 
 
-def instruction(people, physical=False):
-    return (f'Prepare breakfast for {people} people at the office desk. '
+def instruction(people, physical=False, place='office desk'):
+    return (f'Prepare breakfast for {people} people at the {place}. '
         f'There are exactly {people} cups and {people} bowls in the household. '
         'Find the empty vessels and gather them on clear kitchen work surfaces: '
         'counters, islands, kitchen tables, or a switched-off stovetop. '
-        'Open and close storage as needed. An empty vessel already at the desk '
-        'must come back for filling. Withdraw, leave your gripper empty, and wait '
+        f'Open and close storage as needed. An empty vessel already at the {place.split()[-1]} '
+        f'must come back for filling. Withdraw, leave your gripper empty, and wait '
         + ('for the human to put small food pieces in the bowls and small edible pieces in the cups. '
            if physical else 'for the human to fill every bowl with food and every cup with a drink. ') +
         'After observing the filled contents, carry those same vessels to the '
-        'office desk and arrange one cup and one bowl per person. Finish with '
+        f'{place} and arrange one cup and one bowl per person. Finish with '
         'the contents retained, storage closed, and your gripper empty.\n')
 
 
@@ -97,7 +97,8 @@ def prepare(config, output):
         info['serving_position']=list(info['destination_position'])
         info['serving_room']='dining'
     physical = config['content_representation'] == 'physical_objects'
-    manifest.update(task='breakfast_gather_fill_serve',instruction=instruction(config['people'], physical),
+    place='office desk' if config.get('table_setting','office')=='office' else 'dining table'
+    manifest.update(task='breakfast_gather_fill_serve',instruction=instruction(config['people'], physical, place),
         gathering_config=copy.deepcopy(config),supports=dict(SUPPORTS),outward=dict(OUTWARD),
         dynamic_fixtures=[],storage={},human_events=[],
         content_model=dict(representation='attached_visual_proxy',physical_food=False,
@@ -426,7 +427,7 @@ class GatherBreakfast(OfficeBreakfastEpisode):
 
 
 def prepare_episode(output, seed=None, people=None, sources=None, config_path=DEFAULT_CONFIG,
-                    randomize=False, floor_objects=0, episode_label=None):
+                    randomize=False, floor_objects=0, episode_label=None, table_objects=0, table_setting=None):
     """Author and settle a breakfast episode in `output`; returns its manifest.
 
     `sources='storage'` starts one mug in a drawer and one bowl in a cabinet.
@@ -434,6 +435,7 @@ def prepare_episode(output, seed=None, people=None, sources=None, config_path=DE
     `floor_objects` adds that many loose objects on the floor (rooms in turn).
     """
     config=json.loads(Path(config_path).read_text())
+    if table_setting:config['table_setting']=table_setting
     if randomize:
         config['variants'][0].update(objects=True,furniture=True,clutter=True)
         config['clutter_count_per_room']=[1,2]
@@ -445,12 +447,20 @@ def prepare_episode(output, seed=None, people=None, sources=None, config_path=DE
         config['initial_sources'].update(cup_one='drawer',bowl_one='cabinet')
     config['storage_profile']=sources or config.get('storage_profile','rooms')
     manifest=prepare(config,Path(output).resolve())
-    if floor_objects or episode_label:
+    if floor_objects or episode_label or table_objects:
+        from cross_episode_sim.tasks.floor_objects import add_floor_objects, scatter_objects
+        scene=Path(manifest['scene_xml'])
+        if table_objects:
+            # Tabletop objects on the dining and side tables, clear of every
+            # vessel's start and its place setting.
+            serving=[i['serving_position'][:2] for i in manifest['bindings']]+[i['position'][:2] for i in manifest['bindings']]
+            tops=[dict(room=r,support=manifest['supports'][r]) for r in ('dining','living')]
+            manifest['table_objects']=scatter_objects(scene,(tops*table_objects)[:table_objects],config['seed']+1,
+                                                      avoid_xy=serving,avoid_radius=.22,prefix='table')
         if floor_objects:
-            from cross_episode_sim.tasks.floor_objects import add_floor_objects
             rooms=[('kitchen','dining','living')[i%3] for i in range(floor_objects)]
             keep=[manifest['robot_spawn'][:2]]+[i['position'][:2] for i in manifest['bindings']]
-            manifest['floor_objects']=add_floor_objects(Path(manifest['scene_xml']),rooms,config['seed'],avoid_xy=keep)
+            manifest['floor_objects']=add_floor_objects(scene,rooms,config['seed'],avoid_xy=keep)
         if episode_label:manifest['episode_label']=episode_label
         (Path(output).resolve()/'task_manifest.json').write_text(json.dumps(manifest,indent=2))
     return manifest
@@ -465,13 +475,15 @@ def main():
     parser.add_argument('--sources',choices=('rooms','storage'),default=None)
     parser.add_argument('--randomize',action='store_true',help='Also move the desk and side table and scatter table clutter')
     parser.add_argument('--floor-objects',type=int,default=0,help='Loose objects on the floor, one room after another')
+    parser.add_argument('--table-objects',type=int,default=0,help='Loose objects on the dining and side tables')
+    parser.add_argument('--table-setting',choices=('office','dining'),help='office: fixed monitor, keyboard and mouse on the desk; dining: none')
     parser.add_argument('--episode-label',help='Banner shown in the videos, e.g. "History 1 (given): breakfast"')
     parser.add_argument('--prepare-only',action='store_true')
     parser.add_argument('--validate-only',action='store_true')
     args=parser.parse_args()
     output=args.output.resolve()
     manifest=prepare_episode(output,args.seed,args.people,args.sources,args.config,
-                             args.randomize,args.floor_objects,args.episode_label)
+                             args.randomize,args.floor_objects,args.episode_label,args.table_objects,args.table_setting)
     print(json.dumps({'prepared':str(output),'initial_sources':{i['role']:i['initial_source'] for i in manifest['bindings']},
         'content_model':manifest['content_model']}),flush=True)
     if args.prepare_only:return 0

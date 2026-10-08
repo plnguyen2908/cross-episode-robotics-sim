@@ -554,7 +554,7 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--through',choices=['remove','dose','reinstall','cup','power','press','brew'],default='brew')
     p.add_argument('--resume-from',type=Path,help='Diagnostic initial-state checkpoint; final qualification runs without this')
-    p.add_argument('--start',choices=['dose','reinstall','cup','power','press','brew','next'],default='dose',help="'next' resumes a --cups run from a next_cup checkpoint, at placing the next mug")
+    p.add_argument('--start',choices=['dose','reinstall','cup','power','press','brew','next','serve'],default='dose',help="'next' resumes a --cups run from a next_cup checkpoint, at placing the next mug")
     p.add_argument('--removal-witness',type=Path,help='Diagnostic removal checkpoint supplying an arm seed')
     p.add_argument('--machine-offset',type=float,nargs=2,metavar=('DX','DY'),help='Shift the coffee apparatus along the counter (metres)')
     p.add_argument('--machine-slot',choices=sorted(SLOTS),help='Place the apparatus at a random spot in this counter slot (uses --placement-seed)')
@@ -568,7 +568,9 @@ def main():
     p.add_argument('--mug-navigation',choices=['auto','on','off'],default='auto',help='Drive to each mug before picking it and to its spot before setting it down, like the atomic pick and place (auto: on with --cups 2 or more)')
     p.add_argument('--clutter',type=int,default=0,help='Loose objects on table and counter tops away from the machine (dining table, side table, right counter in turn)')
     p.add_argument('--floor-objects',type=int,default=0,help='Loose objects on the floor, one room after another')
+    p.add_argument('--table-setting',choices=('office','dining'),default='office',help='dining: remove the office monitor, keyboard and mouse')
     p.add_argument('--episode-label',help='Banner shown in the videos, e.g. "History 2 (given): coffee"')
+    p.add_argument('--serve-breakfast',action='store_true',help='Full breakfast: also two bowls in the kitchen that a person fills; serve both cups and bowls to the dining table, each cup beside a bowl (needs --cups 2)')
     p.add_argument('--cups',type=int,default=1,help='Brew this many cups through the spout, one at a time, retrieving each to its counter spot (only with --through brew)')
     args=p.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     machine_offset=(0.,0.)
@@ -579,6 +581,17 @@ def main():
     if args.coffee_mug_yaw is not None:manifest['coffee']['mug_target_yaw_deg']=args.coffee_mug_yaw
     prepare_brew(out,manifest,selection,(args.coffee_mug,args.coffee_mug_grasp),mugs=args.cups,second_home=args.second_mug_xy)
     manifest['coffee']['navigate_to_mugs']=args.mug_navigation=='on' or (args.mug_navigation=='auto' and args.cups>1)
+    if args.serve_breakfast:
+        if args.cups!=2:raise SystemExit('--serve-breakfast brews two cups: use --cups 2')
+        from cross_episode_sim.tasks.full_breakfast.scene import add_breakfast
+        add_breakfast(out,manifest,selection,args.placement_seed if args.placement_seed is not None else 0)
+    if args.table_setting=='dining' and manifest.get('fixed_props'):
+        # No office monitor, keyboard and mouse on the dining table.
+        tree=ET.parse(manifest['scene_xml']);world=tree.getroot().find('worldbody')
+        for name in manifest['fixed_props']:
+            node=world.find(f"body[@name='{name}']")
+            if node is not None:world.remove(node)
+        tree.write(manifest['scene_xml']);manifest['fixed_props']=[]
     if args.clutter or args.floor_objects:
         # Kept clear: the robot's dock, the machine, its parked parts and the mugs.
         spec=manifest['coffee']
@@ -603,9 +616,13 @@ def main():
     (out/'task_manifest.json').write_text(json.dumps(manifest,indent=2))
     ca=SimpleNamespace(**prior['arguments']);ca.output=out;ca.assets=Path(ca.assets);ca.scene_xml=manifest['scene_xml'];ca.spawn=[*to_world(manifest['coffee'],VALIDATED_DOCK[:2]),VALIDATED_DOCK[2]+np.radians(yaw_degrees(manifest['coffee']))]
     ca.dynamic_objects=list(ca.dynamic_objects)+[PORTAFILTER,BUTTON,POWER_BUTTON]+(['coffee_mug_two_test_object_main'] if args.cups>=2 else [])
+    if args.serve_breakfast:ca.dynamic_objects+=[i['body'] for i in manifest['bindings'] if i['role'].startswith('bowl')]
     import torch
     random.seed(manifest['seed']);np.random.seed(manifest['seed']);torch.manual_seed(manifest['seed'])
-    c=CoffeeWorkflow(ca,selection,manifest)
+    if args.serve_breakfast:
+        from cross_episode_sim.tasks.full_breakfast.episode import FullBreakfastWorkflow as Workflow
+    else:Workflow=CoffeeWorkflow
+    c=Workflow(ca,selection,manifest)
     def initialize():
         if args.resume_from:
             saved=np.load(args.resume_from)
@@ -614,7 +631,7 @@ def main():
             c.data.qpos[:]=saved['qpos'];c.data.qvel[:]=saved['qvel'];c.data.ctrl[:]=saved['ctrl'];c.data.eq_active[:]=saved['eq_active'];c.data.time=float(saved['time'])
             c.next_trace=float(c.data.time);c.next_video_frame=float(c.data.time)
             mujoco.mj_forward(c.model,c.data)
-            c.fixture_phase='locked' if args.start in ('cup','power','press','brew','next') else 'released';c.poured=args.start!='dose'
+            c.fixture_phase='locked' if args.start in ('cup','power','press','brew','next','serve') else 'released';c.poured=args.start!='dose'
             if 'portafilter_pick_seed' in saved and len(saved['portafilter_pick_seed']):c.portafilter_pick_seed=saved['portafilter_pick_seed'].tolist()
             if 'removal_tcp' in saved and len(saved['removal_tcp']):
                 c.removal_tcp=saved['removal_tcp'];c.removal_joints=saved['removal_joints']
@@ -646,8 +663,9 @@ def main():
         retrieve=Operation(c.retrieve_cup,lambda:not c.holding_loaf and c.machine_cycle.started_at is None),
         next_mug=Operation(c.next_mug,lambda:True))
     names=['initialize','remove','dose','reinstall','cup','power','press','brew'];names=names[:names.index(args.through)+1]
-    if args.resume_from and args.start!='next':names=['initialize']+names[names.index(args.start):]
+    if args.resume_from and args.start not in ('next','serve'):names=['initialize']+names[names.index(args.start):]
     if args.start=='next':names=['initialize','cup','press','brew','retrieve']
+    elif args.start=='serve':names=['initialize']
     elif args.cups>1:
         if args.through!='brew':raise SystemExit('--cups needs --through brew')
         # The same spout serves every cup: retrieve, place the next, press, brew; retrieve the last.
@@ -664,10 +682,32 @@ def main():
         if args.through=='brew' and args.cups==1:result['brew_completed']=c.machine_cycle.completed and not c.machine_cycle.aborted
         if args.cups>1:
             result['all_cups_brewed']=len(c.coffee_filled)==args.cups and not any(e['event']=='brew_aborted' for e in c.workflow_events)
-            result['cups_back_on_counter']=all(np.linalg.norm(body_pose(c.data,m)[:3,3]-np.array(p)[:3,3])<.02 for m,p in c.mug_homes.items())
+            if not args.serve_breakfast:result['cups_back_on_counter']=all(np.linalg.norm(body_pose(c.data,m)[:3,3]-np.array(p)[:3,3])<.02 for m,p in c.mug_homes.items())
             result['every_cup_filled']=sorted(c.coffee_filled)==sorted(c.coffee_mugs())
             result.pop('cup_under_spout',None)
         return result
-    return 0 if CompositeEpisode(c,ops,goal).run('moonlake_robot_full_workflow',[dict(operation=n,arguments={}) for n in names]) else 1
+    steps=[dict(operation=n,arguments={}) for n in names]
+    if args.serve_breakfast:
+        # A person fills the bowls; then every cup and bowl goes to its place setting.
+        ops.update(fill=Operation(c.fill_bowls,c.bowls_filled),serve=Operation(c.serve,c.served))
+        steps+=[dict(operation='fill',arguments={})]
+        for setting in manifest['full_breakfast']['settings']:
+            steps+=[dict(operation='serve',arguments=dict(role=setting['cup'])),dict(operation='serve',arguments=dict(role=setting['bowl']))]
+        coffee_goal=goal
+        def goal():
+            result=coffee_goal()
+            # Coffee steps keep the coffee task's limits (1 mm robot/scene, 1.5 mm
+            # finger/object, 0.5 mm self); serving uses breakfast's transfer skill and its
+            # 3 mm physical-collision limit, as in the breakfast task.
+            r=c.report;phase=lambda k:r.get('coffee_phase_'+k,r.get(k,0.))
+            result['contact_clearance']=bool(phase('max_unintended_robot_penetration_m')<=.001 and
+                phase('max_finger_object_penetration_m')<=.0015 and phase('max_robot_self_penetration_m')<=.0005)
+            result['serving_contact_within_breakfast_limit']=bool(r['max_unintended_robot_penetration_m']<=.003)
+            result['bowls_filled']=c.bowls_filled()
+            for setting in manifest['full_breakfast']['settings']:
+                for role in (setting['cup'],setting['bowl']):result[f'{role}_served']=c.served(role)
+                result[f"{setting['cup']}_beside_{setting['bowl']}"]=c.beside(setting['cup'],setting['bowl'])
+            return result
+    return 0 if CompositeEpisode(c,ops,goal).run('full_breakfast' if args.serve_breakfast else 'moonlake_robot_full_workflow',steps) else 1
 
 if __name__=='__main__':raise SystemExit(main())

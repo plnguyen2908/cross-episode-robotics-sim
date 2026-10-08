@@ -52,11 +52,16 @@ def target_area(model, data, target, limits):
 
 
 def clear_spot(model, data, xy, surface_z, surface_bodies, radius):
-    """Every ray over a disk around `xy` lands on the surface at its height."""
+    """Every ray over a disk around `xy` lands on the surface at its height.
+
+    Floor rays start at ceiling height, so spots under tables are rejected; top
+    rays start 35 cm above the top, below kitchen wall cabinets.
+    """
     geomid = np.zeros(1, np.int32)
+    start = 2.5 if surface_z < .05 else surface_z+.35
     for r in (0., radius/2, radius):
         for a in np.linspace(0, 2*np.pi, 8 if r else 1, endpoint=False):
-            point = np.array([xy[0]+r*np.cos(a), xy[1]+r*np.sin(a), 2.5])
+            point = np.array([xy[0]+r*np.cos(a), xy[1]+r*np.sin(a), start])
             distance = mujoco.mj_ray(model, data, point, np.array([0., 0., -1.]), None, 1, -1, geomid)
             if (geomid[0] < 0 or model.geom_bodyid[geomid[0]] not in surface_bodies
                     or abs(point[2]-distance-surface_z) > .01):

@@ -199,7 +199,10 @@ def prepare(config, variant, output):
     model=mujoco.MjModel.from_xml_path(str(scene));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
     validate_furniture(model,data,[name for f in sampled['furniture'].values() for name in f['bodies']])
     low,high=support_bounds(model,data,SUPPORTS['dining'])
-    props=add_office_equipment(root,low,high);tree.write(scene)
+    # 'dining' leaves the table to randomized tabletop objects instead of a fixed
+    # monitor, keyboard and mouse.
+    props=add_office_equipment(root,low,high) if config.get('table_setting','office')=='office' else []
+    tree.write(scene)
     model=mujoco.MjModel.from_xml_path(str(scene));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
     reserved={room:[] for room in SUPPORTS}
     reserved['dining']=[bounds(model,data,name) for name in props]
@@ -241,7 +244,7 @@ def prepare(config, variant, output):
     for info in background:world.find(f"body[@name='{info['body']}']").set('pos',' '.join(map(str,info['position'])))
     tree.write(scene)
     manifest.update(task='office_breakfast',seed=config['seed'],scene_xml=str(scene.resolve()),
-        bindings=infos,background=background,room_labels={'kitchen':'kitchen','dining':'office','living':'living room'},
+        bindings=infos,background=background,room_labels={'kitchen':'kitchen','dining':'office' if config.get('table_setting','office')=='office' else 'dining room','living':'living room'},
         fixed_props=props,robot_spawn=[float((low[0]+high[0])/2),float(high[1]+.80),float(-np.pi/2)],
         instruction=instruction(config),variation=copy.deepcopy(variant),
         variation_controls=copy.deepcopy(config),sampled_variation=sampled,

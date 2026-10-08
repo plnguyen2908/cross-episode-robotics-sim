@@ -276,13 +276,13 @@ class BrewActions:
         if not self.mug_ready():raise RuntimeError('Cup is not upright, supported and aligned under spout')
         self.event('cup_placed',pose=self.bread_pose().tolist())
 
-    def walk_to_counter(self, obj, point, carrying=False):
+    def walk_to_counter(self, obj, point, carrying=False, room='kitchen'):
         """Navigate first, as the atomic pick and place do: dock beside a counter spot."""
         self.__dict__.setdefault('machine_dock',[float(v) for v in self.base_pose()])
         if not carrying:self.select_object(obj)
         # Held cups fold in by the torso, as breakfast carries them.
         self.tuck_for_navigation()
-        self.navigate_to_site('kitchen',np.asarray(point),carrying)
+        self.navigate_to_site(room,np.asarray(point),carrying)
         self.rebuild()
 
     def return_to_machine(self):
