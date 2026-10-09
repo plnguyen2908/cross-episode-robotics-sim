@@ -145,6 +145,10 @@ class PhysicalReorderCheck(AnnotatedGraspMixin, NavigationTransfer):
             self.review_phase = row.get("review_phase", "TASK INITIALIZATION")
             self.object_name = row.get("active_object", EGG)
             self.look_object = row.get("look_object", EGG)
+            # Further per-frame state a task records for its captions.
+            for name in getattr(self, "replay_attributes", ()):
+                if name in row:
+                    setattr(self, name, row[name])
             mujoco.mj_forward(self.model, self.data)
             label = row.get("review_phase", "") + " | " + row["stage"]
             self.render_video_frame(label, float(self.data.time))

@@ -86,6 +86,7 @@ export MUJOCO_GL=egl
 python -m cross_episode_sim.tasks.breakfast.gather --seed 17 --output runs/breakfast
 python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee
 python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee2 --cups 2   # two cups
+python -m cross_episode_sim.tasks.full_breakfast --seed 7 --output runs/example7   # 2 histories + current
 scripts/run_skill.sh drawer runs/drawer      # any of the 14 skill demos, see docs/tasks.md
 ```
 
@@ -98,7 +99,7 @@ See [docs/installation.md](docs/installation.md) for details and troubleshooting
 | | |
 |---|---|
 | [Installation](docs/installation.md) | Environments, RoboCasa patch, MolmoSpaces assets, data bundle |
-| [Tasks](docs/tasks.md) | Breakfast, coffee and the atomic skills: what they do, success criteria, commands |
+| [Tasks](docs/tasks.md) | Breakfast, coffee, cross-episode examples and the atomic skills: what they do, success criteria, commands |
 | [Running and training policies](docs/policies.md) | `TaskEnv` API, rollouts, dataset export, behavior cloning example |
 | [Adding a task](docs/adding_a_task.md) | Scene preparation, transactional skills, composite episodes, goals |
 | [Architecture](docs/architecture.md) | Package layout, controller layers, navigation and manipulation stack |
@@ -109,6 +110,7 @@ See [docs/installation.md](docs/installation.md) for details and troubleshooting
 ```
 cross_episode_sim/
   tasks/breakfast, tasks/coffee   composite tasks: scene preparation, episode controller, CLI
+  tasks/full_breakfast            cross-episode example generator: two histories and the episode to solve
   fixtures/                       atomic fixture skills (doors, drawers, knobs, levers, buttons, ...)
   skills/                         transactional skill runner, checkpoints, composite episodes
   manipulation/                   RoboCasa manipulation: grasp qualification, recovery, placement

@@ -603,8 +603,10 @@ def main():
         targets=[dict(room=rooms.get(t,'kitchen'),support=t) for t in (tops*args.clutter)[:args.clutter]]
         targets+=[dict(room=('kitchen','dining','living')[i%3]) for i in range(args.floor_objects)]
         from cross_episode_sim.tasks.floor_objects import scatter_objects
+        # Table objects also stay off every place setting.
+        settings=[i['serving_position'] for i in manifest['bindings'] if i.get('serving_position')]
         manifest['scattered_objects']=scatter_objects(Path(manifest['scene_xml']),targets,
-            args.placement_seed if args.placement_seed is not None else 0,avoid_xy=keep)
+            args.placement_seed if args.placement_seed is not None else 0,avoid_xy=keep,avoid_top_xy=settings)
     if args.episode_label:manifest['episode_label']=args.episode_label
     sources={}
     for source in (Path(__file__),Path(__file__).with_name('pour.py'),Path(__file__).with_name('brew.py')):

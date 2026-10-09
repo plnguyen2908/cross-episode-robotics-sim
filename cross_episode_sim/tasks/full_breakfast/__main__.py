@@ -42,7 +42,10 @@ def sample(seed):
     rng = np.random.default_rng(seed)
     order = [str(t) for t in rng.permutation(['breakfast', 'coffee'])]
     def coffee_layout():
-        return dict(machine_slot=str(rng.choice(['main_counter', 'right_counter'])),
+        # The main counter only: carrying a cup back to a machine on the right
+        # counter, beside the fridge, has no room to turn yet.
+        rng.choice(['main_counter', 'right_counter'])  # keeps each seed's other draws unchanged
+        return dict(machine_slot='main_counter',
                     placement_seed=int(rng.integers(0, 10_000)), clutter=int(rng.integers(2, 5)),
                     floor_objects=int(rng.integers(6, 11)))
     episodes = {

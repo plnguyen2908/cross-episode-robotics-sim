@@ -26,7 +26,8 @@ FLOORS = {'kitchen': 'floor_room_main', 'dining': 'floor_dining_room_main',
 VESSEL_WORDS = ('cup', 'mug', 'bowl', 'glass', 'pitcher', 'teapot', 'kettle', 'jug')
 # Floor: free floor around the object for docking, kept out of doorways at room
 # edges. Tops: a little free top around it, away from the edge.
-FLOOR = dict(radius=.45, margin=.6, spacing=.8, max_size=.30, max_height=.25)
+# Floor objects stay 75 cm from furniture: the robot docks and turns in front of it.
+FLOOR = dict(radius=.75, margin=.6, spacing=.8, max_size=.30, max_height=.25)
 TOP = dict(radius=.08, margin=.08, spacing=.25, max_size=.18, max_height=.20)
 
 
@@ -69,12 +70,14 @@ def clear_spot(model, data, xy, surface_z, surface_bodies, radius):
     return True
 
 
-def scatter_objects(scene_xml, targets, seed, avoid_xy=(), avoid_radius=.9, prefix='scatter'):
+def scatter_objects(scene_xml, targets, seed, avoid_xy=(), avoid_radius=.9, prefix='scatter',
+                    avoid_top_xy=(), avoid_top_radius=.22):
     """Add one object per target: {'room': 'kitchen'} for the floor, or
     {'room': 'dining', 'support': BODY} for a table or counter top.
 
     `avoid_xy` are points (robot spawn, docks, task objects) whose surroundings stay
-    empty. Returns manifest records of the placed objects; a target with no clear
+    empty; `avoid_top_xy` are points on tops (place settings) kept clear of top
+    objects within `avoid_top_radius`. Returns manifest records of the placed objects; a target with no clear
     spot is skipped.
     """
     rng = np.random.default_rng(seed)
@@ -109,6 +112,8 @@ def scatter_objects(scene_xml, targets, seed, avoid_xy=(), avoid_radius=.9, pref
                 xy = rng.uniform(low, high)
                 if any(np.linalg.norm(xy-p['position'][:2]) < limits['spacing'] for p in placed):continue
                 if any(np.linalg.norm(xy-np.asarray(a)[:2]) < avoid_radius for a in avoid_xy):continue
+                if target.get('support') and any(np.linalg.norm(xy-np.asarray(a)[:2]) < avoid_top_radius
+                                                 for a in avoid_top_xy):continue
                 if clear_spot(model, data, xy, surface_z, surface_bodies, limits['radius']):
                     spot = xy; break
             if spot is None:
@@ -173,6 +178,8 @@ def settle(scene_xml, placed, allowed, seconds=1.5):
     tree.write(scene_xml)
 
 
-def add_floor_objects(scene_xml, rooms, seed, avoid_xy=(), avoid_radius=.9):
+def add_floor_objects(scene_xml, rooms, seed, avoid_xy=(), avoid_radius=1.):
     """One floor object per entry of `rooms` (e.g. ['kitchen', 'dining'])."""
-    return scatter_objects(scene_xml, [dict(room=r) for r in rooms], seed, avoid_xy, avoid_radius, prefix='floor')
+    # Never 'floor_...': controllers treat bodies named floor_* as the floor itself
+    # and would drive through them.
+    return scatter_objects(scene_xml, [dict(room=r) for r in rooms], seed, avoid_xy, avoid_radius, prefix='loose')

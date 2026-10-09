@@ -271,6 +271,7 @@ class OfficeBreakfastEpisode(BreakfastEpisode):
 
     def __init__(self,args,selection,manifest):
         super().__init__(args,selection,manifest)
+        self.office=manifest['room_labels']['dining']=='office'
         prop_ids={self.model.body(name).id for name in manifest['fixed_props']}
         for gid in range(self.model.ngeom):
             if self.model.geom_bodyid[gid] in prop_ids:
@@ -279,11 +280,13 @@ class OfficeBreakfastEpisode(BreakfastEpisode):
                            variation=manifest['variation'],sampled_variation=manifest['sampled_variation'])
 
     def tick(self,seconds):
-        self.review_phase=getattr(self,'review_phase','').replace('DINING','OFFICE')
+        if self.office:
+            self.review_phase=getattr(self,'review_phase','').replace('DINING','OFFICE')
         return super().tick(seconds)
 
     def describe_stage(self,stage):
-        return super().describe_stage(stage).replace('dining table','office desk')
+        text=super().describe_stage(stage)
+        return text.replace('dining table','office desk') if self.office else text
 
     def object_label(self):
         # Replay restores active_object per frame, but not annotation_asset.

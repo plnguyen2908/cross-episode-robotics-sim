@@ -53,8 +53,22 @@ class CoffeeEpisode(BreakfastEpisode):
         self._coffee_navigation_label=room.replace('_',' ')
         return super().navigate_to_site(room,point,carrying,skip)
 
+    # The video is rendered after physics, so each frame keeps where the robot was headed.
+    replay_attributes=('_coffee_navigation_label',)
+
+    def tick(self,seconds):
+        first=len(self.trace)
+        result=super().tick(seconds)
+        place=getattr(self,'_coffee_navigation_label',None)
+        if place is not None:
+            for row in self.trace[first:]:row['_coffee_navigation_label']=place
+        return result
+
     def describe_stage(self,stage):
-        label=super().describe_stage(stage).replace('dining table',getattr(self,'_coffee_navigation_label','coffee station'))
+        place=getattr(self,'_coffee_navigation_label','coffee station')
+        label=super().describe_stage(stage)
+        # Carry captions name the kitchen counter; serving goes to the dining table.
+        label=label.replace('kitchen counter','dining table') if place=='dining' else label.replace('dining table',place)
         if self.spec.get('dosing_container')=='small_box':
             label=label.replace('dosing cup','grounds box')
         return label

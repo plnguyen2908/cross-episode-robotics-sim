@@ -58,13 +58,15 @@ def add_food(root, model, data, info):
     info['contents'] = 'empty'
 
 
-def place_on_counter(scene, body, counters, supports, outward, rng, keep, clearance=.30):
+def place_on_counter(scene, body, counters, supports, outward, rng, keep, clearance=.25):
     """Set an existing vessel on a clear counter spot; returns the counter's key."""
-    limits = dict(radius=.13, margin=.12)
+    limits = dict(radius=.10, margin=.12)
     order = list(counters); rng.shuffle(order)
     for key in order:
         model = mujoco.MjModel.from_xml_path(str(scene)); data = mujoco.MjData(model); mujoco.mj_forward(model, data)
         low, high, top, surface = target_area(model, data, dict(room='kitchen', support=supports[key]), limits)
+        # The sink's rim is flush with the counter top; its basin is rejected by height.
+        surface |= {i for i in range(model.nbody) if model.body(i).name.startswith('sink_')}
         # Keep vessels in the front band of the counter, within easy reach from
         # a dock (breakfast places its vessels 2.5-10 cm from the edge).
         axis = int(np.argmax(np.abs(outward[key]))); sign = np.sign(outward[key][axis])
@@ -94,6 +96,10 @@ def add_breakfast(out, manifest, selection, seed):
     base = json.loads((BASE/'task_manifest.json').read_text())
     tree = ET.parse(scene); root = tree.getroot()
     copy_bowls(root, ET.parse(base['scene_xml']).getroot(), BOWLS)
+    # Copied bowls start high above the counter so neither blocks the spot search.
+    for role in BOWLS:
+        node = root.find(f".//body[@name='{role}_test_object_main']")
+        node.set('pos', ' '.join(map(str, [*np.fromstring(node.get('pos'), sep=' ')[:2], 3.])))
     tree.write(scene)
     bowls = []
     for role in BOWLS:
@@ -102,13 +108,14 @@ def add_breakfast(out, manifest, selection, seed):
         info.update(grasp_path=str(grasps), source='kitchen', destination='dining', serving_room='dining',
                     vessel_type='bowl', task_object=True)
         bowls.append(info)
-    # Bowls go on free kitchen counter spots (main or right counter), clear of the
-    # coffee apparatus, the mugs and where the portafilter and box get set down.
+    # Bowls go on free spots of the main kitchen counter, clear of the coffee
+    # apparatus, the mugs and where the portafilter and box get set down. Not the
+    # right counter: beside the fridge, a lifted bowl has no room to fold in.
     spec = manifest['coffee']
     from cross_episode_sim.tasks.coffee.placement import to_world
     keep = [i['position'][:2] for i in manifest['bindings'] if i.get('position')]
     keep += [to_world(spec, spec['hopper_xy']), np.asarray(spec['box_parking_pose'])[:2, 3]]
-    counters = [k for k in ('kitchen', 'kitchen_right_counter') if k in manifest['supports']]
+    counters = ['kitchen']
     for info in bowls:
         info['source'], info['position'] = place_on_counter(scene, info['body'], counters, manifest['supports'], manifest['outward'], rng, keep)
         keep.append(info['position'][:2])

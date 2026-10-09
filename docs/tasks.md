@@ -61,6 +61,9 @@ starts one mug in a drawer and one bowl in a cabinet.
 room; `--floor-objects N` scatters N loose objects on the floor (one room after another), each on
 clear floor away from doorways and the robot's start, settled at rest; `--episode-label TEXT`
 puts a banner in every video frame (blue for "History…", orange for "Current…").
+`--table-objects N` puts N loose objects on the dining and side tables, clear of the place
+settings. `--table-setting dining` drops the office equipment and calls the table the dining
+table in the instruction and the video captions (default `office`).
 
 **Validated.** Seed 17 (816 s simulated, 13 trips, no in-place turns); seeds 17 and 18 for
 randomized fillings; seed 17 with `--sources storage` (1381 s simulated: drawer and cabinet
@@ -146,6 +149,46 @@ only: resumed runs are skipped by the data exporter).
 
 **Validated.** Driving to each mug: one run, 738 s simulated, both cups brewed and returned.
 Arm-only (`--mug-navigation off`): one run, 498 s simulated.
+
+## Cross-episode examples
+
+```bash
+python -m cross_episode_sim.tasks.full_breakfast --seed 7 --output runs/full_breakfast/7 --gpus 0 1 3
+```
+
+One example for testing a policy's memory: two history episodes it is shown, and the episode it
+must solve. The output directory holds:
+
+| File | Contents |
+|---|---|
+| `history_1.mp4`, `history_2.mp4` | the given episodes, in the order a policy sees them |
+| `current.mp4` | a demonstration of the episode to solve |
+| `prompt.txt` | the instruction for the episode to solve |
+| `episode.json` | the history order, every episode's settings, layout and outcome, and what the current episode takes from each history |
+| `runs/` | each episode's full run directory |
+
+The histories are breakfast for two and two-cup coffee, in a seeded random order. The current
+episode, *breakfast with coffee*, starts with both mugs and two bowls on the kitchen counters:
+the robot brews coffee in each cup, a person fills the bowls (visual food), and the robot serves
+every cup and bowl to the dining table, each cup beside a bowl. Its prompt gives neither the
+number of place settings nor how to make coffee; those come from the histories.
+
+Each episode has its own layout from the seed: furniture offsets, 2-4 objects on the tables and
+counters, 6-10 objects on the floor, the dining table setting, the coffee machine at a random
+spot and facing along the main counter. The three episodes run in parallel, one GPU each
+(`--gpus`); an example takes about two hours.
+
+**Current episode success:** both cups brewed, both bowls filled, all four vessels on the dining
+table at their settings, each cup within 35 cm of its bowl, the hand empty. The coffee part is
+held to the coffee task's 1 mm contact limit, the serving part to breakfast's 3 mm.
+
+The current episode alone: `python -m cross_episode_sim.tasks.coffee.workflow --cups 2
+--serve-breakfast --table-setting dining --output runs/current`.
+
+**Status.** Seed 7: both histories pass. The current episode brews both cups, has the bowls
+filled and serves three of the four vessels, then finds no clear dining-table dock for the
+last bowl: a table clutter object sat 13 cm from its place setting. Table clutter now keeps
+22 cm from every place setting; this is not yet validated end to end.
 
 ## Atomic skills
 
