@@ -37,8 +37,10 @@ def prepare(run, asset, output, machine_offset=(0., 0.), support=None):
     spec = manifest['coffee']
     place_spec(spec, pose)
     off = np.array([pose[0], pose[1], 0.])
-    # The coffee workflow works on 'kitchen' support: the surface under the apparatus.
-    manifest['supports']['kitchen'] = support or counter_for(off)
+    # Apparatus support is independent of the kitchen food-preparation surfaces.
+    manifest['supports']['coffee_station'] = support or counter_for(off)
+    manifest['outward']['coffee_station'] = (to_world(spec, [0., -1.]) - to_world(spec, [0., 0.])).tolist()
+    spec['support_site'] = 'coffee_station'
     removed = blocking_fixtures(root, off) if pose[2:] == (0., 0.) else []
     removed += loose_objects_in_footprint(root, spec, keep=set(manifest['supports'].values()))
     for name in removed:
@@ -154,6 +156,10 @@ class MoonlakeRobotPour(CoffeeEpisode):
         return result
 
     def pour_grounds(self):
+        from cross_episode_sim.skills.coffee import PourGroundsSkill
+        return PourGroundsSkill(self).run()
+
+    def _pour_grounds_once(self):
         errors = []; chosen = None
         self.review_phase = 'ROBOT POUR INTO MOONLAKE PORTAFILTER'
         stage = 'position small box over portafilter'
@@ -187,7 +193,11 @@ class MoonlakeRobotPour(CoffeeEpisode):
         self.report['pour_approach_rejections'] = errors
         if chosen is None: raise RuntimeError(f'No reachable portafilter pour: {errors}')
         self.pouring = True
-        for angle in self.spec['pour_angles_deg'][1:]:
+        angles = self.spec['pour_angles_deg'][1:]
+        stride = self.spec.get('pour_execute_stride_deg', 5)
+        execution_angles = [angle for angle in angles if angle % stride == 0 or angle == angles[-1]]
+        self.report['pour_execution_angles_deg'] = execution_angles
+        for angle in execution_angles:
             self.grasp_relative = np.linalg.inv(self.tcp()) @ self.bread_pose()
             self.mesh_contact_move(f'pour grounds into portafilter: {angle} degrees',
                                    self.pour_pose(angle, chosen) @ np.linalg.inv(self.grasp_relative))
@@ -293,13 +303,12 @@ def main():
         c.tick(.5)
         if len(c.inventory()['vessel']) != 32: raise RuntimeError('Restored box did not retain all grounds')
 
-    def execute():
-        c.prepare_loaded_manipulation(); c.pour_grounds()
+    from cross_episode_sim.skills.coffee import PourGroundsSkill
 
     c.report.update(scope=__doc__, full_task_requested=False, portafilter_transfer_tested=False,
                     navigation_tested=False, brewing_tested=False, robot_execution=True)
     operations = dict(restore=Operation(restore, lambda:len(c.contacts()) == 2),
-                      pour=Operation(execute, lambda:c.grounds_ready() and len(c.contacts()) == 2))
+                      pour=PourGroundsSkill(c, prepare=True))
     goal = lambda:dict(grounds_in_portafilter=c.grounds_ready(), box_held=len(c.contacts()) == 2,
                      box_upright=bool(c.bread_pose()[2, 2] > .98))
     success = CompositeEpisode(c, operations, goal).run('moonlake_robot_portafilter_pour',

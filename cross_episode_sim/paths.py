@@ -46,7 +46,7 @@ def source_digests(*modules):
 # Asset files store machine-specific roots as ${TOKEN}s. `localize` resolves
 # them for this machine; `portable` turns local absolute paths back into tokens.
 def robocasa_dir():
-    configured = os.environ.get("ROBOCASA_DIR")
+    configured = os.environ.get("ROBOCASA_DIR", "").strip()
     if configured:
         return Path(configured)
     from importlib.util import find_spec
@@ -111,7 +111,12 @@ def model_digest(path):
     Grasp registries key their evidence by this digest, so a registry stays
     valid when the data bundle is installed under a different directory.
     """
-    text = portable(Path(path).read_text(), local_roots())
+    roots = local_roots()
+    # Relocated assets may use the default user cache while an inherited
+    # MLSPACES_CACHE_DIR still names the previous installation. Both roots
+    # identify the same portable namespace; geometry text remains hash checked.
+    roots.setdefault(Path.home() / '.cache/molmo-spaces-resources', '${MLSPACES_CACHE_DIR}')
+    text = portable(Path(path).read_text(), roots)
     return hashlib.sha256(text.encode()).hexdigest()
 
 

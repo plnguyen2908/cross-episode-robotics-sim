@@ -80,6 +80,7 @@ def test_human_cannot_fill_missing_or_held_vessels(tmp_path):
 def test_human_event_occurs_after_wait_and_is_replayable(tmp_path):
     c=controller(tmp_path);c.all_at_counter=lambda:True
     c.tuck_for_navigation=lambda:None;c.base_pose=lambda:np.zeros(3)
+    c.plan_route=lambda *a,**kw:[]
     c.task_navigate=lambda *a,**kw:None;c.in_default_travel_posture=lambda loaded:True
     c.contents_visible=lambda states:None
     c.tick=lambda seconds:setattr(c.data,'time',c.data.time+seconds)
@@ -93,6 +94,33 @@ def test_human_event_occurs_after_wait_and_is_replayable(tmp_path):
     assert (tmp_path/'human_events.json').is_file()
 
 
+@pytest.mark.parametrize('blocked,expected', [(1,[2.85,-1.35]),(5,[3.35,-1.25])])
+def test_wait_navigation_selects_a_planned_alternative_before_moving(tmp_path,blocked,expected):
+    c=controller(tmp_path)
+    c.tuck_for_navigation=MagicMock();c.base_pose=lambda:np.array([3.1, -1.1, np.pi/2])
+    route=[np.array([3.1, -1.1, np.pi/2]), np.array([*expected, np.pi/2])]
+    c.plan_route=MagicMock(side_effect=[RuntimeError('docking pose lacks clearance')]*blocked+[route])
+    c.task_navigate=MagicMock()
+    c.prepare_human_fill()
+    assert c.plan_route.call_count==blocked+1
+    c.task_navigate.assert_called_once()
+    assert c._accepted_route is route
+    np.testing.assert_allclose(c._human_wait_goal,expected)
+    assert c.events[-1]['rejected_wait_routes']==blocked
+
+
+def test_wait_navigation_does_not_move_when_all_routes_are_blocked(tmp_path):
+    c=controller(tmp_path)
+    c.tuck_for_navigation=MagicMock();c.base_pose=lambda:np.array([3.1,-1.1,np.pi/2])
+    c.plan_route=MagicMock(side_effect=RuntimeError('blocked'))
+    c.task_navigate=MagicMock()
+    with pytest.raises(RuntimeError,match='No clear nearby'):
+        c.prepare_human_fill()
+    assert c.plan_route.call_count==12
+    c.task_navigate.assert_not_called()
+    assert not hasattr(c,'_human_wait_goal')
+
+
 def test_replay_preserves_spill_after_fill():
     events=[dict(time=5.,states={'cup':'filled'}),dict(time=9.,states={'cup':'spilled'})]
     assert content_state_at(events,0.,['cup'])=={'cup':'empty'}
@@ -102,12 +130,24 @@ def test_replay_preserves_spill_after_fill():
 
 def test_full_plan_has_fill_barrier_between_gather_and_serve(tmp_path):
     c=controller(tmp_path)
-    with patch('cross_episode_sim.tasks.breakfast.gather.CompositeEpisode') as runner:
-        runner.return_value.run.return_value=True
+    c.current_room=lambda info:'dining'
+    with patch('cross_episode_sim.skills.interface.run_skill_episode', return_value=True) as runner:
         assert c.run_test()==0
-        steps=runner.return_value.run.call_args.args[1]
-    assert [s['operation'] for s in steps]==['validate_population','phase','transfer','human_fill','phase','transfer']
-    assert steps[1]['arguments']=={'phase':'GATHER'} and steps[4]['arguments']=={'phase':'SERVE'}
+        api,steps=runner.call_args.args[1:3]
+    assert [s['operation'] for s in steps]==['navigate','pick','navigate','place',
+                                            'navigate_to_wait','wait_for_fill','navigate','pick','navigate','place']
+    assert steps[2]['arguments']['destination']=='filling' and steps[8]['arguments']['destination']=='serving'
+    for step in steps:api.validate(step['operation'],step['arguments'])
+
+
+def test_interface_initial_empty_hand_before_first_pickup(tmp_path):
+    from cross_episode_sim.skills.gather_interface import gather_skill_interface
+    c=controller(tmp_path)
+    c.contacts=lambda:[]
+    assert not hasattr(c,'holding_loaf')
+    api=gather_skill_interface(c)
+    evidence=api.bindings['navigate'].preconditions(role='cup_one',destination='source')
+    assert all(v is True for v in evidence.values())
 
 
 @pytest.mark.parametrize('kind',['cabinet','drawer'])

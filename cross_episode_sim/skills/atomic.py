@@ -80,3 +80,30 @@ class CallbackSkill(AtomicSkill):
         # Legacy adapters can explicitly rebuild in their own prepare phase.
         if self._rebuild is not None:
             self._rebuild()
+
+
+class BoundSkill(AtomicSkill):
+    """A single physical action with its real argument signature and verifier.
+
+    Device-specific controllers supply geometry and motion primitives. Composite
+    recipes belong in SkillSequence, never in this adapter. A deterministic
+    action gets one attempt; repeating the same failure is not recovery.
+    """
+
+    def __init__(self, controller, name, execute, verify):
+        super().__init__(controller, name)
+        self.execute = execute
+        self.postcondition = verify
+
+    def validate_arguments(self, **arguments):
+        inspect.signature(self.execute).bind(**arguments)
+        inspect.signature(self.postcondition).bind(**arguments)
+
+    def candidates(self, **arguments):
+        return (None,)
+
+    def execute_candidate(self, candidate, **arguments):
+        return self.execute(**arguments)
+
+    def verify(self, **arguments):
+        return bool(self.postcondition(**arguments))

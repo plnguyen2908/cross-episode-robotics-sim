@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -14,6 +15,7 @@ from cross_episode_sim.fixtures.blender_load import align_disk_center
 from cross_episode_sim.tasks.coffee.native_scene import prepare, DEFAULT_CONFIG, COFFEE
 from cross_episode_sim.tasks.coffee.grounds import BrewState, grain_inventory, pour_pose, HOPPER
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
+from cross_episode_sim.skills.transfer import TransferOperation
 from cross_episode_sim.tasks.coffee.placement import VALIDATED_FRONT_EDGE_Y, to_validated, to_world
 from cross_episode_sim.manipulation.cross_room import CrossRoomManipulation
 from cross_episode_sim.manipulation.edge_access import object_bodies, collision_vertices
@@ -21,6 +23,29 @@ from cross_episode_sim.manipulation.edge_access import object_bodies, collision_
 
 class CoffeeEpisode(BreakfastEpisode):
     video_filename='coffee_ground_brew_serve.mp4'
+
+    def snapshot_skill_state(self):
+        # Dataclass instances are runtime objects to the generic checkpoint.
+        # Restore their dictionaries in place to preserve report aliases.
+        return {name: dict(vars(getattr(self, name))) for name in ('brew', 'machine_cycle')
+                if hasattr(self, name)}
+
+    def restore_skill_state(self, state):
+        for name, values in state.items():
+            instance = getattr(self, name)
+            vars(instance).clear()
+            vars(instance).update(values)
+
+    @property
+    def skill_checkpoint_files(self):
+        names = ['workflow_events.json', 'coffee_events.json']
+        for event in ('portafilter_removed', 'empty_box_parked', 'portafilter_reinstalled',
+                      'cup_placed', 'machine_ready', 'cup_retrieved', 'next_cup'):
+            names.append(event + '_checkpoint.npz')
+            if event in ('cup_placed', 'cup_retrieved'):
+                names.extend(f'{event}_{i + 1}_checkpoint.npz'
+                             for i in range(len(self.spec.get('coffee_mugs', []))))
+        return names
 
     def __init__(self,args,selection,manifest):
         self.spec=manifest['coffee'];self.brew=BrewState(duration=self.spec['brew_seconds'])
@@ -30,7 +55,7 @@ class CoffeeEpisode(BreakfastEpisode):
         self.grain_ids=set(self.grain_body_ids)
         self.anchor=np.asarray(self.spec['lid_anchor'])
         self.closed_pose=np.eye(4);self.closed_pose[:3,3]=self.anchor
-        self.counter=self.task_supports['kitchen'];self.lid_release_clearance=.004
+        self.counter=self.task_supports[self.spec.get('support_site', 'kitchen')];self.lid_release_clearance=.004
         self.lid_placement_offsets=[(0.,0.),(.06,0.),(-.06,0.),(0.,.06)]
         self.button_ids=[g for g in range(self.model.ngeom)
                          if (self.model.geom(g).name or '').startswith('coffee_machine_')
@@ -156,7 +181,7 @@ class CoffeeEpisode(BreakfastEpisode):
             joint=probe.joint(name+'_joint');p=live.body(name)
             joint.qpos[:3]=new.xpos+R@(p.xpos-old.xpos)
             joint.qpos[3:]=Rotation.from_matrix(R@p.xmat.reshape(3,3)).as_quat(scalar_first=True)
-        mujoco.mj_forward(self.model,probe)
+        forward_collision(self.model, probe)
 
     def navigation_penetration(self,data,carrying):
         grains=self.active_grains() if hasattr(self,'grain_ids') else set()
@@ -285,6 +310,10 @@ class CoffeeEpisode(BreakfastEpisode):
         return super().transport_payload()
 
     def pour_grounds(self):
+        from cross_episode_sim.skills.coffee import PourGroundsSkill
+        return PourGroundsSkill(self).run()
+
+    def _pour_grounds_once(self):
         if self.lid_closed():raise RuntimeError('Refusing to pour through a closed lid')
         self.review_phase='POUR COFFEE GROUNDS INTO OPEN HOPPER'
         # Seeded cup annotations are reused for pickup. Tilt targets are planned
@@ -416,29 +445,8 @@ class CoffeeEpisode(BreakfastEpisode):
     def verify_transfer(self,role,source,destination):return self.verify_role(role)
 
     def press_start(self):
-        if not (self.grounds_ready() and self.lid_closed() and self.mug_ready()):
-            raise RuntimeError('Coffee Start requires grounds, closed lid and correctly positioned mug')
-        self.tuck_for_navigation();self.navigate_to_site('coffee_machine',self.spec['dispenser_target'],False)
-        self.embodiment.command_gripper(self.data,self.profile.gripper_close);self.tick(.5)
-        self.untuck_for_manipulation();self.planner=self.make_planner();self.arm_aids=self.actuator_ids(self.planner.names)
-        self.press_phase=True;self.load_world()
-        R=Rotation.from_euler('x',35,degrees=True).as_matrix()@np.array([[0,1,0],[0,0,1],[1,0,0]])
-        pad=object_bodies(self.model,self.profile.namespace+'gripper/left_pad')
-        offsets=(collision_vertices(self.model,self.data,pad)-self.tcp()[:3,3])@self.tcp()[:3,:3]@R.T
-        tip=offsets[offsets[:,1]>offsets[:,1].max()-1e-5].mean(0)
-        gid=max(self.button_ids,key=lambda g:self.data.geom_xpos[g,2])
-        corners=np.array([[x,y,z] for x in (-1,1) for y in (-1,1) for z in (-1,1)])
-        vertices=self.data.geom_xpos[gid]+(corners*self.model.geom_size[gid])@self.data.geom_xmat[gid].reshape(3,3).T
-        surface=self.data.geom_xpos[gid].copy();surface[1]=vertices[:,1].min()
-        pose=np.eye(4);pose[:3,:3]=R;pose[:3,3]=surface-tip
-        pre=pose.copy();pre[1,3]-=.07;self.move('approach coffee Start',pre)
-        for offset in (-.025,-.01,-.003,-.001,0.,.0005):
-            goal=pose.copy();goal[1,3]+=offset;self.move('press coffee Start',goal);self.tick(.15)
-            if self.brew.started_at is not None:break
-        else:raise RuntimeError('Coffee Start did not register a force-bearing physical press')
-        self.move('withdraw from coffee Start',pre);self.tick(.4);self.press_phase=False
-        self.load_world();self.tuck_for_navigation()
-        if self.button_contact()[0]:raise RuntimeError('Gripper still contacts coffee Start after withdrawal')
+        from cross_episode_sim.skills.buttons import native_coffee_button_skill
+        return native_coffee_button_skill(self).run()
 
     def wait_brew(self):
         if self.brew.started_at is None:raise RuntimeError('Coffee brewing has not started')
@@ -474,8 +482,9 @@ class CoffeeEpisode(BreakfastEpisode):
             if not self.lid_closed() or len(self.inventory()['vessel'])!=len(self.spec['grains']):
                 raise RuntimeError('Coffee scene must start with a closed lid and grounds in the dosing cup')
             self.tuck_for_navigation()
-        ops=dict(settle=Operation(initial,lambda:True),transfer=Operation(self.transfer,self.verify_transfer),
-                 start=Operation(self.press_start,lambda:self.brew.started_at is not None and not self.button_contact()[0]),
+        from cross_episode_sim.skills.buttons import native_coffee_button_skill
+        ops=dict(settle=Operation(initial,lambda:True),transfer=TransferOperation(self, self.transfer, self.verify_transfer),
+                 start=native_coffee_button_skill(self),
                  brew=Operation(self.wait_brew,lambda:self.brew.completed))
         def goal():
             if validate_only:return dict(initial_state=self.lid_closed())

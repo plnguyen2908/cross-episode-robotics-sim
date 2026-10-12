@@ -72,17 +72,43 @@ MolmoSpaces and package directories. It prints each placeholder and the director
 to. Use `--archive` for a downloaded archive or `--source` for an unpacked bundle.
 See [data.md](data.md) for the contents.
 
+If a copied data directory still contains absolute paths from another machine,
+repair those roots without reinstalling the bundle:
+
+```bash
+python scripts/install_data.py --relocate \
+  --path-map /old/home/.cache/molmo-spaces-resources="$HOME/.cache/molmo-spaces-resources"
+```
+
+Repeat `--path-map OLD=NEW` for other relocated directories. The replacement directory
+must exist. Changed text files are backed up beside the data directory (override with
+`--backup`); meshes and other binary files are left intact. This updates installed data;
+existing run outputs retain their original provenance. Rerun failed tasks into a new
+output directory after repair.
+
 ## 5. Check the installation
 
 ```bash
 export MUJOCO_GL=egl
+python -c 'from cross_episode_sim.paths import robocasa_dir; from cross_episode_sim.manipulation.molmo_objects import assets_root; print("RoboCasa:", robocasa_dir()); print("MolmoSpaces:", assets_root())'
 pytest                                        # unit tests, no GPU needed
 python -m cross_episode_sim.tasks.breakfast.gather --seed 17 --prepare-only --output runs/check
+python -m cross_episode_sim.tasks.breakfast.gather --seed 17 --validate-only --output runs/check_controller
 ```
 
 `--prepare-only` builds and settles the scene without running the robot. It should print the
 selected vessels and, for seed 17, food assets `SugarCube005`, `CookieDoughBall002`,
 `IceCube005` and `Potato_21`.
+
+`--prepare-only` does **not** test controller startup. The separate `--validate-only`
+run builds the controller and checks the initial scene; it does not execute a complete
+breakfast. Use new output directories for repeated checks.
+
+For copied installations, inspect old exports of `ROBOCASA_DIR`, `MLSPACES_CACHE_DIR`,
+and `MLSPACES_ASSETS_DIR`. The assets directory must contain working `objects/thor`
+and `grasps/droid/Egg_1` paths, including any symlink targets. A directory's existence
+alone is insufficient. Remove stale overrides or set them to the local installation;
+breakfast's resolver warns and falls back to a complete local installation if available.
 
 ## Environment variables
 

@@ -189,6 +189,7 @@ def main():
     p.add_argument('--approach-policy', choices=('top-down', 'side', 'any-above-table'),
                    default='top-down', help='Filter existing grasp annotations; does not change gripper limits')
     p.add_argument('--prepare-only', action='store_true')
+    p.add_argument('--skill-interface', action='store_true', help='Execute the fixture demo through public atomic skill calls')
     p.add_argument('--grasp-family', choices=('auto', 'top', 'oblique', 'side'), default='auto', help='Force a qualification approach family without fallback')
     p.add_argument('--shared-locomanip', action='store_true', help='Use the MolmoSpaces TableReorder navigation/manipulation flow')
     p.add_argument('--transfer-phase', choices=('loaded', 'placed', 'retrieve', 'pick'), default='loaded')
@@ -475,6 +476,27 @@ def main():
     args.edge_dock_offset = cli.stand_off - .42
     args.flat_pick_policy = cli.flat_pick_policy
     args.thin_edge_fallback = cli.thin_edge_pick or cli.thin_edge_fallback or cli.flat_pick_only
+    if cli.skill_interface:
+        from importlib import import_module
+        from cross_episode_sim.skills.fixture_interface import run_fixture_demo
+        demos = {
+            'cross-room': ('manipulation.cross_room', 'CrossRoomManipulation'),
+            'drawer-pick-place': ('fixtures.drawer_pick_place', 'DrawerPickPlace'),
+            'cabinet-door': ('fixtures.cabinet_door', 'CabinetDoorTest'),
+            'drawer': ('fixtures.drawer', 'DrawerTest'),
+            'stove-knob': ('fixtures.stove_knob', 'StoveKnobTest'),
+            'faucet': ('fixtures.faucet', 'FaucetTest'),
+            'microwave-button': ('fixtures.microwave_button', 'MicrowaveButtonTest'),
+            'toaster-insertion': ('fixtures.toaster_insertion', 'ToasterInsertionTest'),
+            'oven-rack': ('fixtures.oven_rack', 'OvenRackTest'),
+            'blender-lid': ('fixtures.blender_lid', 'BlenderLidTest'),
+        }
+        name = next((name for name in demos if getattr(cli, name.replace('-', '_'))), None)
+        if name is None:
+            p.error('--skill-interface requires one of the ten documented family demos')
+        module, cls = demos[name]
+        controller = getattr(import_module('cross_episode_sim.'+module), cls)(args, selection)
+        return run_fixture_demo(controller, name)
     if cli.flat_pick_only or (cli.thin_edge_pick and not cli.cross_room):
         from cross_episode_sim.manipulation.thin_edge_pick import ThinEdgePickTest
         return ThinEdgePickTest(args, selection).run_test()

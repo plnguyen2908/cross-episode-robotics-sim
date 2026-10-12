@@ -8,6 +8,7 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 from cross_episode_sim.fixtures.blender_lid import BlenderLidTest, BLENDER, LID, GENERATED, lid_closed_state
+from cross_episode_sim.fixtures.blender_lid import align_disk_center as align_disk_center
 from cross_episode_sim.manipulation.cross_room import CrossRoomManipulation
 from cross_episode_sim.manipulation.molmo_objects import OUTPUT
 from cross_episode_sim.paths import read_localized
@@ -18,12 +19,6 @@ BUTTON_BODY='skill_blender_power_button'
 
 def next_power_state(on, previous_contact, contact, closed):
     return bool(closed and (not on if previous_contact and not contact else on))
-
-
-def align_disk_center(pose,closed,local_center):
-    result=pose.copy()
-    result[:3,3]=closed[:3,3]+closed[:3,:3]@local_center-pose[:3,:3]@local_center
-    return result
 
 
 def install_loading_scene(scene,old_object,table,xyz):
@@ -77,10 +72,6 @@ class BlenderLoadTest(BlenderLidTest):
                     anchor_error_m=float(np.linalg.norm(position-self.anchor)),
                     gripper_distance_m=float(np.linalg.norm(self.tcp()[:3,3]-position)),
                     upright_degrees=Rotation.from_matrix(rotation).as_euler('xyz',degrees=True).tolist())
-
-    def align_lid_center(self,pose):
-        center=self.model.geom_pos[self.model.geom('skill_blender_lid_g1').id]
-        return align_disk_center(pose,self.closed_pose,center)
 
     def button_contact(self):
         touched=False;force=0.

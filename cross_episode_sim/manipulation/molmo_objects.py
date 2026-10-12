@@ -12,9 +12,18 @@ NAMES=['Egg_1','Apple_1','Tomato_1','Potato_1','Mug_1','Cup_1','Salt_Shaker_1','
 
 def assets_root():
     """The MolmoSpaces asset installation holding THOR object meshes and DROID grasps."""
-    configured=os.environ.get('MLSPACES_ASSETS_DIR')
-    candidates=[Path(configured)] if configured else list((Path.home()/'.cache/molmospaces/assets').glob('*'))
-    return next(p for p in candidates if (p/'grasps/droid/Egg_1').exists())
+    configured=os.environ.get('MLSPACES_ASSETS_DIR', '').strip()
+    candidates=([Path(configured).expanduser()] if configured else [])
+    candidates+=sorted((Path.home()/'.cache/molmospaces/assets').glob('*'))
+    for candidate in candidates:
+        if (candidate/'grasps/droid/Egg_1').is_dir() and (candidate/'objects/thor').is_dir():
+            if configured and candidate != candidates[0]:
+                import warnings
+                warnings.warn(f'MLSPACES_ASSETS_DIR={configured} is incomplete; using {candidate}', RuntimeWarning)
+            return candidate
+    raise FileNotFoundError('No complete MolmoSpaces assets installation found. Set MLSPACES_ASSETS_DIR '
+                            'to a directory containing objects/thor and grasps/droid/Egg_1. '
+                            f'Checked: {[str(p) for p in candidates]}')
 
 
 def convert(name,root):

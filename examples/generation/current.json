@@ -1,0 +1,15 @@
+{
+  "task": "breakfast_with_coffee",
+  "seed": 102,
+  "histories": [
+    "../../runs/history_library/REPLACE_COFFEE_ID",
+    "../../runs/history_library/REPLACE_BREAKFAST_ID"
+  ],
+  "scene": {
+    "machine_room": "dining",
+    "extra_vessels": 3,
+    "nav_speed": 0.24,
+    "turn_speed": 0.6
+  },
+  "parameters": {}
+}

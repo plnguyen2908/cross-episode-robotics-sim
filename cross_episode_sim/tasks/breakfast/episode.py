@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation
 
 from cross_episode_sim.tasks.breakfast.scene import OUTWARD, SUPPORTS, bounds, support_bounds
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
+from cross_episode_sim.skills.transfer import TransferOperation
 from cross_episode_sim.manipulation.cross_room import CrossRoomManipulation
 from cross_episode_sim.manipulation.molmo_objects import assets_root
 from cross_episode_sim.controller.navigation import parse_args
@@ -15,6 +16,8 @@ from cross_episode_sim.controller.manipulation import TableReorder
 
 
 class BreakfastEpisode(CrossRoomManipulation):
+    atomic_pickup = True
+    atomic_delivery = True
     video_filename = 'breakfast_three_rooms.mp4'
     preserve_placement_candidate_order = True
     task_supports = SUPPORTS
@@ -31,7 +34,8 @@ class BreakfastEpisode(CrossRoomManipulation):
         self._default_pickup_lift_height = args.lift_height
         super().__init__(args, selection)
         self.max_physical_grasp_attempts = 5
-        # Oracle demonstration generation only; skills own their commit boundary.
+        # Controls alternative docks, not atomic dispatch. Coffee uses the same
+        # checkpoint contract with one candidate for its specialized geometry.
         self.speculative_dock_trials = bool(manifest.get('speculative_dock_trials', True)) and 'coffee' not in manifest
         self.annotation_candidate_budget = 24
         self.report.update(scope='seven physical transfers across three rooms: breakfast for two',
@@ -49,66 +53,12 @@ class BreakfastEpisode(CrossRoomManipulation):
             self.report['trace_policy'] = 'untrimmed accepted branches only; rejected branches saved separately'
 
     def pick_payload(self):
-        if not getattr(self, 'speculative_dock_trials', False):
-            return super().pick_payload()
-        from cross_episode_sim.skills.atomic import CallbackSkill
-        info = self.object_info[self.object_name]
-        # Freeze the candidates at the original scene, not at a failed endpoint.
-        docks = list(self.dock_candidates(info['source'], self.bread_pose()[:3, 3], pickup=True))
-        for dock in self.grasp_recovery_stances():
-            if self.room_id(dock[:2]) == self.room_id(self.bread_pose()[:2, 3]) and not any(
-                    np.linalg.norm(dock-old) < .01 for old in docks):
-                docks.append(dock)
-        candidates = [(dock, angled) for angled in (False, True) for dock in docks]
-        physical_failures = 0
-        limit = self.max_physical_grasp_attempts
-
-        def execute(candidate):
-            nonlocal physical_failures
-            dock, angled = candidate
-            self._trial_pick_dock = dock
-            self._trial_pick_angled = angled
-            self._trial_pick_active = True
-            self.report['physical_grasp_attempted'] = False
-            try:
-                return super(BreakfastEpisode, self).pick_payload()
-            except RuntimeError:
-                if self.report.get('physical_grasp_attempted'):
-                    physical_failures += 1
-                raise
-
-        def bounded():
-            for candidate in candidates:
-                if physical_failures >= limit:
-                    break
-                yield candidate
-
-        self.max_physical_grasp_attempts = 1
-        try:
-            return CallbackSkill(self, 'pickup', bounded, execute,
-                                 verify=lambda: bool(self.holding_loaf)).run()
-        finally:
-            self.max_physical_grasp_attempts = limit
-            self._trial_pick_active = False
+        from cross_episode_sim.skills.transfer import pickup
+        return pickup(self, super().pick_payload)
 
     def deliver_payload(self):
-        if not getattr(self, 'speculative_dock_trials', False):
-            return super().deliver_payload()
-        from cross_episode_sim.skills.atomic import CallbackSkill
-        self._trial_rejected_docks = set()
-        self._trial_delivery = True
-
-        def execute(index):
-            self._redock_index = index
-            return super(BreakfastEpisode, self).deliver_payload()
-
-        try:
-            return CallbackSkill(self, 'delivery', range(5), execute,
-                                 verify=lambda: bool(self.report.get('success')),
-                                 rebuild=self.rebuild_loaded_planner).run()
-        finally:
-            self._trial_delivery = False
-            self._trial_rejected_docks = set()
+        from cross_episode_sim.skills.transfer import delivery
+        return delivery(self, super().deliver_payload)
 
     @staticmethod
     def trial_dock_key(room, dock):
@@ -116,6 +66,7 @@ class BreakfastEpisode(CrossRoomManipulation):
 
     def select_object(self, obj):
         super().select_object(obj)
+        self._public_pickup_ready = None
         self.asset_metadata = self.object_info[obj]['setup']
         self.lower_vessel_release_fallback = self.object_info[obj].get('vessel_type') in ('cup', 'bowl')
         self.args.annotation_source = 'qualified_registry'
@@ -181,6 +132,8 @@ class BreakfastEpisode(CrossRoomManipulation):
                 yield np.array([*xy, yaw])
 
     def navigate_to_site(self, room, point, carrying, skip=0):
+        if getattr(self, '_public_skill_navigation', None) is True:
+            skip = max(skip, getattr(self, '_public_dock_skip', 0))
         errors = []
         candidates = list(self.dock_candidates(room, point, pickup=not carrying))
         if not carrying and getattr(self, '_trial_pick_active', False):
@@ -233,6 +186,11 @@ class BreakfastEpisode(CrossRoomManipulation):
         return float(support_bounds(self.model, self.data, self.source)[1][2])
 
     def prepare_pickup(self):
+        # Public pick is executed at a dock reached by a separate navigate call.
+        # The history policy can still prepare and navigate in one invocation.
+        if (getattr(self, '_public_skill_navigation', None) is False
+                and getattr(self, '_public_pickup_ready', None) == self.object_name):
+            return
         self.tuck_for_navigation()
         info = self.object_info[self.object_name]
         self.review_phase = f'PICK {info["role"]} IN {info["source"].upper()}'
@@ -263,6 +221,7 @@ class BreakfastEpisode(CrossRoomManipulation):
                         minimum_measured_lift_m=self.minimum_pickup_lift_m,
                         full_lift_retreat_m=self.args.lift_retreat)
         self.navigate_to_site(info['source'], self.bread_pose()[:3, 3], False)
+        self._public_pickup_ready = self.object_name
         # Edge pushing remains available through the existing mixin if needed.
         if self.edge_fallback_eligible():
             return super(CrossRoomManipulation, self).prepare_pickup()
@@ -794,27 +753,21 @@ class BreakfastEpisode(CrossRoomManipulation):
         self.report['population_validation']['empty_routes_validated'] = True
 
     def transfer_role(self, role):
-        info = next(i for i in self.manifest['bindings'] if i['role']==role)
-        if self.assignment()[info['body']] != self.task_supports[info['source']]:
-            raise RuntimeError(f'Unexpected starting support for {role}')
-        self.select_object(info['body'])
-        self.source,self.destination = self.task_supports[info['source']],self.task_supports[info['destination']]
-        self.support_bids = self.table_bids[self.source]
-        self.table_gids = {g for g in range(self.model.ngeom)
-                           if self.model.geom_bodyid[g] in self.support_bids
-                           and (self.model.geom_contype[g] or self.model.geom_conaffinity[g])}
-        self.initial_object_pose = self.bread_pose().copy()
-        self.transfer_start = self.data.joint(self.object_joint).qpos.copy()
-        self.report['success'] = False
-        self.execute_transfer()
-        self.report.setdefault('executed_placement_targets',{})[role]=self.destination_pose[:3,3].tolist()
+        from cross_episode_sim.skills.transfer import transfer_role
+        return transfer_role(self, role)
 
     def verify_role(self, role):
         info = next(i for i in self.manifest['bindings'] if i['role']==role)
+        try:
+            support = self.assignment(objects=[info['body']])[info['body']]
+        except RuntimeError:
+            # A policy is scored while vessels are in flight or on the floor,
+            # not only immediately after a demonstrator's successful place.
+            return False
         initial=Rotation.from_quat(info['initial_quaternion'],scalar_first=True).as_matrix()
         current=self.data.body(info['body']).xmat.reshape(3,3)
         target=self.report.get('executed_placement_targets',{}).get(role,info['destination_position'])
-        return bool(self.assignment()[info['body']]==self.task_supports[info['destination']]
+        return bool(support==self.task_supports[info['destination']]
                     and np.linalg.norm(self.data.body(info['body']).xpos[:2]-
                                        np.asarray(target)[:2]) < .10
                     and (current@initial.T)[2,2] > np.cos(np.radians(20))
@@ -828,7 +781,7 @@ class BreakfastEpisode(CrossRoomManipulation):
                 lambda:dict(population_and_empty_routes_valid=True)).run('breakfast_population_preflight',steps) else 1
         steps += [dict(operation='transfer',arguments=dict(role=i['role'])) for i in self.manifest['bindings']]
         operations = {'validate_population':Operation(self.validate_population,lambda:True),
-                      'transfer':Operation(self.transfer_role,self.verify_role)}
+                      'transfer':TransferOperation(self)}
         def goal():
             evidence = {i['role']:self.verify_role(i['role']) for i in self.manifest['bindings']}
             evidence['empty_hand'] = not self.attached and not getattr(self, 'holding_loaf', False)
@@ -876,6 +829,6 @@ def build_controller(output, manifest, episode_class=BreakfastEpisode, overrides
     return episode_class(args,selection,manifest)
 
 
-def run(output, manifest, validate_only=False, episode_class=BreakfastEpisode):
+def run(output, manifest, validate_only=False, episode_class=BreakfastEpisode, overrides=None):
     """Run the scripted demonstration for a prepared episode; returns a process exit code."""
-    return build_controller(output, manifest, episode_class).run_test(validate_only)
+    return build_controller(output, manifest, episode_class, overrides=overrides).run_test(validate_only)

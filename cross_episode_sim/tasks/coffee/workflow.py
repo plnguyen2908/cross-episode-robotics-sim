@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -78,6 +79,9 @@ def prepare(run, asset, out, machine_offset=(0., 0.), support=None):
     oldpos=np.fromstring(box.get('pos'),sep=' ');oldR=Rotation.from_quat(np.fromstring(box.get('quat'),sep=' '),scalar_first=True).as_matrix()
     boxpos=to_world(spec,[2.39,-.53,.960]);boxR=rotate(spec,Rotation.from_euler('z',-139.2678933,degrees=True).as_matrix())
     box.set('pos',numbers(boxpos));box.set('quat',numbers(Rotation.from_matrix(boxR).as_quat(scalar_first=True)))
+    for binding in manifest['bindings']:
+        if binding['body'] == boxname:
+            binding.update(source=spec['support_site'], destination=spec['support_site'], position=boxpos.tolist())
     for name in manifest['coffee']['grains']:
         g=root.find(f".//body[@name='{name}']"); pos=np.fromstring(g.get('pos'),sep=' ')
         g.set('pos',numbers(boxpos+boxR@oldR.T@(pos-oldpos)))
@@ -86,7 +90,7 @@ def prepare(run, asset, out, machine_offset=(0., 0.), support=None):
     local=np.eye(4);local[:3,:3]=Rotation.from_euler("y",65,degrees=True).as_matrix();local[:3,3]=[-.145,0,.040]
     annotations=out/'portafilter_grasps.npz';np.savez(annotations,transforms=np.array([local]))
     info=dict(body=PORTAFILTER,asset='MoonlakePortafilter',key='moonlake__portafilter',role='portafilter',
-        source='coffee_machine',destination='kitchen',position=seated[:3,3].tolist(),
+        source='coffee_machine',destination=spec['support_site'],position=seated[:3,3].tolist(),
         grasp_path=str(annotations),setup=dict(source='Moonlake',asset='MoonlakePortafilter'),task_object=True)
     manifest['bindings'].append(info);selection['selected_objects']=manifest['bindings']
     manifest['coffee']['portafilter_seated_pose']=seated.tolist()
@@ -102,9 +106,17 @@ def prepare(run, asset, out, machine_offset=(0., 0.), support=None):
     (out/'MOONLAKE_NOTICE').write_text((asset/'NOTICE.txt').read_text()+'\nWorkflow adaptations: free portafilter, measured-state bayonet coupling, direct countertop support, passive spring-return button, internal button/housing collision exclusion, finite rubber-pad torsional contacts, five friction postprocessing iterations. Robot contacts remain physical.\n')
     ET.ElementTree(root).write(out/'robocasa_scene.xml')
     model=mujoco.MjModel.from_xml_path(str(out/'robocasa_scene.xml'));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
+    from cross_episode_sim.tasks.scene_variation import floor_area
+    mount_xy = to_world(spec, VALIDATED_MOUNT)[:2]
+    rooms = [room for room in ('kitchen', 'dining', 'living')
+             if np.all(mount_xy >= floor_area(model, data, room)[0])
+             and np.all(mount_xy <= floor_area(model, data, room)[1])]
+    if len(rooms) != 1:
+        raise ValueError(f'Coffee machine must be within one supported room, got {rooms}')
+    spec['machine_room'] = rooms[0]
     walls=workspace_wall_conflicts(model,data,spec)
     if walls:raise ValueError(f'Coffee placement leaves no room for the robot; walls in its working area: {walls}')
-    counter=object_bodies(model,manifest['supports']['kitchen'])
+    counter=object_bodies(model,manifest['supports'][spec['support_site']])
     groups=model.geom_group.copy();model.geom_group[:]=5
     for gid in range(model.ngeom):
         if model.geom_bodyid[gid] in counter and (model.geom_contype[gid] or model.geom_conaffinity[gid]):model.geom_group[gid]=4
@@ -144,6 +156,9 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         self.loading=np.array(self.spec['portafilter_reference_pose'])
         self.axis_eq=[self.model.equality(n).id for n in ['bayonet_axis_a','bayonet_axis_b']]
         self.lock_eq=self.model.equality('bayonet_locked').id
+        # Preserve socket constraint frames when the standalone scene starts detached.
+        for name, values in self.spec.get('bayonet_constraint_data', {}).items():
+            self.model.eq_data[self.model.equality(name).id] = values
         passive={self.model.joint(PORTAFILTER+'_free').id,self.model.joint('button_01_press_pivot').id}
         if hasattr(self,'machine_cycle'):passive.add(self.model.joint(POWER_BUTTON.removesuffix('_001')).id)
         if any(self.model.actuator_trntype[a]==mujoco.mjtTrn.mjTRN_JOINT and self.model.actuator_trnid[a,0] in passive for a in range(self.model.nu)):
@@ -230,7 +245,7 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         for name in self.inventory_for(live)[key]:
             b=live.body(name);q=probe.joint(name+'_joint').qpos
             q[:3]=new[:3,3]+r@(b.xpos-old[:3,3]);q[3:]=Rotation.from_matrix(r@b.xmat.reshape(3,3)).as_quat(scalar_first=True)
-        mujoco.mj_forward(self.model,probe)
+        forward_collision(self.model, probe)
 
     def navigation_penetration(self,data,carrying):
         if not hasattr(self,'grain_ids'):return super().navigation_penetration(data,carrying)
@@ -246,7 +261,7 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
             if depths and max(depths)>0.:
                 joint=data.joint(self.active_button_body.removesuffix('_001'))
                 joint.qpos[0]=min(.0015,float(joint.qpos[0])+max(depths)+.00001)
-                mujoco.mj_forward(self.model,data)
+                forward_collision(self.model, data)
         payload=self.bread_bids|self.active_grains();worst=0.
         for c in data.contact:
             a,b=map(int,self.model.geom_bodyid[[c.geom1,c.geom2]])
@@ -335,10 +350,14 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
                     self.record(joint_approach_rejection=str(e))
         return self.mesh_contact_move(stage,target)
 
-    def held_pose(self,stage,target):
+    def held_pose(self,stage,target,*,path=None):
         for correction in range(4):
             self.grasp_relative=np.linalg.inv(self.tcp())@self.bread_pose()
-            self.arm(stage if not correction else stage+' pose correction',target@np.linalg.inv(self.grasp_relative))
+            tcp_target=target@np.linalg.inv(self.grasp_relative)
+            if path is not None and correction == 0:
+                self.mesh_contact_move(stage,tcp_target,path=path)
+            else:
+                self.arm(stage if not correction else stage+' pose correction',tcp_target)
             if len(self.contacts())<2:raise RuntimeError('Lost bilateral grasp at '+stage)
             actual=self.bread_pose();position_error=float(np.linalg.norm(actual[:3,3]-target[:3,3]))
             angle_error=float(np.rad2deg(Rotation.from_matrix(actual[:3,:3]@target[:3,:3].T).magnitude()))
@@ -416,143 +435,42 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
         local=np.eye(4);local[:3,:3]=Rotation.from_euler('y',65,degrees=True).as_matrix();local[:3,3]=[-.145,0,.040];return local
 
     def unlock_remove(self):
-        self.review_phase='REMOVE PORTAFILTER'
-        self.pickup(PORTAFILTER,self.pf_grasp())
-        for angle in range(5,51,5):
-            target=self.seated.copy();target[:3,:3]=Rotation.from_euler('z',-angle,degrees=True).as_matrix()@self.seated[:3,:3]
-            self.held_pose('twist portafilter to unlock',target)
-        actual=body_pose(self.data,PORTAFILTER)
-        error=Rotation.from_matrix(actual[:3,:3]@target[:3,:3].T).magnitude()
-        if error>np.deg2rad(3):raise RuntimeError('Portafilter did not physically unlock')
-        self.data.eq_active[self.axis_eq]=False;self.fixture_phase='released';self.event('bayonet_unlocked',orientation_error_deg=float(np.rad2deg(error)))
-        down=actual.copy()
-        for amount in (.02,.04,.06,.08):
-            p=down.copy();p[2,3]-=amount;self.held_pose('lower unlocked portafilter',p)
-        front=self.toward_loading(p)
-        self.held_pose('withdraw portafilter from machine',front)
-        hover=self.loading.copy();hover[2,3]+=.012;self.held_pose('position portafilter above counter',hover)
-        self.held_pose('lower portafilter onto counter',self.loading)
-        self.portafilter_pick_seed=self.q().tolist()
-        self.remember_removal(self.trace)
-        self.release('withdraw empty hand from portafilter')
-        self.tick(.8)
-        if np.linalg.norm(body_pose(self.data,PORTAFILTER)[:3,3]-self.loading[:3,3])>.015:raise RuntimeError('Portafilter unstable on counter')
-        own=object_bodies(self.model,PORTAFILTER);counter=self.table_bids[self.counter]
-        supported=any((self.model.geom_bodyid[c.geom1] in own and self.model.geom_bodyid[c.geom2] in counter) or
-                      (self.model.geom_bodyid[c.geom2] in own and self.model.geom_bodyid[c.geom1] in counter) for c in self.data.contact)
-        tilt=Rotation.from_matrix(body_pose(self.data,PORTAFILTER)[:3,:3]@self.loading[:3,:3].T).magnitude()
-        speed=float(np.linalg.norm(self.data.joint(PORTAFILTER+'_free').qvel))
-        if not supported or tilt>np.deg2rad(5) or speed>.01:raise RuntimeError('Portafilter lacks stable upright counter support')
-        self.event('portafilter_removed',pose=body_pose(self.data,PORTAFILTER).tolist(),counter_contact=supported,speed=speed)
+        from cross_episode_sim.skills.portafilter import DetachPortafilterSkill
+        return DetachPortafilterSkill(self).run()
 
     def dose(self):
-        self.review_phase='LOAD PORTAFILTER FROM SMALL BOX'
-        local=np.array(self.manifest['box_grasp'])
-        self.pickup(self.spec['dosing_body'],local)
-        lift=self.bread_pose().copy();lift[2,3]+=.10;self.held_pose('lift grounds box',lift)
-        self.allow_support=False
-        source=np.array(self.spec['portafilter_original_pose']);pf=body_pose(self.data,PORTAFILTER)
-        center=pf@np.linalg.inv(source)@np.array([*CENTER,RIM,1.])
-        self.spec['hopper'].update(center_xy=center[:2].tolist(),top_z=float(center[2]))
-        self.pour_grounds()
-        self.event('grounds_loaded',counts={k:len(v) for k,v in self.inventory().items()})
-        target=np.array(self.spec['box_parking_pose']);hover=target.copy();hover[2,3]+=.10
-        self.grasp_relative=np.linalg.inv(self.tcp())@self.bread_pose()
-        self.arm('return empty box above counter',hover@np.linalg.inv(self.grasp_relative),True)
-        self.allow_support=True
-        near=target.copy();near[2,3]+=.003;self.held_pose('set empty box on counter',near)
-        self.release('withdraw from empty box')
-        self.event('empty_box_parked')
+        from cross_episode_sim.skills.coffee import dosing_sequence
+        return dosing_sequence(self).run()
 
     def installed(self):
         t=body_pose(self.data,PORTAFILTER)
         return bool(self.data.eq_active[self.lock_eq] and np.linalg.norm(t[:3,3]-self.seated[:3,3])<.003 and Rotation.from_matrix(t[:3,:3]@self.seated[:3,:3].T).magnitude()<np.deg2rad(2))
 
     def reinstall(self):
-        self.review_phase='REINSTALL LOADED PORTAFILTER'
-        self.pickup(PORTAFILTER,self.pf_grasp())
-        lift=self.bread_pose().copy();lift[2,3]+=.025;self.held_pose('lift loaded portafilter',lift);self.allow_support=False
-        target=self.seated.copy();target[:3,:3]=Rotation.from_euler('z',-50,degrees=True).as_matrix()@self.seated[:3,:3]
-        low=target.copy();low[2,3]-=.08
-        front=self.toward_loading(low)
-        self.held_pose('align loaded portafilter in front of machine',front)
-        self.held_pose('insert loaded portafilter below socket',low)
-        for amount in (.06,.04,.02,0.):
-            p=target.copy();p[2,3]-=amount;self.held_pose('raise portafilter into socket',p)
-        actual=body_pose(self.data,PORTAFILTER)
-        if np.linalg.norm(actual[:3,3]-target[:3,3])>.002 or Rotation.from_matrix(actual[:3,:3]@target[:3,:3].T).magnitude()>np.deg2rad(2):raise RuntimeError('Portafilter outside bayonet engagement tolerance')
-        self.data.eq_active[self.axis_eq]=True;self.event('bayonet_engaged',position_error_m=float(np.linalg.norm(actual[:3,3]-target[:3,3])))
-        for angle in range(45,-1,-5):
-            p=self.seated.copy();p[:3,:3]=Rotation.from_euler('z',-angle,degrees=True).as_matrix()@self.seated[:3,:3]
-            self.held_pose('twist portafilter to lock',p)
-        actual=body_pose(self.data,PORTAFILTER)
-        if np.linalg.norm(actual[:3,3]-self.seated[:3,3])>.002 or Rotation.from_matrix(actual[:3,:3]@self.seated[:3,:3].T).magnitude()>np.deg2rad(2):raise RuntimeError('Portafilter did not reach locked pose')
-        self.data.eq_active[self.lock_eq]=True;self.data.eq_active[self.axis_eq]=False;self.fixture_phase='locked'
-        self.release('withdraw hand from installed portafilter');self.tick(.5)
-        if not self.installed() or not self.grounds_ready():raise RuntimeError('Loaded portafilter installation failed')
-        self.event('portafilter_reinstalled',counts={k:len(v) for k,v in self.inventory().items()})
+        from cross_episode_sim.skills.portafilter import AttachPortafilterSkill
+        return AttachPortafilterSkill(self).run()
 
     def button_prerequisites(self):
         if hasattr(self,'machine_cycle'):return self.machine_button_prerequisites()
         return self.installed() and self.grounds_ready()
 
     def press(self):
-        action=getattr(self,'machine_action',None) or 'start'
-        self.review_phase='PRESS MACHINE '+action.upper()+' BUTTON'
-        self.embodiment.command_gripper(self.data,self.profile.gripper_close);self.tick(.5)
-        self.press_phase=True;self.rebuild()
-        pad=object_bodies(self.model,self.profile.namespace+'gripper/left_pad')
-        pad_local=(collision_vertices(self.model,self.data,pad)-self.tcp()[:3,3])@self.tcp()[:3,:3]
-        # Plan the press in the validated layout (button face toward -y), then
-        # map every pose into the machine's actual placement.
-        points=collision_vertices(self.model,self.data,object_bodies(self.model,self.active_button_body))
-        points=np.array([to_validated(self.spec,point) for point in points])
-        surface=(points.min(0)+points.max(0))/2;surface[1]=points[:,1].min()
-        addresses=[self.model.jnt_qposadr[self.model.joint(self.profile.namespace+n).id] for n in self.planner.names]
-        probe=mujoco.MjData(self.model)
-        selected=None
-        seeds=[np.array([0.,-.3,0.,-1.6,0.,1.8,0.]),self.q(),np.array([0.,-.3,0.,-1.6,0.,1.8,2.5])]
-        for tilt in (-20.,35.,0.,60.):
-            R=Rotation.from_euler('x',tilt,degrees=True).as_matrix()@np.array([[0,1,0],[0,0,1],[1,0,0]])
-            offsets=pad_local@R.T
-            tip=offsets[offsets[:,1]>offsets[:,1].max()-1e-5].mean(0)
-            pose=np.eye(4);pose[:3,:3]=R;pose[:3,3]=surface-tip
-            pre=pose.copy();pre[1,3]-=.075
-            for seed in seeds:
-                try:
-                    endpoint=self.nearby_ik(to_world(self.spec,pre),seed,trust_radius=6.,preserve_self_clearance=True)
-                    q=endpoint
-                    for offset in np.linspace(-.075,.0015,17):
-                        target=pose.copy();target[1,3]+=offset
-                        q=self.nearby_ik(to_world(self.spec,target),q,preserve_self_clearance=True)
-                        probe.qpos[:]=self.data.qpos;probe.qpos[addresses]=q
-                        mujoco.mj_forward(self.model,probe)
-                        if self.navigation_penetration(probe,False)>.001 or self.robot_self_penetration(probe)>.0005:
-                            raise RuntimeError(f'Button approach actual-mesh collision at {offset}: {self.contact_pair_detail(probe,False)}')
-                    path=self.planner.plan_joints(self.q(),endpoint)
-                    selected=(pose,pre,path);break
-                except RuntimeError as exc:self.record(button_approach_rejection=dict(tilt_deg=tilt,error=str(exc)))
-            if selected is not None:break
-        if selected is None:raise RuntimeError('No checked arm posture for complete button press')
-        pose,pre,path=selected
-        self.record(button_approach_tilt_deg=tilt)
-        self.preplanned_moves['approach coffee button']=(to_world(self.spec,pre),path)
-        self.arm('approach coffee button',to_world(self.spec,pre),True)
-        for offset in (-.025,-.01,-.003,0.,.0005,.001,.0015):
-            target=pose.copy();target[1,3]+=offset;self.arm('press coffee button',to_world(self.spec,target));self.tick(.15)
-            if self.button_pressed:break
-        else:raise RuntimeError('No measured passive button actuation')
-        self.arm('withdraw from coffee button',to_world(self.spec,pre));self.tick(.5);self.press_phase=False
-        if self.button_contact()[0]:raise RuntimeError('Finger remains on button')
-        self.event('button_released',button=self.active_button_body,travel_m=float(self.data.joint(self.active_button_body.removesuffix('_001')).qpos[0]))
+        from cross_episode_sim.skills.buttons import press_coffee_button
+        return press_coffee_button(self)
 
 
-def main():
+def main(argv=None, *, execution_handler=None, scene_loader=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--run',type=Path,default=DATA_DIR/'base_episodes/coffee_counter',help='Prepared kitchen episode to start from')
     p.add_argument('--asset',type=Path,default=COFFEE_DIR/'espresso_machine',help='Converted espresso machine (convert_asset.py)')
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--nav-speed', type=float, help='Override saved base travel speed in m/s')
+    p.add_argument('--turn-speed', type=float, help='Override saved base turning speed in rad/s')
     p.add_argument('--through',choices=['remove','dose','reinstall','cup','power','press','brew'],default='brew')
+    p.add_argument('--pour-step-deg', type=int, choices=(5, 10, 15, 20, 30), default=30,
+                   help='Tilt execution increment (default 30); 5-degree collision screening is retained.')
+    p.add_argument('--portafilter-step-deg', type=int, choices=(5, 10, 15, 25), default=25,
+                   help='Bayonet twist target increment (default 25); checked arc samples stay at most 1.5 degrees apart.')
     p.add_argument('--resume-from',type=Path,help='Diagnostic initial-state checkpoint; final qualification runs without this')
     p.add_argument('--start',choices=['dose','reinstall','cup','power','press','brew','next','serve'],default='dose',help="'next' resumes a --cups run from a next_cup checkpoint, at placing the next mug")
     p.add_argument('--removal-witness',type=Path,help='Diagnostic removal checkpoint supplying an arm seed')
@@ -561,6 +479,8 @@ def main():
     p.add_argument('--placement-seed',type=int,default=0)
     p.add_argument('--machine-pose',type=float,nargs=4,metavar=('DX','DY','DZ','YAW_DEG'),help='Full apparatus pose relative to the validated layout (yaw about the machine mount)')
     p.add_argument('--support',help='Support body under the apparatus (default: the kitchen counter it is on)')
+    p.add_argument('--machine-room', choices=('kitchen', 'living', 'dining'), default='kitchen',
+                   help='Place the machine on a dedicated coffee table outside the kitchen; food preparation stays in the kitchen')
     p.add_argument('--coffee-mug',default=DEFAULT_COFFEE_MUG[0],help='Qualified asset key for the coffee mug (default: Mug_1)')
     p.add_argument('--coffee-mug-grasp',type=int,default=DEFAULT_COFFEE_MUG[1],help="Index into the mug's qualified grasps used to place it under the spout")
     p.add_argument('--coffee-mug-yaw',type=float,help='Turn of the mug under the spout in degrees (default -45, validated for Mug_1)')
@@ -570,44 +490,118 @@ def main():
     p.add_argument('--floor-objects',type=int,default=0,help='Loose objects on the floor, one room after another')
     p.add_argument('--table-setting',choices=('office','dining'),default='office',help='dining: remove the office monitor, keyboard and mouse')
     p.add_argument('--episode-label',help='Banner shown in the videos, e.g. "History 2 (given): coffee"')
-    p.add_argument('--serve-breakfast',action='store_true',help='Full breakfast: also two bowls in the kitchen that a person fills; serve both cups and bowls to the dining table, each cup beside a bowl (needs --cups 2)')
-    p.add_argument('--cups',type=int,default=1,help='Brew this many cups through the spout, one at a time, retrieving each to its counter spot (only with --through brew)')
-    args=p.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
-    machine_offset=(0.,0.)
-    if args.machine_slot:machine_offset=tuple(sample_offset(np.random.default_rng(args.placement_seed),args.machine_slot)[1])
-    if args.machine_offset:machine_offset=tuple(args.machine_offset)
-    if args.machine_pose:machine_offset=(*args.machine_pose[:3],np.radians(args.machine_pose[3]))
-    manifest,selection=prepare(args.run,args.asset,out,machine_offset,args.support)
-    if args.coffee_mug_yaw is not None:manifest['coffee']['mug_target_yaw_deg']=args.coffee_mug_yaw
-    prepare_brew(out,manifest,selection,(args.coffee_mug,args.coffee_mug_grasp),mugs=args.cups,second_home=args.second_mug_xy)
-    manifest['coffee']['navigate_to_mugs']=args.mug_navigation=='on' or (args.mug_navigation=='auto' and args.cups>1)
-    if args.serve_breakfast:
-        if args.cups!=2:raise SystemExit('--serve-breakfast brews two cups: use --cups 2')
-        from cross_episode_sim.tasks.full_breakfast.scene import add_breakfast
-        add_breakfast(out,manifest,selection,args.placement_seed if args.placement_seed is not None else 0)
-    if args.table_setting=='dining' and manifest.get('fixed_props'):
-        # No office monitor, keyboard and mouse on the dining table.
-        tree=ET.parse(manifest['scene_xml']);world=tree.getroot().find('worldbody')
-        for name in manifest['fixed_props']:
-            node=world.find(f"body[@name='{name}']")
-            if node is not None:world.remove(node)
-        tree.write(manifest['scene_xml']);manifest['fixed_props']=[]
-    if args.clutter or args.floor_objects:
-        # Kept clear: the robot's dock, the machine, its parked parts and the mugs.
-        spec=manifest['coffee']
-        keep=[to_world(spec,VALIDATED_DOCK[:2]),to_world(spec,SPOUT_XY),to_world(spec,spec['hopper_xy']),
-              to_world(spec,spec['lid_parking_xy']),to_world(spec,spec['mug_home_xy'])]+([to_world(spec,args.second_mug_xy)] if args.cups>1 else [])
-        keep+=[i['position'][:2] for i in manifest['bindings'] if i.get('position')]
-        tops=[manifest['supports'][k] for k in ('dining','living','kitchen_right_counter') if k in manifest['supports']]
-        rooms={manifest['supports'].get('dining'):'dining',manifest['supports'].get('living'):'living'}
-        targets=[dict(room=rooms.get(t,'kitchen'),support=t) for t in (tops*args.clutter)[:args.clutter]]
-        targets+=[dict(room=('kitchen','dining','living')[i%3]) for i in range(args.floor_objects)]
-        from cross_episode_sim.tasks.floor_objects import scatter_objects
-        # Table objects also stay off every place setting.
-        settings=[i['serving_position'] for i in manifest['bindings'] if i.get('serving_position')]
-        manifest['scattered_objects']=scatter_objects(Path(manifest['scene_xml']),targets,
-            args.placement_seed if args.placement_seed is not None else 0,avoid_xy=keep,avoid_top_xy=settings)
-    if args.episode_label:manifest['episode_label']=args.episode_label
+    p.add_argument('--extra-vessels', type=int, choices=range(7), default=0, help='Current pool size per type is 3 + this value; 0 disables the pool')
+    p.add_argument('--serve-breakfast',action='store_true',help='Full breakfast: one bowl per cup; serve each cup beside its filled bowl at the dining table')
+    p.add_argument('--skill-plan', type=Path,
+                   help='JSON list of public atomic skill calls for the current breakfast episode (oracle or VLM supplied)')
+    p.add_argument('--atomic-skill', choices=('detach-portafilter', 'attach-portafilter'),
+                   help='Run one standalone portafilter skill on an authored initial scene')
+    p.add_argument('--randomize-scene', action='store_true', help='Seeded furniture translations and independent mug homes')
+    p.add_argument('--extra-furniture', type=int, choices=range(9), default=0)
+    p.add_argument('--prepare-only', action='store_true', help='Author and check the scene without running robot skills')
+    p.add_argument('--cups',type=int,choices=(1,2,3,4),default=1,help='Brew this many cups through the spout, one at a time, retrieving each to its counter spot (only with --through brew)')
+    args=p.parse_args(argv)
+    if any(v is not None and (not np.isfinite(v) or v <= 0) for v in (args.nav_speed, args.turn_speed)):
+        p.error('Navigation speeds must be positive and finite')
+    if args.skill_plan and (args.resume_from or args.through != 'brew' or args.atomic_skill or args.prepare_only):
+        p.error('--skill-plan requires continuous coffee or full-breakfast execution')
+    if args.serve_breakfast and (args.resume_from or args.through != 'brew'):
+        p.error('The current skill-interface episode requires a continuous start and --through brew')
+    if args.atomic_skill and (args.resume_from or args.serve_breakfast or args.cups != 1):
+        p.error('--atomic-skill requires a fresh single-cup scene')
+    if args.machine_room != 'kitchen' and (args.machine_pose or args.support or args.machine_offset):
+        p.error('--machine-room outside kitchen cannot be combined with an explicit machine pose/offset/support')
+    out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
+    from cross_episode_sim.tasks.setup_timing import SetupTiming
+    setup = SetupTiming(out)
+    if scene_loader is None:
+        machine_offset=(0.,0.)
+        if args.machine_slot:machine_offset=tuple(sample_offset(np.random.default_rng(args.placement_seed),args.machine_slot)[1])
+        if args.machine_offset:machine_offset=tuple(args.machine_offset)
+        if args.machine_pose:machine_offset=(*args.machine_pose[:3],np.radians(args.machine_pose[3]))
+        preparation_run, support = args.run, args.support
+        if args.machine_room != 'kitchen':
+            from cross_episode_sim.tasks.coffee.station import prepare_station
+            preparation_run, machine_offset, support = setup('coffee station', prepare_station, args.run, out, args.machine_room, args.placement_seed)
+        manifest,selection=setup('coffee assets', prepare, preparation_run,args.asset,out,machine_offset,support)
+        manifest['food_preparation_room'] = 'kitchen'
+        machine_outside_kitchen = manifest['coffee']['machine_room'] != 'kitchen'
+        manifest['coffee']['pour_execute_stride_deg'] = args.pour_step_deg
+        manifest['coffee']['portafilter_twist_step_deg'] = args.portafilter_step_deg
+        if args.coffee_mug_yaw is not None:manifest['coffee']['mug_target_yaw_deg']=args.coffee_mug_yaw
+        setup('brew scene', prepare_brew, out,manifest,selection,(args.coffee_mug,args.coffee_mug_grasp),mugs=args.cups,second_home=args.second_mug_xy)
+        manifest['coffee']['navigate_to_mugs']=machine_outside_kitchen or args.mug_navigation=='on' or (args.mug_navigation=='auto' and (args.cups>1 or args.serve_breakfast or args.randomize_scene))
+        if args.table_setting == 'dining' and manifest.get('fixed_props'):
+            tree=ET.parse(manifest['scene_xml']);world=tree.getroot().find('worldbody')
+            for name in manifest['fixed_props']:
+                node=world.find(f"body[@name='{name}']")
+                if node is not None:world.remove(node)
+            tree.write(manifest['scene_xml']);manifest['fixed_props']=[]
+        if args.cups >= 3:
+            from cross_episode_sim.tasks.scene_variation import add_furniture
+            add_furniture(Path(manifest['scene_xml']), manifest, args.placement_seed+100, 1, work_table=True)
+        if args.randomize_scene:
+            from cross_episode_sim.tasks.scene_variation import move_coffee_furniture, randomize_mugs
+            setup('furniture positions', move_coffee_furniture, Path(manifest['scene_xml']), manifest, args.placement_seed+101)
+            setup('cup positions', randomize_mugs, Path(manifest['scene_xml']), manifest, args.placement_seed+102)
+        elif args.cups >= 3 or machine_outside_kitchen:
+            from cross_episode_sim.tasks.scene_variation import randomize_mugs
+            setup('cup positions', randomize_mugs, Path(manifest['scene_xml']), manifest, args.placement_seed+102)
+        if args.atomic_skill == 'attach-portafilter':
+            from cross_episode_sim.fixtures.portafilter import prepare_attachment
+            prepare_attachment(out, manifest)
+        if args.atomic_skill:
+            manifest['atomic_skill'] = args.atomic_skill
+            if args.atomic_skill == 'detach-portafilter':
+                manifest['instruction'] = 'Detach the portafilter from the coffee machine and place it upright on the counter.'
+        if args.serve_breakfast:
+            from cross_episode_sim.tasks.full_breakfast.scene import add_breakfast
+            setup('breakfast bowls', add_breakfast, out,manifest,selection,args.placement_seed if args.placement_seed is not None else 0)
+            from cross_episode_sim.tasks.full_breakfast.vessel_pool import add_vessel_pool
+            setup('surplus vessels', add_vessel_pool, manifest, selection, args.placement_seed or 0, args.extra_vessels)
+        if args.table_setting=='dining' and manifest.get('fixed_props'):
+            # No office monitor, keyboard and mouse on the dining table.
+            tree=ET.parse(manifest['scene_xml']);world=tree.getroot().find('worldbody')
+            for name in manifest['fixed_props']:
+                node=world.find(f"body[@name='{name}']")
+                if node is not None:world.remove(node)
+            tree.write(manifest['scene_xml']);manifest['fixed_props']=[]
+        if args.clutter or args.floor_objects:
+            # Kept clear: the robot's dock, the machine, its parked parts and the mugs.
+            spec=manifest['coffee']
+            keep=[to_world(spec,VALIDATED_DOCK[:2]),to_world(spec,SPOUT_XY),to_world(spec,spec['hopper_xy']),
+                  to_world(spec,spec['lid_parking_xy']),to_world(spec,spec['mug_home_xy'])]+([to_world(spec,args.second_mug_xy)] if args.cups>1 else [])
+            keep+=[i['position'][:2] for i in manifest['bindings'] if i.get('position')]
+            tops=[manifest['supports'][k] for k in ('dining','living','kitchen_right_counter') if k in manifest['supports']]
+            rooms={manifest['supports'].get('dining'):'dining',manifest['supports'].get('living'):'living'}
+            targets=[dict(room=rooms.get(t,'kitchen'),support=t) for t in (tops*args.clutter)[:args.clutter]]
+            targets+=[dict(room=('kitchen','dining','living')[i%3]) for i in range(args.floor_objects)]
+            from cross_episode_sim.tasks.floor_objects import scatter_objects
+            # Table objects also stay off every place setting.
+            settings=[i['serving_position'] for i in manifest['bindings'] if i.get('serving_position')]
+            manifest['scattered_objects']=setup('clutter placement', scatter_objects, Path(manifest['scene_xml']),targets,
+                args.placement_seed if args.placement_seed is not None else 0,avoid_xy=keep,avoid_top_xy=settings)
+        if args.extra_furniture:
+            from cross_episode_sim.tasks.scene_variation import add_furniture
+            setup('extra furniture', add_furniture, Path(manifest['scene_xml']), manifest, args.placement_seed+103, args.extra_furniture)
+        from cross_episode_sim.tasks.scene_variation import sync_selection
+        sync_selection(manifest, selection)
+        (out/'adapter.json').write_text(json.dumps(selection, indent=2))
+        manifest['serving_count'] = args.cups
+        if args.episode_label:manifest['episode_label']=args.episode_label
+    else:
+        if execution_handler is None:
+            raise ValueError("A frozen scene loader requires model evaluation")
+        manifest, selection = scene_loader(out)
+    if args.prepare_only:
+        from cross_episode_sim.skills.breakfast_interface import current_skill_plan
+        (out/'requested_skill_plan.json').write_text(json.dumps(current_skill_plan(manifest), indent=2))
+        manifest['preparation_success'] = True
+        manifest['physical_validation'] = 'pending'
+        (out/'task_manifest.json').write_text(json.dumps(manifest, indent=2))
+        (out/'adapter.json').write_text(json.dumps(selection, indent=2))
+        print(json.dumps(dict(prepared=str(out), cups=args.cups, physical_validation='pending')), flush=True)
+        return 0
     sources={}
     for source in (Path(__file__),Path(__file__).with_name('pour.py'),Path(__file__).with_name('brew.py')):
         destination=out/source.name;shutil.copyfile(source,destination)
@@ -617,15 +611,20 @@ def main():
     prior=json.loads((args.run/'report.json').read_text());manifest['box_grasp']=prior['annotation_selection']['local_transform']
     (out/'task_manifest.json').write_text(json.dumps(manifest,indent=2))
     ca=SimpleNamespace(**prior['arguments']);ca.output=out;ca.assets=Path(ca.assets);ca.scene_xml=manifest['scene_xml'];ca.spawn=[*to_world(manifest['coffee'],VALIDATED_DOCK[:2]),VALIDATED_DOCK[2]+np.radians(yaw_degrees(manifest['coffee']))]
-    ca.dynamic_objects=list(ca.dynamic_objects)+[PORTAFILTER,BUTTON,POWER_BUTTON]+(['coffee_mug_two_test_object_main'] if args.cups>=2 else [])
+    for key in ('nav_speed', 'turn_speed'):
+        if getattr(args, key) is not None:
+            setattr(ca, key, getattr(args, key))
+    ca.dynamic_objects=list(ca.dynamic_objects)+[PORTAFILTER,BUTTON,POWER_BUTTON]+manifest['coffee']['coffee_mugs'][1:]
     if args.serve_breakfast:ca.dynamic_objects+=[i['body'] for i in manifest['bindings'] if i['role'].startswith('bowl')]
     import torch
     random.seed(manifest['seed']);np.random.seed(manifest['seed']);torch.manual_seed(manifest['seed'])
     if args.serve_breakfast:
         from cross_episode_sim.tasks.full_breakfast.episode import FullBreakfastWorkflow as Workflow
     else:Workflow=CoffeeWorkflow
-    c=Workflow(ca,selection,manifest)
+    c=setup('controller initialization', Workflow, ca,selection,manifest)
     def initialize():
+        if args.atomic_skill == 'attach-portafilter':
+            c.fixture_phase = 'released'
         if args.resume_from:
             saved=np.load(args.resume_from)
             if saved['qpos'].shape!=c.data.qpos.shape:raise ValueError('Checkpoint scene layout differs; use a checkpoint from this workflow version')
@@ -654,17 +653,22 @@ def main():
         c.embodiment.open_gripper(c);c.tick(.7)
         if len(c.inventory()['vessel'])+len(c.inventory()['hopper'])!=32:raise RuntimeError('Initial contents did not settle intact')
         c.event('initialized',base=c.base_pose().tolist(),grounds=32)
-    ops=dict(initialize=Operation(initialize,lambda:len(c.inventory()['spilled'])==0),
-        remove=Operation(c.unlock_remove,lambda:c.fixture_phase=='released' and not c.holding_loaf),
-        dose=Operation(c.dose,lambda:c.grounds_ready() and not c.holding_loaf),
-        reinstall=Operation(c.reinstall,lambda:c.installed() and c.grounds_ready() and not c.holding_loaf),
-        cup=Operation(c.place_cup,c.mug_ready),
-        power=Operation(lambda:c.operate_button('power'),lambda:c.machine_cycle.ready(c.data.time)),
-        press=Operation(lambda:c.operate_button('brew'),lambda:c.button_pressed and not c.button_contact()[0]),
-        brew=Operation(c.finish_brew,lambda:c.machine_cycle.completed and c.mug_ready()),
-        retrieve=Operation(c.retrieve_cup,lambda:not c.holding_loaf and c.machine_cycle.started_at is None),
-        next_mug=Operation(c.next_mug,lambda:True))
-    names=['initialize','remove','dose','reinstall','cup','power','press','brew'];names=names[:names.index(args.through)+1]
+    from cross_episode_sim.skills.coffee import coffee_operations
+    ops = coffee_operations(c, initialize)
+    if args.atomic_skill:
+        operation = 'remove' if args.atomic_skill == 'detach-portafilter' else 'reinstall'
+        c.report.update(full_task_requested=False, atomic_task=args.atomic_skill)
+        steps = [dict(operation='initialize', arguments={}), dict(operation=operation, arguments={})]
+        return 0 if CompositeEpisode(c, ops, lambda: {
+            args.atomic_skill: bool(ops[operation].verify()),
+            'empty_hand': not c.holding_loaf and not c.attached and not c.contacts(),
+            'no_spilled_grounds': not c.inventory()['spilled'],
+            'contact_clearance': bool(c.report['max_unintended_robot_penetration_m'] <= .001
+                                      and c.report['max_finger_object_penetration_m'] <= .0015
+                                      and c.report.get('max_robot_self_penetration_m', 0.) <= .0005),
+        }).run(args.atomic_skill, steps) else 1
+    names=['initialize','remove','dose','reinstall','cup','power','warmup','press','brew']
+    names=names[:names.index('warmup' if args.through == 'power' else args.through)+1]
     if args.resume_from and args.start not in ('next','serve'):names=['initialize']+names[names.index(args.start):]
     if args.start=='next':names=['initialize','cup','press','brew','retrieve']
     elif args.start=='serve':names=['initialize']
@@ -681,8 +685,8 @@ def main():
         if args.through in ['reinstall','cup','power','press','brew']:result['portafilter_locked']=c.installed()
         if args.through in ['press','brew']:result['button_pressed_and_released']=bool(c.button_pressed and not c.button_contact()[0] and abs(float(c.data.joint('button_01_press_pivot').qpos[0]))<.0002)
         if args.through in ['cup','power','press','brew']:result['cup_under_spout']=c.mug_ready()
-        if args.through=='brew' and args.cups==1:result['brew_completed']=c.machine_cycle.completed and not c.machine_cycle.aborted
-        if args.cups>1:
+        if args.through=='brew' and args.cups==1 and (args.resume_from or args.atomic_skill):result['brew_completed']=c.machine_cycle.completed and not c.machine_cycle.aborted
+        if args.cups>1 or (args.through == 'brew' and not args.resume_from and not args.atomic_skill):
             result['all_cups_brewed']=len(c.coffee_filled)==args.cups and not any(e['event']=='brew_aborted' for e in c.workflow_events)
             if not args.serve_breakfast:result['cups_back_on_counter']=all(np.linalg.norm(body_pose(c.data,m)[:3,3]-np.array(p)[:3,3])<.02 for m,p in c.mug_homes.items())
             result['every_cup_filled']=sorted(c.coffee_filled)==sorted(c.coffee_mugs())
@@ -691,7 +695,9 @@ def main():
     steps=[dict(operation=n,arguments={}) for n in names]
     if args.serve_breakfast:
         # A person fills the bowls; then every cup and bowl goes to its place setting.
-        ops.update(fill=Operation(c.fill_bowls,c.bowls_filled),serve=Operation(c.serve,c.served))
+        from cross_episode_sim.skills.transfer import TransferOperation
+        ops.update(fill=Operation(c.fill_bowls,c.bowls_filled),
+                   serve=TransferOperation(c, c.serve, c.served))
         steps+=[dict(operation='fill',arguments={})]
         for setting in manifest['full_breakfast']['settings']:
             steps+=[dict(operation='serve',arguments=dict(role=setting['cup'])),dict(operation='serve',arguments=dict(role=setting['bowl']))]
@@ -705,11 +711,30 @@ def main():
             result['contact_clearance']=bool(phase('max_unintended_robot_penetration_m')<=.001 and
                 phase('max_finger_object_penetration_m')<=.0015 and phase('max_robot_self_penetration_m')<=.0005)
             result['serving_contact_within_breakfast_limit']=bool(r['max_unintended_robot_penetration_m']<=.003)
+            if manifest['full_breakfast'].get('interchangeable_vessels'):
+                from cross_episode_sim.tasks.full_breakfast.vessel_pool import count_serving_goal
+                result.pop('every_cup_filled', None)
+                result.pop('all_cups_brewed', None)
+                result.update(count_serving_goal(c))
+                return result
             result['bowls_filled']=c.bowls_filled()
             for setting in manifest['full_breakfast']['settings']:
                 for role in (setting['cup'],setting['bowl']):result[f'{role}_served']=c.served(role)
                 result[f"{setting['cup']}_beside_{setting['bowl']}"]=c.beside(setting['cup'],setting['bowl'])
             return result
-    return 0 if CompositeEpisode(c,ops,goal).run('full_breakfast' if args.serve_breakfast else 'moonlake_robot_full_workflow',steps) else 1
+    if not args.atomic_skill and not args.resume_from and args.through == 'brew':
+        from cross_episode_sim.skills.breakfast_interface import breakfast_skill_interface, current_skill_plan
+        from cross_episode_sim.skills.interface import OracleDockRecovery, run_skill_episode
+        interface = breakfast_skill_interface(c)
+        steps = json.loads(args.skill_plan.read_text()) if args.skill_plan else current_skill_plan(manifest)
+        if execution_handler is not None:
+            # Model evaluation takes over the same initialized public domain;
+            # do not pass the oracle witness plan into the model adapter.
+            return execution_handler(c, interface, goal, initialize)
+        return 0 if run_skill_episode(c, interface, steps, goal,
+                                     'full_breakfast' if args.serve_breakfast else 'coffee',
+                                     setup=initialize, plan_source=str(args.skill_plan) if args.skill_plan else None,
+                                     recover=None if args.skill_plan else OracleDockRecovery()) else 1
+    return 0 if CompositeEpisode(c,ops,goal).run('moonlake_robot_full_workflow',steps) else 1
 
 if __name__=='__main__':raise SystemExit(main())

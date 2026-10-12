@@ -21,6 +21,7 @@ from pathlib import Path
 
 from cross_episode_sim.paths import DATA_DIR
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
+from cross_episode_sim.skills.transfer import TransferOperation
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode, build_controller
 
 BASE_EPISODE = DATA_DIR / "base_episodes/breakfast_three_room"
@@ -59,7 +60,7 @@ class TidyUp(BreakfastEpisode):
     def run_task(self):
         operations = {
             "check_scene": Operation(self.validate_population, lambda: True),
-            "transfer": Operation(self.transfer_role, self.verify_role),
+            "transfer": TransferOperation(self),
         }
         steps = [dict(operation="check_scene", arguments={})]
         steps += [dict(operation="transfer", arguments=dict(role=role)) for role in ROLES]

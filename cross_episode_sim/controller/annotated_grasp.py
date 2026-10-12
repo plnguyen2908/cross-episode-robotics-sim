@@ -3,6 +3,7 @@
 import json
 
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -58,14 +59,14 @@ class AnnotatedGraspMixin:
                 angles = self.gaze_angles(probe, probe.body(self.object_name).xpos)
                 for name, angle in zip(('head_0', 'head_1'), angles):
                     probe.joint(NS+name).qpos[0] = np.clip(angle, *self.model.joint(NS+name).range)
-                mujoco.mj_forward(self.model, probe)
+                forward_collision(self.model, probe)
             self.validate_grasp_contacts(probe)
             settled = probe.qpos[head].copy()
             probe.qpos[head] = .5*(initial+settled)
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
             self.validate_grasp_contacts(probe)
             probe.qpos[head] = settled
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
 
     def validate_grasp_contacts(self, probe):
         for contact in probe.contact:
@@ -109,7 +110,7 @@ class AnnotatedGraspMixin:
                      for n in self.planner.names]
         probe.qpos[addresses] = joints
         self.embodiment.probe_aperture(self.model, probe, aperture)
-        mujoco.mj_forward(self.model, probe)
+        forward_collision(self.model, probe)
         try:
             self.data = probe
             self.holding_loaf = True
@@ -126,7 +127,7 @@ class AnnotatedGraspMixin:
                 probe.joint(self.object_joint).qpos[:3] = payload[:3, 3]
                 probe.joint(self.object_joint).qpos[3:7] = Rotation.from_matrix(
                     payload[:3, :3]).as_quat(scalar_first=True)
-                mujoco.mj_forward(self.model, probe)
+                forward_collision(self.model, probe)
                 if hasattr(self, 'project_payload_contents'):
                     self.project_payload_contents(probe, reference=live)
                 final = start.copy(); final[2, 3] += full_height
@@ -312,7 +313,7 @@ class AnnotatedGraspMixin:
                     probe.qpos[:] = self.data.qpos
                     probe.qpos[addresses] = q
                     self.embodiment.probe_aperture(self.model, probe, aperture)
-                    mujoco.mj_forward(self.model, probe)
+                    forward_collision(self.model, probe)
                     self.validate_grasp_probe(probe)
                 # cuRobo excludes some self pairs and the head chain. Check its
                 # whole free-space approach with the actual MuJoCo geometry too.
@@ -320,7 +321,7 @@ class AnnotatedGraspMixin:
                     probe.qpos[:] = self.data.qpos
                     probe.qpos[addresses] = waypoint_joints
                     self.embodiment.probe_aperture(self.model, probe, aperture)
-                    mujoco.mj_forward(self.model, probe)
+                    forward_collision(self.model, probe)
                     self.validate_grasp_probe(probe)
                 self.validate_grasp_lift(contact_path[-1], aperture)
                 self.args.grip_open = aperture

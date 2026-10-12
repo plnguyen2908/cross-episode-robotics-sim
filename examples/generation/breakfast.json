@@ -1,0 +1,11 @@
+{
+  "task": "breakfast",
+  "seed": 101,
+  "scene": {
+    "extra_furniture": 2,
+    "floor_objects": 6
+  },
+  "parameters": {
+    "people": 4
+  }
+}

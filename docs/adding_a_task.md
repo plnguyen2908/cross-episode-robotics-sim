@@ -70,13 +70,15 @@ pose and returns the controller.
 
 ## 3. The composite plan
 
-`CompositeEpisode` runs named operations in order. Each `Operation` pairs an action with its
-measured postcondition:
+`CompositeEpisode` runs named operations in order. Robot actions use shared `AtomicSkill`
+implementations or recipes of those skills. Reserve `Operation` for scene checks, human
+events, and waiting for appliance state. `TransferOperation` resolves a role's geometry
+and invokes the shared pickup and delivery skills:
 
 ```python
 operations = {
     "check_scene": Operation(self.validate_population, lambda: True),
-    "transfer": Operation(self.transfer_role, self.verify_role),
+    "transfer": TransferOperation(self),
 }
 steps = [dict(operation="check_scene", arguments={}),
          dict(operation="transfer", arguments=dict(role="misplaced_cup")),
@@ -87,6 +89,13 @@ CompositeEpisode(self, operations, self.goal).run("tidy_up", steps)
 All step arguments are validated against the operation signatures before physics starts. The
 plan is plain data (`composite_execution.json` records it with timing and outcome), so a planner
 or a memory module can produce it.
+
+Import `TransferOperation` from `cross_episode_sim.skills.transfer`. For a new multi-action
+recipe, use `skills.sequence.SkillSequence`: each child skill has its own checkpoint and
+measured postcondition. Do not wrap a whole recipe in one `CallbackSkill`, because a failure
+would undo its successful children. Coffee's `skills.coffee.dosing_sequence` is an example:
+pick the dosing box, pour the grounds, then place the box. Controllers provide geometry and
+low-level motion helpers; reusable skills own the physical action sequence.
 
 ## 4. The goal
 
@@ -117,12 +126,11 @@ class PressButton(AtomicSkill):
         self.button = button
 
     def candidates(self):
-        # Bounded alternatives to try, e.g. docks around the appliance.
-        return list(self.controller.dock_candidates_for(self.button))
+        # Navigation to the appliance is a separate public skill call.
+        return (None,)
 
-    def execute_candidate(self, dock):
+    def execute_candidate(self, candidate):
         c = self.controller
-        c.task_navigate(dock[:2], carrying=False, face=dock[2])
         c.press_with_fingertip(self.button)        # physical contact only
         c.withdraw_and_tuck()
 

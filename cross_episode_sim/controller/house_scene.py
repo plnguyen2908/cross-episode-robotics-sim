@@ -1,7 +1,9 @@
 """Complete ProcTHOR scene with RB-Y1, retaining native object poses and geometry."""
 from pathlib import Path
+
 import mujoco
 import numpy as np
+
 from cross_episode_sim.robot.embodiment import embodiment_for
 
 
@@ -31,6 +33,8 @@ def make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m'
             # their initial physical transform, including native doorway doors.
             spec.delete(joint)
             frozen += 1
+    from cross_episode_sim.tasks.history_views import install_room_cameras
+    install_room_cameras(spec, original, original_data)
     # Which embodiment stands in the house is a caller's choice, not a constant.
     # Both share the holonomic base joints the navigation layer drives, so the
     # scene builder needs nothing robot-specific beyond the config itself.

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import imageio.v2 as imageio
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from cross_episode_sim.control.timing import settle_arm, wait_until_ready, base_ready
 from cross_episode_sim.navigation.blended_route import blend_route
@@ -313,7 +314,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
             for f in np.linspace(0.,1.,count+1)[1:]:
                 probe.qpos[:] = self.data.qpos
                 probe.qpos[addresses] = previous+f*(q-previous)
-                mujoco.mj_forward(self.model,probe)
+                forward_collision(self.model, probe)
                 check()
                 if self.profile.has_head and self.args.gaze != 'off':
                     initial = probe.qpos[head].copy()
@@ -321,11 +322,11 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                         angles = self.gaze_angles(probe,target)
                         for name,angle in zip(self.profile.head_joints,angles):
                             probe.joint(NS+name).qpos[0] = np.clip(angle,*self.model.joint(NS+name).range)
-                        mujoco.mj_forward(self.model,probe)
+                        forward_collision(self.model, probe)
                     check()
                     settled = probe.qpos[head].copy()
                     probe.qpos[head] = .5*(initial+settled)
-                    mujoco.mj_forward(self.model,probe)
+                    forward_collision(self.model, probe)
                     check()
             previous = q
 
@@ -434,7 +435,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
         grasp = opening[-1]
         probe = mujoco.MjData(self.model)
         probe.qpos[:] = grasp["qpos"]
-        mujoco.mj_forward(self.model, probe)
+        forward_collision(self.model, probe)
         handle_pose = np.eye(4)
         handle_pose[:3, :3] = probe.xmat[self.handle_bid].reshape(3, 3)
         handle_pose[:3, 3] = probe.xpos[self.handle_bid]
@@ -460,7 +461,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                     for fraction in np.linspace(0., 1., count+1)[1:]:
                         probe.qpos[:] = self.data.qpos
                         probe.qpos[addresses] = previous+fraction*(q-previous)
-                        mujoco.mj_forward(self.model, probe)
+                        forward_collision(self.model, probe)
                         bad = contact_path_collision(self.model, probe, -1)
                         if bad:
                             raise RuntimeError(f'Handle approach intersects actual geometry: {bad}')
@@ -923,7 +924,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                     probe.qpos[bread_adr + 3 : bread_adr + 7] = (rotation * bread_rotation).as_quat(
                         scalar_first=True
                     )
-                mujoco.mj_forward(self.model, probe)
+                forward_collision(self.model, probe)
                 if self.navigation_penetration(probe, carrying) > 0:
                     cache[key] = False
                     return False
@@ -1139,13 +1140,16 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                     rotation.apply(position - [*start[:2], 0.0]) + [*pose[:2], 0.0])
                 probe.qpos[address + 3:address + 7] = (
                     rotation * rotation0).as_quat(scalar_first=True)
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
             return (self.navigation_penetration(probe, carrying) <= 0
                     and (self_check is None or self_check(probe) <= .0005))
 
         return clear
 
     def navigate(self, goal, carrying, face=None):
+        if getattr(self, '_public_skill_navigation', None) is False:
+            raise RuntimeError('This atomic skill cannot navigate; call navigate explicitly')
+        self._public_navigation_goal = (list(goal), face)
         label = (
             "to fridge handle"
             if getattr(self, "operating_door", False)
@@ -1157,6 +1161,8 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
         )
         self.stage = "plan forward navigation " + label
         path = self.plan_route(goal, carrying, face=face)
+        requires_blended = getattr(self, '_cross_room_requires_blended', False)
+        self._cross_room_requires_blended = False
         self.record(navigation_path_xy_yaw=[p.tolist() for p in path], carrying=carrying)
         segments = None
         if getattr(self.args, "base_motion", "blended") == "blended":
@@ -1169,6 +1175,8 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                         blended_segments=None if segments is None else [
                             dict(kind=s.kind, end=s.end.tolist(),
                                  duration_s=s.duration) for s in segments])
+        if requires_blended and segments is None:
+            raise RuntimeError('A* route requires a clear blended departure; refusing an unchecked turn')
         start, previous = self.base_pose(), self.base_pose()
         reference = np.linalg.inv(self.tcp()) @ self.bread_pose()
         distance = max_slip = worst = max_heading_error = lateral_distance = reverse_distance = (

@@ -131,7 +131,7 @@ def test_initial_goal_check_before_first_grasp():
     c.manifest={'bindings':[dict(role='cup_one',body='cup',initial_quaternion=[1,0,0,0],
         destination='dining',destination_position=[1.,2.,.8])]}
     c.report={};c.attached=False
-    c.assignment=lambda:{'cup':SUPPORTS['dining']}
+    c.assignment=lambda objects=None:{'cup':SUPPORTS['dining']}
     c.data=SimpleNamespace(body=lambda name:SimpleNamespace(xpos=np.array([1.,2.,.8]),xmat=np.eye(3)))
     assert c.verify_role('cup_one')
     c.holding_loaf=True

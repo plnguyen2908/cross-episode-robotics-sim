@@ -12,6 +12,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -19,15 +20,13 @@ from cross_episode_sim.tasks.breakfast.scene import SUPPORTS, OUTWARD, bounds, s
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode, run
 from cross_episode_sim.tasks.breakfast.office import OfficeBreakfastEpisode, prepare as prepare_office
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
+from cross_episode_sim.skills.transfer import TransferOperation
 from cross_episode_sim.paths import source_digests, CONFIG_DIR
 
 DEFAULT_CONFIG = CONFIG_DIR/'breakfast_gather_fill_serve.json'
 
 
-def vessel_roles(people):
-    if type(people) is not int or people not in (1, 2):
-        raise ValueError('This qualified scene supports one or two breakfasts')
-    return ['cup_one', 'bowl_one'] + (['cup_two', 'bowl_two'] if people == 2 else [])
+from cross_episode_sim.tasks.servings import vessel_roles
 
 
 def validate_gather_config(config):
@@ -293,12 +292,35 @@ class GatherBreakfast(OfficeBreakfastEpisode):
         return (not self.attached and not getattr(self,'holding_loaf',False)
             and all(self.is_filling_site(self.current_room(i)) for i in self.manifest['bindings']))
 
-    def human_fill(self):
-        if self.phase!='GATHER' or not self.all_at_counter():
-            raise RuntimeError('Human filling requires all vessels on kitchen filling surfaces and an empty hand')
+    def prepare_human_fill(self):
+        """Navigate away from the filling surface before the separate wait skill."""
         self.tuck_for_navigation()
         base=self.base_pose()
-        self.task_navigate(base[:2]+np.array([0.,-.25]),False,face=float(base[2]))
+        backward = -np.array([np.cos(base[2]), np.sin(base[2])])
+        lateral = np.array([-backward[1], backward[0]])
+        errors = []
+        # Randomized clutter can obstruct a fixed retreat point. Plan before
+        # moving, using the same mesh/map checks as ordinary navigation.
+        for distance in (.25, .15, .40, .60):
+            for shift in (0., -.25, .25):
+                goal = base[:2] + distance*backward + shift*lateral
+                try:
+                    path = self.plan_route(goal, False, face=float(base[2]))
+                except RuntimeError as exc:
+                    errors.append(str(exc))
+                    continue
+                self._accepted_route = path
+                self.task_navigate(goal, False, face=float(base[2]))
+                self._human_wait_goal = goal
+                self.record(human_wait_goal=goal.tolist(), rejected_wait_routes=len(errors))
+                return
+        raise RuntimeError(f'No clear nearby human-fill waiting position: {errors}')
+
+    def human_fill(self, prepared=False):
+        if self.phase!='GATHER' or not self.all_at_counter():
+            raise RuntimeError('Human filling requires all vessels on kitchen filling surfaces and an empty hand')
+        if not prepared:
+            self.prepare_human_fill()
         self.review_phase='WAIT_FOR_HUMAN: FILL BOWLS AND CUPS'
         self.stage='wait for human filling'
         self.record(human_wait_started=True)
@@ -379,7 +401,7 @@ class GatherBreakfast(OfficeBreakfastEpisode):
             food=reference.body(item['body']);joint=probe.joint(item['joint'])
             joint.qpos[:3]=future.xpos+rotation@(food.xpos-live.xpos)
             joint.qpos[3:]=Rotation.from_matrix(rotation@food.xmat.reshape(3,3)).as_quat(scalar_first=True)
-        mujoco.mj_forward(self.model,probe)
+        forward_collision(self.model, probe)
 
     def navigation_penetration(self,data,carrying):
         from cross_episode_sim.manipulation.physical_contents import active_content_bodies
@@ -412,9 +434,29 @@ class GatherBreakfast(OfficeBreakfastEpisode):
 
     def run_test(self,validate_only=False):
         self.report.update(validation_only=bool(validate_only),full_task_requested=not validate_only)
+        if not validate_only and not self.manifest.get('storage'):
+            from cross_episode_sim.skills.gather_interface import gather_skill_interface, gather_skill_plan
+            from cross_episode_sim.skills.interface import OracleDockRecovery, run_skill_episode
+            def setup():
+                self.validate_population()
+                self.configure_phase('GATHER')
+                # Already gathered vessels need no robot action; their measured
+                # support/pose becomes the filling target used by the verifier.
+                for info in self.manifest['bindings']:
+                    if self.is_filling_site(self.current_room(info)):
+                        room = self.current_room(info)
+                        point = self.data.body(info['body']).xpos.tolist()
+                        info.update(filling_site=room, destination=room,
+                                    filling_position=point, destination_position=list(point))
+            supplied = self.manifest.get('skill_plan_path')
+            steps = json.loads(Path(supplied).read_text()) if supplied else gather_skill_plan(self)
+            return 0 if run_skill_episode(self, gather_skill_interface(self), steps,
+                                          self.final_goal, 'breakfast_gather_fill_serve', setup=setup,
+                                          plan_source=supplied,
+                                          recover=None if supplied else OracleDockRecovery()) else 1
         ops={'validate_population':Operation(self.validate_population,lambda:True),
              'phase':Operation(self.configure_phase,self.phase_ready),
-             'transfer':Operation(self.transfer_role,self.verify_role),
+             'transfer':TransferOperation(self),
              'human_fill':Operation(self.human_fill,self.filled)}
         steps=[dict(operation='validate_population',arguments={})]
         if not validate_only:
@@ -427,7 +469,7 @@ class GatherBreakfast(OfficeBreakfastEpisode):
 
 
 def prepare_episode(output, seed=None, people=None, sources=None, config_path=DEFAULT_CONFIG,
-                    randomize=False, floor_objects=0, episode_label=None, table_objects=0, table_setting=None):
+                    randomize=False, floor_objects=0, episode_label=None, table_objects=0, table_setting=None, extra_furniture=0):
     """Author and settle a breakfast episode in `output`; returns its manifest.
 
     `sources='storage'` starts one mug in a drawer and one bowl in a cabinet.
@@ -442,7 +484,7 @@ def prepare_episode(output, seed=None, people=None, sources=None, config_path=DE
     if people is not None:config['people']=people
     if seed is not None:config['seed']=seed
     roles=vessel_roles(config['people'])
-    config['initial_sources']={r:config['initial_sources'][r] for r in roles}
+    config['initial_sources']={r:config['initial_sources'].get(r, 'kitchen') for r in roles}
     if sources=='storage':
         config['initial_sources'].update(cup_one='drawer',bowl_one='cabinet')
     config['storage_profile']=sources or config.get('storage_profile','rooms')
@@ -463,6 +505,10 @@ def prepare_episode(output, seed=None, people=None, sources=None, config_path=DE
             manifest['floor_objects']=add_floor_objects(scene,rooms,config['seed'],avoid_xy=keep)
         if episode_label:manifest['episode_label']=episode_label
         (Path(output).resolve()/'task_manifest.json').write_text(json.dumps(manifest,indent=2))
+    if extra_furniture:
+        from cross_episode_sim.tasks.scene_variation import add_furniture
+        add_furniture(Path(manifest['scene_xml']), manifest, config['seed']+101, extra_furniture)
+        (Path(output).resolve()/'task_manifest.json').write_text(json.dumps(manifest, indent=2))
     return manifest
 
 
@@ -470,7 +516,10 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,default=DEFAULT_CONFIG)
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--people',type=int,choices=(1,2))
+    parser.add_argument('--extra-furniture', type=int, choices=range(9), default=0)
+    parser.add_argument('--nav-speed', type=float, default=.12)
+    parser.add_argument('--turn-speed', type=float, default=.4)
+    parser.add_argument('--people',type=int,choices=(1,2,3,4))
     parser.add_argument('--seed',type=int)
     parser.add_argument('--sources',choices=('rooms','storage'),default=None)
     parser.add_argument('--randomize',action='store_true',help='Also move the desk and side table and scatter table clutter')
@@ -480,14 +529,23 @@ def main():
     parser.add_argument('--episode-label',help='Banner shown in the videos, e.g. "History 1 (given): breakfast"')
     parser.add_argument('--prepare-only',action='store_true')
     parser.add_argument('--validate-only',action='store_true')
+    parser.add_argument('--skill-plan', type=Path, help='JSON list of public atomic skill calls (room-based episode)')
     args=parser.parse_args()
+    if not all(np.isfinite(v) and v > 0 for v in (args.nav_speed, args.turn_speed)):
+        parser.error('Navigation speeds must be positive and finite')
     output=args.output.resolve()
     manifest=prepare_episode(output,args.seed,args.people,args.sources,args.config,
-                             args.randomize,args.floor_objects,args.episode_label,args.table_objects,args.table_setting)
+                             args.randomize,args.floor_objects,args.episode_label,args.table_objects,args.table_setting,args.extra_furniture)
+    if args.skill_plan:
+        if manifest.get('storage') or args.validate_only or args.prepare_only:
+            parser.error('--skill-plan requires execution of a room-based breakfast episode')
+        manifest['skill_plan_path'] = str(args.skill_plan.resolve())
+        (output/'task_manifest.json').write_text(json.dumps(manifest, indent=2))
     print(json.dumps({'prepared':str(output),'initial_sources':{i['role']:i['initial_source'] for i in manifest['bindings']},
         'content_model':manifest['content_model']}),flush=True)
     if args.prepare_only:return 0
-    result=run(output,manifest,args.validate_only,episode_class=GatherBreakfast)
+    result=run(output,manifest,args.validate_only,episode_class=GatherBreakfast,
+               overrides=dict(nav_speed=args.nav_speed, turn_speed=args.turn_speed))
     authored=json.loads((output/'task_manifest.json').read_text())
     authored['physical_validation']=('initialization_only_passed' if args.validate_only else 'passed') if result==0 else 'failed'
     (output/'task_manifest.json').write_text(json.dumps(authored,indent=2))

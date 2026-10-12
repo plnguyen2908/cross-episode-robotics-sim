@@ -2,14 +2,16 @@
 import numpy as np
 import pytest
 
-from cross_episode_sim.tasks.coffee.grounds import BrewState, grain_offsets, grain_inventory, pour_pose
+from cross_episode_sim.tasks.coffee.grounds import BrewState, grain_inventory, grain_offsets, pour_pose
 
 
 def test_box_has_open_cavity_and_retains_free_grains_at_rotated_initial_pose():
     import xml.etree.ElementTree as ET
+
     import mujoco
     from scipy.spatial.transform import Rotation
-    from cross_episode_sim.tasks.coffee.grounds import make_dosing_box, add_grounds
+
+    from cross_episode_sim.tasks.coffee.grounds import add_grounds, make_dosing_box
     root=ET.Element('mujoco');world=ET.SubElement(root,'worldbody')
     ET.SubElement(world,'geom',type='plane',size='1 1 .1')
     body=ET.SubElement(world,'body',name='box',pos='0 0 .04')
@@ -78,7 +80,9 @@ def test_grains_fit_without_overlap_and_pour_lip_stays_above_hopper():
 def test_lid_counter_targets_keep_grasp_rotation_and_supported_height():
     from types import SimpleNamespace
     from unittest.mock import patch
+
     from scipy.spatial.transform import Rotation
+
     from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode
     c=CoffeeEpisode.__new__(CoffeeEpisode)
     pose=np.eye(4);pose[:3,:3]=Rotation.from_euler('zy',[37,4],degrees=True).as_matrix();pose[:3,3]=[2.,-.5,1.15]
@@ -107,8 +111,9 @@ def test_lid_counter_targets_keep_grasp_rotation_and_supported_height():
 def test_only_loaded_coffee_vessels_use_orientation_preserving_carry(grains, brewed, object_name, upright):
     from types import SimpleNamespace
     from unittest.mock import Mock, patch
-    from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode
+
     from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode
+    from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode
     c=CoffeeEpisode.__new__(CoffeeEpisode)
     c.object_name=object_name;c.brew=SimpleNamespace(completed=brewed)
     c.info=lambda role:{'body':'mug'};c.active_grains=lambda:grains
@@ -123,7 +128,9 @@ def test_only_loaded_coffee_vessels_use_orientation_preserving_carry(grains, bre
 def test_filled_carry_preserves_rotation_and_does_not_retry_execution_failure(execution_error):
     from types import SimpleNamespace
     from unittest.mock import Mock
+
     from scipy.spatial.transform import Rotation
+
     from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode
     c=BreakfastEpisode.__new__(BreakfastEpisode)
     pose=np.eye(4);pose[:3,3]=[.6,0.,1.]
@@ -153,7 +160,8 @@ def test_filled_carry_preserves_rotation_and_does_not_retry_execution_failure(ex
 
 def test_dispenser_insertion_keeps_mug_below_spout_and_withdraws_horizontally():
     from unittest.mock import Mock
-    from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode, COFFEE
+
+    from cross_episode_sim.tasks.coffee.native_task import COFFEE, CoffeeEpisode
     c=CoffeeEpisode.__new__(CoffeeEpisode);c.destination=COFFEE
     c.move=Mock();c.mesh_contact_move=Mock();c.record=Mock()
     candidate=np.eye(4);candidate[:3,3]=[2.4,-.4,1.04]
@@ -169,8 +177,10 @@ def test_dispenser_insertion_keeps_mug_below_spout_and_withdraws_horizontally():
 def test_dispenser_targets_restore_upright_mug_with_handle_toward_aisle():
     from types import SimpleNamespace
     from unittest.mock import Mock
+
     from scipy.spatial.transform import Rotation
-    from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode, COFFEE
+
+    from cross_episode_sim.tasks.coffee.native_task import COFFEE, CoffeeEpisode
     c=CoffeeEpisode.__new__(CoffeeEpisode);c.object_name='mug';c.destination=COFFEE
     c.table_bids={COFFEE:set()};c.model=SimpleNamespace(ngeom=0)
     c.prepare_loaded_manipulation=Mock();c.record=Mock()
@@ -192,6 +202,7 @@ def test_dispenser_targets_restore_upright_mug_with_handle_toward_aisle():
 @pytest.mark.parametrize('cached', [False, True])
 def test_inventory_respects_vessel_rotation_and_disjoint_hopper_priority(cached):
     from types import SimpleNamespace
+
     from scipy.spatial.transform import Rotation
     reference=Rotation.from_euler('y',90,degrees=True).as_matrix()
     current=Rotation.from_euler('x',70,degrees=True).as_matrix()
@@ -215,9 +226,11 @@ def test_inventory_respects_vessel_rotation_and_disjoint_hopper_priority(cached)
 
 def test_dosing_cup_requires_side_approach_and_docks_on_rotated_handle_side():
     from unittest.mock import Mock, patch
+
     from scipy.spatial.transform import Rotation
-    from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode
+
     from cross_episode_sim.manipulation.cross_room import CrossRoomManipulation
+    from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode
     c=CoffeeEpisode.__new__(CoffeeEpisode);c.object_name='dose';c.spec={'dosing_body':'dose'}
     with patch.object(CrossRoomManipulation,'annotation_approach_allowed',return_value=True):
         for angle,allowed in ((0,False),(30,False),(75,True),(120,False)):
@@ -235,6 +248,7 @@ def test_dosing_cup_requires_side_approach_and_docks_on_rotated_handle_side():
 def test_reachable_initial_pose_with_unreachable_tilt_does_not_move_robot():
     from types import SimpleNamespace
     from unittest.mock import Mock
+
     from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode
     c=CoffeeEpisode.__new__(CoffeeEpisode)
     c.lid_closed=lambda:False;c.grasp_relative=np.eye(4)
@@ -249,7 +263,7 @@ def test_reachable_initial_pose_with_unreachable_tilt_does_not_move_robot():
     c.nearby_ik=Mock(side_effect=RuntimeError('No nearby tilt IK'))
     c.move=Mock();c.preplanned_moves={}
     with pytest.raises(RuntimeError,match='No reachable pouring approach'):
-        c.pour_grounds()
+        c._pour_grounds_once()
     c.planner.plan.assert_called_once()
     c.move.assert_not_called()
     assert c.preplanned_moves=={}
@@ -258,6 +272,7 @@ def test_reachable_initial_pose_with_unreachable_tilt_does_not_move_robot():
 def test_return_from_pour_compensates_for_measured_grip_shift():
     from types import SimpleNamespace
     from unittest.mock import Mock, patch
+
     from cross_episode_sim.tasks.coffee.native_task import CoffeeEpisode
     c=CoffeeEpisode.__new__(CoffeeEpisode)
     c.lid_closed=lambda:False;c.grasp_relative=np.eye(4)
@@ -273,10 +288,25 @@ def test_return_from_pour_compensates_for_measured_grip_shift():
     shifted=np.eye(4);shifted[0,3]=.03
     c.tcp=lambda:np.eye(4);c.bread_pose=lambda:shifted.copy()
     with patch('cross_episode_sim.tasks.coffee.native_task.pour_pose',return_value=np.eye(4)):
-        c.pour_grounds()
+        c._pour_grounds_once()
     c.check_loaded_tuck_path.assert_called_once()
     stage,target=c.mesh_contact_move.call_args.args
     assert stage=='return dosing cup upright'
     np.testing.assert_allclose(target[:3,3],[-.03,0.,0.])
     assert c.report['pour_evidence']['counts']==dict(hopper=32,vessel=0,spilled=0)
     assert c.poured and not c.pouring
+
+
+def test_alternate_spout_dock_uses_machine_support_in_another_room():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from cross_episode_sim.tasks.coffee.brew import BrewActions
+    c = SimpleNamespace(machine_dock=[4., -4., 0.], _public_dock_skip=2, holding_loaf=False,
+                        spec=dict(support_site='coffee_station', mug_target_pose=np.eye(4).tolist()),
+                        tuck_for_navigation=Mock(), navigate_to_site=Mock(), rebuild=Mock(), task_navigate=Mock())
+    BrewActions.return_to_machine(c)
+    assert c.navigate_to_site.call_args.args[0] == 'coffee_station'
+    assert c.navigate_to_site.call_args.args[2] is False
+    c.task_navigate.assert_not_called()
+    assert c.machine_dock == [4., -4., 0.]

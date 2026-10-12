@@ -21,6 +21,7 @@ from cross_episode_sim.tasks.breakfast.scene import (SUPPORTS, OUTWARD, allocate
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode, run
 from cross_episode_sim.manipulation.edge_access import object_bodies
 from cross_episode_sim.skills.composite import CompositeEpisode, Operation
+from cross_episode_sim.skills.transfer import TransferOperation
 from cross_episode_sim.paths import DATA_DIR, source_digests, CONFIG_DIR
 
 DEFAULT_CONFIG = CONFIG_DIR/'office_breakfast.json'
@@ -37,8 +38,8 @@ def factor_rng(config, variant, factor):
 
 
 def validate_config(config):
-    if config['people'] not in (1, 2):
-        raise ValueError('Office breakfast supports one or two place settings')
+    if config['people'] not in (1, 2, 3, 4) or (config['people'] >= 3 and config.get('workflow') != 'gather_fill_serve'):
+        raise ValueError('Office breakfast supports 1–2 settings; gather breakfast supports 1–4')
     if not config['variants']:
         raise ValueError('At least one variant is required')
     names = [v['name'] for v in config['variants']]
@@ -136,7 +137,12 @@ def prepare(config, variant, output):
     manifest=copy.deepcopy(json.loads((base/'task_manifest.json').read_text()))
     tree=ET.parse(manifest['scene_xml']);root=tree.getroot();world=root.find('worldbody')
     gathering=config.get('workflow')=='gather_fill_serve'
-    wanted=['cup_one','bowl_one']+(['cup_two','bowl_two'] if config['people']==2 else [])
+    from cross_episode_sim.tasks.servings import ORDINALS, clone_vessel, setting_fractions, vessel_roles
+    wanted = vessel_roles(config['people'])
+    for word in ORDINALS[2:config['people']]:
+        for kind in ('cup', 'bowl'):
+            source = next(i for i in manifest['bindings'] if i['role'] == kind + '_two')
+            manifest['bindings'].append(clone_vessel(root, source, kind + '_' + word))
     if not gathering:wanted+=['sweet_condiment']
     if gathering and (config['cleanup'] or variant['already_correct']):
         raise ValueError('Gather/fill uses empty vessels; cleanup and already_correct are not applicable')
@@ -208,6 +214,11 @@ def prepare(config, variant, output):
     reserved['dining']=[bounds(model,data,name) for name in props]
     source_sites={'reading':.25,'misplaced_cup':.75,'cup_one':.10,'bowl_one':.27,'cup_two':.44,'bowl_two':.61,'sweet_condiment':.78}
     destination_sites={'reading':.25,'misplaced_cup':.93,'cup_one':.10,'bowl_one':.28,'cup_two':.70,'bowl_two':.88,'sweet_condiment':.49}
+    if gathering and config['people'] >= 3:
+        for index, (cup, bowl) in enumerate(setting_fractions(config['people'])):
+            from cross_episode_sim.tasks.servings import ORDINALS
+            destination_sites.update({f'cup_{ORDINALS[index]}': cup, f'bowl_{ORDINALS[index]}': bowl})
+        source_sites.update(cup_three=.78, bowl_three=.90, cup_four=.65, bowl_four=.97)
     requests=[]
     for info in infos:
         role=info['role']
@@ -231,7 +242,12 @@ def prepare(config, variant, output):
         # reserve a random main-counter gap here before comparing alternatives.
     if gathering:
         for request in requests:request['check_static']=True
-    reserved=allocate_sites(model,data,requests,reserved)
+    if gathering and config['people'] >= 3:
+        initial = allocate_sites(model, data, [r for r in requests if r['field'] == 'position'], copy.deepcopy(reserved))
+        final = allocate_sites(model, data, [r for r in requests if r['field'] != 'position'], copy.deepcopy(reserved))
+        reserved = {room: initial[room] + final[room] for room in reserved}
+    else:
+        reserved=allocate_sites(model,data,requests,reserved)
     for info in infos:
         if gathering and info['source']=='kitchen':info['filling_position']=list(info['position'])
         if info['role'] in variant['already_correct']:info['position']=list(info['destination_position'])
@@ -315,7 +331,7 @@ class OfficeBreakfastEpisode(BreakfastEpisode):
     def run_test(self,validate_only=False):
         steps=[dict(operation='validate_population',arguments={})]
         operations={'validate_population':Operation(self.validate_population,lambda:True),
-                    'transfer':Operation(self.transfer_role,self.verify_role)}
+                    'transfer':TransferOperation(self)}
         if not validate_only:
             steps += [dict(operation='transfer',arguments={'role':i['role']}) for i in self.manifest['bindings']]
         def goal():

@@ -87,6 +87,36 @@ validates every step's arguments before touching physics, runs them in order, an
 requires the task's goal function to return measured evidence that is all true. Each committed
 skill stays committed: a later failure does not undo an earlier success.
 
+The three episodes emitted by `tasks.full_breakfast` use `skills.interface.SkillInterface`.
+Both oracle and VLM planners can list closed argument schemas and submit JSON-compatible
+skill calls. `run_skill_episode` accepts only the public registry and requires a successful
+call for every planned action, followed by measured final goals. `skills/breakfast_interface.py`
+binds coffee and breakfast-with-coffee; `skills/gather_interface.py` binds the room-based
+breakfast history. `skills/vessels.py` shares qualified vessel manipulation across these
+domains. The execution journal survives failed skill rollback. Scene initialization is
+outside the plan; human filling and machine waits are explicitly named environment events.
+
+Cup placement/retrieval/serving recipes in `skills/coffee_cups.py` are no longer presented
+as atoms: they compose separate pickup, navigation, and placement actions. Public pick/place
+calls reject hidden base navigation. Local grasp/placement failure therefore returns a
+structured failure; a planner must issue a navigation action to change docks. The existing
+checkpoint trial mechanism still records rejected physical branches separately.
+
+Other legacy household entry points use `skills.transfer.TransferOperation` and shared
+pickup/delivery boundaries, including office breakfast, tidy-up, and cabinet transfers.
+Standalone coffee diagnostics retain `skills.coffee.coffee_operations`, with shared
+portafilter, cup, button, and dosing implementations. These adapters alone are not proof
+of a plan executed through the public interface.
+Coffee checkpoints also restore machine state, event files, and constraint state.
+The existing storage-drop recovery remains an explicit exception: it may rewind pickup
+to select a different grasp when a carried vessel drops.
+
+The standalone portafilter demos select the same skill objects from the coffee registry.
+Attach starts with an empty basket on the counter and preserved socket constraint frames;
+the composite uses that same skill with a filled basket after dosing. Neither skill reports
+success merely from a phase flag: detach checks released constraints and stable counter
+support, while attach checks the measured locked pose and withdrawn hand.
+
 ## Recording and outputs
 
 `controller/base.tick()` steps physics and appends a trace row every 0.04 s (full `qpos`, task

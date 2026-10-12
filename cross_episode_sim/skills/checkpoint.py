@@ -3,11 +3,11 @@
 The accepted trace is physical execution from a shared checkpoint. Rejected
 branches are retained separately, never relabelled as policy successes.
 """
+import json
 from argparse import Namespace
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-import json
 
 import mujoco
 import numpy as np
@@ -58,10 +58,11 @@ class ExecutionCheckpoint:
     # the caller rebuilds cuRobo's world/base transform and payload attachment.
     runtime = {'model', 'data', 'planner', 'renderer', 'writer', 'cameras',
                'embodiment', 'robot_actions', 'profile', 'trace'}
-    model_fields = ('geom_contype', 'geom_conaffinity', 'geom_rgba', 'geom_group',
+    model_fields = ('geom_contype', 'geom_conaffinity', 'geom_rgba', 'geom_group', 'geom_condim',
                     'geom_friction', 'geom_solref', 'geom_solimp', 'body_gravcomp',
                     'actuator_gainprm', 'actuator_biasprm', 'actuator_forcerange',
-                    'actuator_ctrlrange', 'actuator_forcelimited', 'eq_data', 'site_rgba')
+                    'actuator_ctrlrange', 'actuator_forcelimited', 'eq_data', 'site_rgba',
+                    'site_pos', 'site_size', 'site_group')
     sidecars = ('attempted_grasp.json', 'attempted_grasps.json', 'qualified_grasp.json',
                 'thin_side_hypotheses.npz', 'cabinet_rotated_rim_hypotheses.npz',
                 'cabinet_retrieval_hypotheses.npz', 'cabinet_retrieval_hypotheses.json')
@@ -186,4 +187,5 @@ def run_trials(c, phase, candidates, execute, *, rebuild=None):
             phase=phase, attempts=index+1, checkpoint_time=float(checkpoint.data.time),
             end_time=float(c.data.time), rejected_log=str(c.output/'trial_search.jsonl')))
         return result
-    raise RuntimeError(f'No successful {phase} trial after {len(errors)} attempts: {errors[-3:]}')
+    raise RuntimeError(f'No successful {phase}: {len(errors)} skill trial(s) in this call '
+                       f'(internal motion/grasp candidates counted separately); last errors: {errors[-3:]}')

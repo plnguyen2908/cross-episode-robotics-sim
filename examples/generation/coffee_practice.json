@@ -1,0 +1,8 @@
+{
+  "task": "coffee_practice",
+  "name": "Practice the demonstrated coffee recipe",
+  "seed": 103,
+  "histories": ["../../runs/history_library/REPLACE_COFFEE_ID"],
+  "parameters": {"cups": 2},
+  "scene": {"machine_room": "kitchen"}
+}

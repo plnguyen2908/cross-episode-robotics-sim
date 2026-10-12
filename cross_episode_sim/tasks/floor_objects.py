@@ -83,15 +83,28 @@ def scatter_objects(scene_xml, targets, seed, avoid_xy=(), avoid_radius=.9, pref
     rng = np.random.default_rng(seed)
     pool = candidates(seed)
     placed = []
+    # Scoped to this generation call: sources cannot become stale across runs.
+    exports, sizes = {}, {}
     for index, target in enumerate(targets):
         limits = TOP if target.get('support') else FLOOR
         name_prefix = f'{prefix}_{index}'
         for row in pool:
             if row['key'] in {p['key'] for p in placed}:
                 continue
+            size = sizes.get(row['key'])
+            if size is not None and (size[:2].max() > limits['max_size'] or size[2] > limits['max_height']):
+                continue
             try:
-                recording, _, _ = qualified_evidence(row)
-                exported, obj, _, _ = export_initial_scene(recording, Path(scene_xml).parent/'imports'/name_prefix)
+                destination = Path(scene_xml).parent/'imports'/name_prefix
+                if row['key'] not in exports:
+                    recording, _, _ = qualified_evidence(row)
+                    exported, obj, _, _ = export_initial_scene(recording, destination)
+                    exports[row['key']] = (exported.read_bytes(), obj)
+                else:
+                    xml, obj = exports[row['key']]
+                    destination.mkdir(parents=True, exist_ok=True)
+                    exported = destination/'robocasa_scene.xml'
+                    exported.write_bytes(xml)
             except Exception:
                 continue
             tree = ET.parse(scene_xml); root = tree.getroot()
@@ -104,6 +117,7 @@ def scatter_objects(scene_xml, targets, seed, avoid_xy=(), avoid_radius=.9, pref
             mujoco.mj_forward(model, data)
             vertices = collision_vertices(model, data, object_bodies(model, name))
             size = vertices.max(0)-vertices.min(0)
+            sizes[row['key']] = size
             if size[:2].max() > limits['max_size'] or size[2] > limits['max_height']:
                 remove_object(scene_xml, name, name_prefix); continue
             low, high, surface_z, surface_bodies = target_area(model, data, target, limits)
@@ -129,7 +143,7 @@ def scatter_objects(scene_xml, targets, seed, avoid_xy=(), avoid_radius=.9, pref
                           kind='surface_clutter' if target.get('support') else 'floor_object',
                           position=[*map(float, spot), float(height)])
             try:
-                settle(scene_xml, [record], surface_bodies)
+                settle(scene_xml, [record], surface_bodies, model=model)
             except RuntimeError:
                 # Rolled away or came to rest against something: try another asset.
                 remove_object(scene_xml, name, name_prefix); continue
@@ -150,9 +164,35 @@ def remove_object(scene_xml, name, name_prefix):
     tree.write(scene_xml)
 
 
-def settle(scene_xml, placed, allowed, seconds=1.5):
-    """Drop the objects and require them at rest, touching only their surface."""
-    model = mujoco.MjModel.from_xml_path(str(scene_xml)); data = mujoco.MjData(model)
+def settle(scene_xml, placed, allowed, seconds=1.5, *, model=None):
+    """Drop objects onto their surface, optionally reusing pre-placement geometry.
+
+    A supplied model must match the XML except for the placed free bodies' poses.
+    Only top-level free bodies are reused; other joint layouts compile normally.
+    """
+    tree = ET.parse(scene_xml); root = tree.getroot()
+    poses = []
+    if model is not None:
+        for p in placed:
+            bid = model.body(p['body']).id
+            jid = model.body_jntadr[bid]
+            if (model.body_parentid[bid] != 0 or model.body_jntnum[bid] != 1
+                    or jid < 0 or model.jnt_type[jid] != mujoco.mjtJoint.mjJNT_FREE):
+                model = None
+                break
+            node = root.find(f"./worldbody/body[@name='{p['body']}']")
+            if node is None or any(key in node.attrib for key in ('euler', 'axisangle', 'xyaxes', 'zaxis')):
+                model = None
+                break
+            poses.append((model.jnt_qposadr[jid], np.fromstring(node.get('pos', '0 0 0'), sep=' '),
+                          np.fromstring(node.get('quat', '1 0 0 0'), sep=' ')))
+    if model is None:
+        model = mujoco.MjModel.from_xml_path(str(scene_xml))
+        poses = []
+    data = mujoco.MjData(model)
+    for address, pos, quat in poses:
+        data.qpos[address:address+3] = pos
+        data.qpos[address+3:address+7] = quat / np.linalg.norm(quat)
     mujoco.mj_forward(model, data)
     start = {p['body']: data.body(p['body']).xpos.copy() for p in placed}
     for _ in range(int(seconds/model.opt.timestep)):

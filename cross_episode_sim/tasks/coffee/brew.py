@@ -1,17 +1,17 @@
 """Physical cup/button actions and an explicit, non-fluid brewing state model."""
-from dataclasses import dataclass
 import json
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 
 import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from cross_episode_sim.paths import DATA_DIR
-from cross_episode_sim.tasks.coffee.placement import machine_pose, rotate, to_validated, to_world
 from cross_episode_sim.manipulation.edge_access import collision_vertices, object_bodies
 from cross_episode_sim.manipulation.physical_contents import cavity_geometry
+from cross_episode_sim.paths import DATA_DIR
 from cross_episode_sim.tasks.breakfast.episode import BreakfastEpisode
+from cross_episode_sim.tasks.coffee.placement import machine_pose, rotate, to_validated, to_world
 
 POWER_BUTTON = 'button_02_press_pivot_001'
 BREW_BUTTON = 'button_01_press_pivot_001'
@@ -81,6 +81,7 @@ def swap_coffee_mug(root, manifest, out, key, grasp_index):
     its grasp-sweep recording and its grasps from that model's qualified registry.
     """
     from pathlib import Path
+
     from cross_episode_sim.tasks.breakfast.scene import merge_object, read_qualified
     old=root.find(f".//body[@name='{MUG}']")
     next(p for p in root.iter() if old in list(p)).remove(old)
@@ -109,7 +110,10 @@ def swap_coffee_mug(root, manifest, out, key, grasp_index):
 
 def prepare_brew(out, manifest, selection, coffee_mug=DEFAULT_COFFEE_MUG, mugs=1, second_home=MUG_TWO_HOME):
     """Retain native cup scale, make the second source button passive, add sites."""
+    from cross_episode_sim.tasks.servings import validate_people
+    validate_people(mugs)
     tree=ET.parse(out/'robocasa_scene.xml');root=tree.getroot()
+    manifest['coffee']['coffee_mugs'] = [MUG]
     if tuple(coffee_mug)!=DEFAULT_COFFEE_MUG:swap_coffee_mug(root,manifest,out,*coffee_mug)
     button=root.find(f".//body[@name='{POWER_BUTTON}']")
     ET.SubElement(button,'joint',name=POWER_BUTTON.removesuffix('_001'),type='slide',axis='0 0 1',
@@ -137,6 +141,12 @@ def prepare_brew(out, manifest, selection, coffee_mug=DEFAULT_COFFEE_MUG, mugs=1
     if mugs>=2:
         add_second_mug(root,mug,manifest,spec,second_home)
         tree.write(out/'robocasa_scene.xml')
+    if mugs >= 3:
+        add_second_mug(root, mug, manifest, spec, (2.18, -.50), role='coffee_mug_three')
+        tree.write(out/'robocasa_scene.xml')
+    if mugs >= 4:
+        add_second_mug(root, mug, manifest, spec, (2.38, -.50), role='coffee_mug_four')
+        tree.write(out/'robocasa_scene.xml')
     model=mujoco.MjModel.from_xml_path(str(out/'robocasa_scene.xml'));data=mujoco.MjData(model);mujoco.mj_forward(model,data)
     cavity=cavity_geometry(model,data,MUG)
     reference=np.asarray(cavity['reference_rotation'])
@@ -153,8 +163,8 @@ def prepare_brew(out, manifest, selection, coffee_mug=DEFAULT_COFFEE_MUG, mugs=1
     ET.SubElement(mug,'site',name='moonlake_coffee_fill',type='cylinder',
                   pos=' '.join(map(str,[*center_local[:2],cavity['bottom_z']+.002])),
                   size=f"{cavity['radius']*.83} .001",rgba='.19 .07 .02 0',group='1')
-    if mugs>=2:
-        ET.SubElement(root.find(f".//body[@name='{MUG_TWO}']"),'site',name=fill_site(MUG_TWO),type='cylinder',
+    for other_mug in spec['coffee_mugs'][1:]:
+        ET.SubElement(root.find(f".//body[@name='{other_mug}']"),'site',name=fill_site(other_mug),type='cylinder',
                       pos=' '.join(map(str,[*center_local[:2],cavity['bottom_z']+.002])),
                       size=f"{cavity['radius']*.83} .001",rgba='.19 .07 .02 0',group='1')
     ET.SubElement(root.find('worldbody'),'site',name='moonlake_coffee_stream',type='cylinder',
@@ -180,22 +190,22 @@ def lower_drip_tray(root, out):
     slide.set('pos',' '.join(map(str,np.fromstring(slide.get('pos','0 0 0'),sep=' ')+parent.T@[0,0,-TRAY_DROP])))
 
 
-def add_second_mug(root, mug, manifest, spec, home=MUG_TWO_HOME):
+def add_second_mug(root, mug, manifest, spec, home=MUG_TWO_HOME, role="coffee_mug_two"):
     """A copy of the coffee mug on the counter left of the machine, for a second cup."""
     import copy
     twin=copy.deepcopy(mug)
     prefix=MUG.removesuffix('_test_object_main')
     for node in twin.iter():
         name=node.get('name')
-        if name:node.set('name',name.replace(prefix,'coffee_mug_two',1) if name.startswith(prefix) else 'coffee_mug_two_'+name)
+        if name:node.set('name',name.replace(prefix,role,1) if name.startswith(prefix) else role+'_'+name)
     # Same height and turn as the first mug, shifted along the counter in the machine frame.
     position=np.fromstring(mug.get('pos'),sep=' ')+rotate(spec,np.eye(3))@[*np.subtract(home,spec['mug_home_xy']),0.]
     twin.set('pos',' '.join(map(str,position)))
     root.find('worldbody').append(twin)
     info=dict(next(i for i in manifest['bindings'] if i['body']==MUG))
-    info.update(body=MUG_TWO,role='coffee_mug_two',position=position.tolist())
+    info.update(body=twin.get('name'),role=role,position=position.tolist())
     manifest['bindings'].append(info)
-    spec['coffee_mugs']=[MUG,MUG_TWO]
+    spec.setdefault('coffee_mugs', [MUG]).append(twin.get('name'))
 
 
 def body_pose(data, name):
@@ -229,6 +239,9 @@ class BrewActions:
     def coffee_mugs(self):
         return list(self.spec.get('coffee_mugs',[MUG]))
 
+    def coffee_mugs_roles(self):
+        return [i['role'] for i in self.manifest['bindings'] if i['body'] in self.coffee_mugs()]
+
     def mug_ready(self):
         own=object_bodies(self.model,self.mug);tray=object_bodies(self.model,TRAY)
         support=any((self.model.geom_bodyid[c.geom1] in own and self.model.geom_bodyid[c.geom2] in tray) or
@@ -239,42 +252,8 @@ class BrewActions:
                     and not (self.holding_loaf and self.object_name==self.mug))
 
     def place_cup(self):
-        self.review_phase='PLACE CUP UNDER SPOUT'
-        self.extra_support_bids=object_bodies(self.model,TRAY)|object_bodies(self.model,'drip_tray_slide_pivot_001')
-        local=np.load(self.info('coffee_mug')['grasp_path'])['transforms'][self.spec.get('coffee_mug_grasp_index',10)]
-        homes=self.__dict__.setdefault('mug_homes',{})
-        homes.setdefault(self.mug,body_pose(self.data,self.mug).tolist())
-        walk=self.spec.get('navigate_to_mugs',False)
-        if walk:self.walk_to_counter(self.mug,body_pose(self.data,self.mug)[:3,3])
-        self.pickup(self.mug,local)
-        lift=self.bread_pose().copy();lift[2,3]+=.07;self.held_pose('lift empty coffee cup',lift)
-        if walk:self.return_to_machine()
-        self.allow_support=False
-        target=np.asarray(self.spec['mug_target_pose'])
-        # The native mug nearly fills the gap. Enter beside the low forward
-        # handle, then slide laterally below the basket; avoid tilting its rim.
-        target=target.copy();target[2,3]-=.0003
-        # Waypoints are set in the validated layout and mapped to the placement.
-        local=to_validated(self.spec,target)
-        front_local=local.copy();front_local[:2,3]=[2.20,-.46]
-        front=to_world(self.spec,front_local)
-        self.grasp_relative=np.linalg.inv(self.tcp())@self.bread_pose()
-        self.arm('approach beside portafilter handle',front@np.linalg.inv(self.grasp_relative),True)
-        self.held_pose('level cup beside machine',front)
-        self.allow_support=True
-        side_local=front_local.copy();side_local[1,3]=-.31
-        side=to_world(self.spec,side_local)
-        self.held_pose('insert cup beside portafilter handle',side)
-        under_local=side_local.copy();under_local[0,3]=local[0,3]
-        under=to_world(self.spec,under_local)
-        self.held_pose('slide cup below portafilter basket',under)
-        self.held_pose('center cup under coffee spout',target)
-        self.release('withdraw hand from coffee cup',retreat_delta=rotate(self.spec,np.eye(3))@[.04,-.06,0.]);self.tick(.5)
-        # Where the retreat started, relative to the settled mug: retrieval retraces it.
-        self.__dict__.setdefault('mug_release_tcp',{})[self.mug]=(np.linalg.inv(body_pose(self.data,self.mug))@self.last_release_tcp).tolist()
-        self.extra_support_bids=set()
-        if not self.mug_ready():raise RuntimeError('Cup is not upright, supported and aligned under spout')
-        self.event('cup_placed',pose=self.bread_pose().tolist())
+        from cross_episode_sim.skills.coffee_cups import PlaceCoffeeCupSkill
+        return PlaceCoffeeCupSkill(self).run()
 
     def walk_to_counter(self, obj, point, carrying=False, room='kitchen'):
         """Navigate first, as the atomic pick and place do: dock beside a counter spot."""
@@ -288,6 +267,15 @@ class BrewActions:
     def return_to_machine(self):
         """Drive back to the machine dock; the spout waypoints were validated from there."""
         dock=self.machine_dock
+        alternative = getattr(self, '_public_dock_skip', 0)
+        if alternative:
+            # Explicit recovery docks belong to the machine's actual support,
+            # which can be in another room. Keep the cup's kitchen home intact.
+            self.tuck_for_navigation()
+            target = np.asarray(self.spec['mug_target_pose'])[:3, 3]
+            self.navigate_to_site(self.spec.get('support_site', 'kitchen'), target, self.holding_loaf)
+            self.rebuild()
+            return
         if not self.holding_loaf:
             self.tuck_for_navigation()
             self.task_navigate(np.array(dock[:2]),False,face=dock[2]);self.rebuild();return
@@ -302,7 +290,7 @@ class BrewActions:
             self.record(machine_return_direct_rejected=str(exc))
             target=np.asarray(self.spec['mug_target_pose']).copy()
             ready_local=to_validated(self.spec,target);ready_local[:2,3]=[2.20,-.46]
-            self.navigate_to_site('kitchen',to_world(self.spec,ready_local)[:3,3],True)
+            self.navigate_to_site(self.spec.get('support_site', 'kitchen'),to_world(self.spec,ready_local)[:3,3],True)
         self.task_navigate(goal,True,face=dock[2])
         self.rebuild()
 
@@ -313,54 +301,8 @@ class BrewActions:
         self.event('next_cup',mug=self.active_mug)
 
     def retrieve_cup(self):
-        """Bring the brewed mug out from under the spout to its counter spot.
-
-        The reverse of place_cup: approach along its release retreat, grasp,
-        slide out beside the portafilter handle, and set the mug down where it
-        started. The machine is then ready for the next cup.
-        """
-        mug=self.mug
-        self.review_phase='RETRIEVE CUP FROM SPOUT'
-        self.extra_support_bids=object_bodies(self.model,TRAY)|object_bodies(self.model,'drip_tray_slide_pivot_001')
-        # Grasp where the hand released the mug and approach along that release's
-        # retreat, which was collision-checked beside the portafilter handle.
-        local=np.array(self.mug_release_tcp[mug])
-        grasp=body_pose(self.data,mug)@local
-        pre=grasp.copy();pre[:3,3]+=rotate(self.spec,np.eye(3))@[.04,-.06,0.]
-        # Fully open (85 mm) the Robotiq linkage spreads 2 mm into the portafilter
-        # handle at this pose. The rim grasp spans 21 mm, so approach about 42 mm
-        # open (command 130 of 0-255 closed), about 10 mm clear on each side.
-        self.pickup(mug,local,pre=pre,approach_command=130.)
-        # Retrace placement's own waypoints: they come from the computed target
-        # pose 0.3 mm into the tray, not from where the mug settled on the grate
-        # (about 0.5 mm higher, enough to catch the basket in this tight gap).
-        planned=np.asarray(self.spec['mug_target_pose']).copy();planned[2,3]-=.0003
-        local_target=to_validated(self.spec,planned)
-        front_local=local_target.copy();front_local[:2,3]=[2.20,-.46]
-        # Slide out pressed down onto the drip tray: the rim then stays below the
-        # basket, and the cup may rub the machine on its way out.
-        side_local=front_local.copy();side_local[1,3]=-.31;side_local[2,3]-=PUSH_DOWN
-        under_local=side_local.copy();under_local[0,3]=local_target[0,3]
-        self.payload_tolerance=(PUSH_DOWN+.0015,1.5)
-        self.payload_contact_ok_bids=object_bodies(self.model,'base_frame_002')|object_bodies(self.model,'portafilter_extract_pivot_001')
-        try:
-            self.held_pose('slide cup out below portafilter basket',to_world(self.spec,under_local))
-            self.held_pose('withdraw cup beside portafilter handle',to_world(self.spec,side_local))
-            self.allow_support=False
-            self.held_pose('level cup beside machine',to_world(self.spec,front_local))
-        finally:self.payload_tolerance=None;self.payload_contact_ok_bids=set()
-        home=np.array(self.mug_homes[mug]);hover=home.copy();hover[2,3]+=.07
-        if self.spec.get('navigate_to_mugs',False):self.walk_to_counter(mug,home[:3,3],carrying=True)
-        self.grasp_relative=np.linalg.inv(self.tcp())@self.bread_pose()
-        self.arm('carry brewed cup to counter spot',hover@np.linalg.inv(self.grasp_relative),True)
-        self.allow_support=True
-        near=home.copy();near[2,3]+=.003;self.held_pose('set brewed cup on counter',near)
-        self.release('withdraw hand from brewed cup');self.tick(.5)
-        self.extra_support_bids=set()
-        if np.linalg.norm(body_pose(self.data,mug)[:3,3]-home[:3,3])>.02 or self.data.body(mug).xmat[8]<.995:
-            raise RuntimeError('Brewed cup is not upright at its counter spot')
-        self.machine_cycle.next_cup()
-        self.event('cup_retrieved',mug=mug,filled=mug in self.coffee_filled,pose=body_pose(self.data,mug).tolist())
+        from cross_episode_sim.skills.coffee_cups import RetrieveCoffeeCupSkill
+        return RetrieveCoffeeCupSkill(self).run()
 
     def operate_button(self, action):
         self.machine_action=action;self.active_button_body=self.spec['button_roles'][action]
@@ -368,10 +310,13 @@ class BrewActions:
         self.button_ids=[g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] in bodies and self.model.geom_contype[g]]
         self.button_pressed=False
         self.press()
-        if action=='power':
-            self.stage='wait for simulated machine ready'
-            self.tick(max(0.,self.machine_cycle.warmup_seconds-(self.data.time-self.machine_cycle.powered_at))+.1)
-            self.event('machine_ready')
+
+    def wait_machine_ready(self):
+        if self.machine_cycle.powered_at is None:
+            raise RuntimeError('Machine warmup requires measured power-on')
+        self.stage='wait for simulated machine ready'
+        self.tick(max(0.,self.machine_cycle.warmup_seconds-(self.data.time-self.machine_cycle.powered_at))+.1)
+        self.event('machine_ready')
 
     def finish_brew(self):
         if self.machine_cycle.started_at is None:raise RuntimeError('No measured brew start')
@@ -400,7 +345,8 @@ class BrewActions:
             self.machine_cycle.start(self.data.time,self.installed(),self.grounds_ready(),self.mug_ready())
             self.event('brew_started',duration_s=self.machine_cycle.brew_seconds,mug=self.mug)
 
-    def render_machine_frame(self,label,time):
+    def update_machine_visuals(self, time):
+        """Refresh visible liquid indicators for live observations and video replay."""
         events=[e for e in self.workflow_events if e['time']<=time]
         cavity=self.spec['mug_cavity'];bottom=cavity['bottom_z']+.002
         stream=self.model.site('moonlake_coffee_stream').id
@@ -431,4 +377,8 @@ class BrewActions:
         self.model.site_rgba[self.model.site('task_coffee_surface').id,3]=0.
         mujoco.mj_forward(self.model,self.data)
         state='COMPLETE' if completed else 'ABORTED' if aborted else 'BREWING' if start is not None else 'READY' if any(e['event']=='machine_ready' for e in events) else 'OFF'
+        return state
+
+    def render_machine_frame(self,label,time):
+        state = self.update_machine_visuals(time)
         return BreakfastEpisode.render_video_frame(self,label+' | '+state+' | simulated brewing; no fluid physics',time)

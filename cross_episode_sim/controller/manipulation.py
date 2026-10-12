@@ -11,6 +11,7 @@ from pathlib import Path
 import traceback
 import cv2
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from cross_episode_sim.control.timing import settle_arm, settle_released_object
 from scipy.spatial import cKDTree
@@ -199,7 +200,7 @@ class TableReorder(TableTransfer):
             keep_largest_component=True)
         reach.save(str(cache))
         self.record(physics_reachability_map=str(cache),
-                    reachability_policy=f'LinearBot live door-open map plus exact {self.profile.name} footprint')
+                    reachability_policy=f'A* live door-open map plus exact {self.profile.name} footprint')
         return reach
 
     def _raw_room_id(self, xy):
@@ -309,6 +310,9 @@ class TableReorder(TableTransfer):
 
     def tuck_for_navigation(self):
         """Explicit posture action; replace this boundary with a VLA policy later."""
+        if getattr(self, '_public_post_place_tuck', False):
+            self.tuck_after_placement()
+            self._public_post_place_tuck = False
         if getattr(self, 'holding_loaf', False):
             return self.tuck_loaded_for_navigation()
         if not self.in_default_travel_posture():
@@ -353,7 +357,7 @@ class TableReorder(TableTransfer):
             for q in trajectory:
                 probe.qpos[:] = self.data.qpos
                 probe.qpos[addresses] = q
-                mujoco.mj_forward(self.model, probe)
+                forward_collision(self.model, probe)
                 if (self.navigation_penetration(probe, held) > .001
                         or self.robot_self_penetration(probe) > .0005):
                     raise RuntimeError('ready posture path touches the scene')
@@ -407,7 +411,7 @@ class TableReorder(TableTransfer):
                 relative = original_position - [*start[:2], 0.]
                 probe.qpos[address:address+3] = rotation.apply(relative) + [*pose[:2], 0.]
                 probe.qpos[address+3:address+7] = (rotation*original_rotation).as_quat(scalar_first=True)
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
             return self.navigation_penetration(probe, carrying) <= 0 and self.robot_self_penetration(probe) <= .0005
         final = np.asarray([*goal, start[2] if face is None else face], dtype=float)
 
@@ -424,9 +428,32 @@ class TableReorder(TableTransfer):
             self.record(**metrics)
             return path
 
-        path, metrics = plan_cross_room_route(
-            self.args.scene_xml, self.build_physics_reach_map(),
-            start, final, clear)
+        reach_map = self.build_physics_reach_map()
+        # Validate the holonomic path before rejecting an XY route solely
+        # because its turn-in-place version clips a nearby obstacle.
+        self._cross_room_requires_blended = False
+        def blended_clear(path):
+            from cross_episode_sim.navigation.blended_route import blend_route
+            segments = blend_route(
+                path, float(start[2]), clear, nav_speed=self.args.nav_speed,
+                turn_speed=self.args.turn_speed)
+            if segments is None:
+                return False
+            self._cross_room_requires_blended = True
+            return True
+        try:
+            path, metrics = plan_cross_room_route(
+                self.args.scene_xml, reach_map, start, final, clear,
+                path_clear=(blended_clear if getattr(self.args, 'base_motion', 'blended') == 'blended'
+                            else None))
+        except RuntimeError:
+            if getattr(self.args, 'base_motion', 'blended') != 'blended':
+                raise
+            from cross_episode_sim.navigation.planners import plan_cross_room_escape
+            path, metrics = plan_cross_room_escape(
+                self.args.scene_xml, reach_map, start, final, clear, self.nav_map_filter(goal))
+            self._cross_room_requires_blended = True
+        self._pickup_pre_nav_undock = 0.
         self.record(**metrics)
         return path
 
@@ -666,7 +693,7 @@ class TableReorder(TableTransfer):
         for lift in heights:
             probe.qpos[address:address+3] = pose[:3, 3] + [0., 0., lift]
             probe.qpos[address+3:address+7] = quaternion
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
             if any(c.dist < -.0005
                    and any(self.model.geom_bodyid[g] in self.bread_bids
                            for g in (c.geom1, c.geom2))
@@ -674,7 +701,7 @@ class TableReorder(TableTransfer):
                 return False
         probe.qpos[address:address+3] = pose[:3, 3]
         probe.qpos[address+3:address+7] = quaternion
-        mujoco.mj_forward(self.model, probe)
+        forward_collision(self.model, probe)
         return True
 
     def choose_placement(self, table):
@@ -758,7 +785,7 @@ class TableReorder(TableTransfer):
                 probe_nav.qpos[address_nav:address_nav+3] = rotation.apply(relative) + [*stance[:2], 0.]
                 probe_nav.qpos[address_nav+3:address_nav+7] = (
                     rotation * object_rotation).as_quat(scalar_first=True)
-                mujoco.mj_forward(self.model, probe_nav)
+                forward_collision(self.model, probe_nav)
                 if (self.navigation_penetration(probe_nav, True) <= 0 and
                         self.robot_self_penetration(probe_nav) <= .0005):
                     clear_stances.append(stance.tolist())
@@ -787,7 +814,7 @@ class TableReorder(TableTransfer):
             probe.qpos[:] = self.data.qpos
             probe.qpos[address:address+3] = pose[:3, 3]
             probe.qpos[address+3:address+7] = Rotation.from_matrix(pose[:3, :3]).as_quat(scalar_first=True)
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
             if any(c.dist < -.0005 and any(self.model.geom_bodyid[g] in self.bread_bids for g in (c.geom1, c.geom2)) for c in probe.contact):
                 continue
             # Keep other objects' demonstrated destinations available for later
@@ -798,7 +825,7 @@ class TableReorder(TableTransfer):
                 jid = self.model.body_jntadr[self.model.body(other).id]
                 adr = self.model.jnt_qposadr[jid]
                 probe.qpos[adr:adr+7] = placements[table]
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
             if any(c.dist < -.0005 and any(self.model.geom_bodyid[g] in self.bread_bids for g in (c.geom1,c.geom2)) for c in probe.contact):
                 continue
             # The object has to come DOWN to this spot. Checking only its resting
@@ -835,7 +862,7 @@ class TableReorder(TableTransfer):
                 probe.qpos[obj_address:obj_address+3] = payload[:3, 3]
                 probe.qpos[obj_address+3:obj_address+7] = Rotation.from_matrix(
                     payload[:3, :3]).as_quat(scalar_first=True)
-                mujoco.mj_forward(self.model, probe)
+                forward_collision(self.model, probe)
                 if (self.navigation_penetration(probe, True) > .001
                         or self.robot_self_penetration(probe) > .0005):
                     raise RuntimeError('Loaded tuck path intersects actual robot or room geometry')
@@ -893,7 +920,7 @@ class TableReorder(TableTransfer):
             probe.qpos[:] = self.data.qpos
             probe.qpos[base_addresses] += fraction*shift[:2]
             probe.qpos[address:address+3] += fraction*shift
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
             if (self.navigation_penetration(probe, True) > .001
                     or self.robot_self_penetration(probe) > .0005):
                 return False
@@ -1038,7 +1065,7 @@ class TableReorder(TableTransfer):
                 rotation.apply(relative) + [*pose[:2], 0.])
             probe.qpos[object_address+3:object_address+7] = (
                 rotation * object_rotation).as_quat(scalar_first=True)
-            mujoco.mj_forward(self.model, probe)
+            forward_collision(self.model, probe)
             return (self.navigation_penetration(probe, True) <= 0 and
                     self.robot_self_penetration(probe) <= .0005)
 
@@ -1143,7 +1170,7 @@ class TableReorder(TableTransfer):
                 probe.qpos[:] = self.data.qpos
                 probe.qpos[base_addresses] += fraction*shift[:2]
                 probe.qpos[address:address+3] += fraction*shift
-                mujoco.mj_forward(self.model, probe)
+                forward_collision(self.model, probe)
                 if (self.navigation_penetration(probe, True) > .001
                         or self.robot_self_penetration(probe) > .0005):
                     clear = False
@@ -1154,6 +1181,8 @@ class TableReorder(TableTransfer):
         if distance is None:
             raise RuntimeError('No swept-clear retreat from loaded planner start collision')
         self.stage = 'back base away for loaded arm planning clearance'
+        end = start + distance*direction
+        self._public_navigation_goal = (end[:2].tolist(), float(end[2]))
         self.record(planner_start_clearance_m=gap, planning_clearance_retreat_m=distance)
         for u in np.linspace(0., 1., 76):
             blend = 10*u**3 - 15*u**4 + 6*u**5
@@ -1406,7 +1435,12 @@ class TableReorder(TableTransfer):
         if self.assignment()[self.object_name] != self.destination:
             raise RuntimeError('Placed object left the destination during withdrawal')
         if not self.in_default_travel_posture(loaded=False):
-            self.tuck_after_placement()
+            if getattr(self, '_public_skill_navigation', None) is False:
+                # Any clearance retreat needed for travel belongs to the next
+                # navigate action. Placement already released and withdrew.
+                self._public_post_place_tuck = True
+            else:
+                self.tuck_after_placement()
         self.report['success'] = True
 
     def transfer(self, move):
@@ -1450,7 +1484,7 @@ class TableReorder(TableTransfer):
             addresses[obj] = address
             probe.qpos[address:address+7] = pose
             changed |= self.descendants(obj)
-        mujoco.mj_forward(self.model, probe)
+        forward_collision(self.model, probe)
         if any(c.dist < -.001 and any(self.model.geom_bodyid[g] in changed for g in (c.geom1,c.geom2)) for c in probe.contact):
             raise RuntimeError('Demonstrated dynamic destinations are currently occupied')
         self.review_phase = 'DYNAMIC CHANGE: demonstrated placements only'

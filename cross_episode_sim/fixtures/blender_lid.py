@@ -35,6 +35,13 @@ def lid_closed_state(position, rotation, anchor):
                 and abs(angles[0]) < 7. and abs(angles[1]) < 7.)
 
 
+def align_disk_center(pose, closed, local_center):
+    """Preserve the disk's world center when choosing a new approach yaw."""
+    result = pose.copy()
+    result[:3, 3] = closed[:3, 3] + closed[:3, :3] @ local_center - pose[:3, :3] @ local_center
+    return result
+
+
 def install_blender(scene, old_object, table, xyz):
     tree = ET.parse(scene); root = tree.getroot(); world = root.find('worldbody')
     native = ET.fromstring(read_localized(GENERATED))
@@ -157,6 +164,10 @@ class BlenderLidTest(CrossRoomManipulation):
             anchor_error_m=float(np.linalg.norm(pose[:3,3]-self.anchor)),
             gripper_distance_m=float(np.linalg.norm(self.tcp()[:3,3]-pose[:3,3])),
             upright_degrees=Rotation.from_matrix(pose[:3,:3]).as_euler('xyz',degrees=True).tolist())
+
+    def align_lid_center(self, pose):
+        center = self.model.geom_pos[self.model.geom('skill_blender_lid_g1').id]
+        return align_disk_center(pose, self.closed_pose, center)
 
     def prepare_pickup(self):
         self.tuck_for_navigation()

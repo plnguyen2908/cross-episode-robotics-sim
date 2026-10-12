@@ -109,6 +109,20 @@ def to_validated(spec, value):
     return t[:3, :3] @ value + t[:3, 3]
 
 
+def clear_manipulation_workspace(spec, xy, radius=.10):
+    """Keep loose vessels outside the arm workspace around the apparatus.
+
+    Static object separation is insufficient: the forearm sweeps beside the
+    machine while lowering the unlocked portafilter. Bounds are expressed in
+    the validated machine frame, and expanded by the vessel footprint.
+    This conservative reservation is not a manipulation feasibility proof.
+    """
+    point = to_validated(spec, xy)
+    low = np.array([1.65, -.80]) - radius
+    high = np.array([2.65, -.15]) + radius
+    return not bool(np.all(point >= low) and np.all(point <= high))
+
+
 def rotate(spec, rotation):
     """Rotate a validated-layout orientation into this placement."""
     return transform(spec)[:3, :3] @ np.asarray(rotation)

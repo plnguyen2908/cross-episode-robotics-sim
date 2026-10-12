@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from cross_episode_sim.control.timing import settle_arm
 from scipy.spatial.transform import Rotation, Slerp
@@ -760,7 +761,7 @@ class PhysicalReorderCheck(AnnotatedGraspMixin, NavigationTransfer):
                 obj = waypoint @ relative
                 probe.qpos[obj_address:obj_address+3] = obj[:3,3]
                 probe.qpos[obj_address+3:obj_address+7] = Rotation.from_matrix(obj[:3,:3]).as_quat(scalar_first=True)
-            mujoco.mj_forward(self.model,probe)
+            forward_collision(self.model, probe)
             env = self.navigation_penetration(probe,held)
             own = self.robot_self_penetration(probe)
             if env > .001 or own > .0005:
@@ -796,7 +797,12 @@ class PhysicalReorderCheck(AnnotatedGraspMixin, NavigationTransfer):
         error = float(np.linalg.norm(self.tcp()[:3,3]-pose[:3,3]))
         self.record(contact_method='actual mesh checked IK and joint feedback',tcp_error_m=error)
         if error > .01:
-            raise RuntimeError(f'Contact servo tracking error: {error:.4f} m')
+            self.record(contact_tracking_failure=dict(
+                stage=stage, target_tcp_position=pose[:3, 3].tolist(),
+                actual_tcp_position=self.tcp()[:3, 3].tolist(),
+                joint_command_error=(self.data.ctrl[self.arm_aids]-self.data.qpos[addresses]).tolist(),
+                pairs=self.contact_pair_detail(self.data, getattr(self, 'holding_loaf', False))))
+            raise RuntimeError(f'Contact servo tracking error: {error:.4f} m at {stage}')
 
     def move(self, stage, pose):
         if stage in ('lift bread vertically', 'lift bread') or (

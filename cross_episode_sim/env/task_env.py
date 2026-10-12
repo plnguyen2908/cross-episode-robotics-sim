@@ -91,6 +91,15 @@ class TaskEnv(gym.Env):
         return self._observation(), {"goals": self.spec_.goals(self.controller)}
 
     def step(self, action):
+        reward, terminated, truncated, info = self.advance(action)
+        return self._observation(), reward, terminated, truncated, info
+
+    def advance(self, action):
+        """Execute one control interval without rendering unused observations.
+
+        Evaluation action chunks request camera frames between chunks, while
+        Gym callers retain the usual observation-returning ``step`` API.
+        """
         action = np.asarray(action, dtype=np.float64)
         if action.shape != (11,):
             raise ValueError(f"expected an 11-dimensional action, got {action.shape}")
@@ -113,7 +122,7 @@ class TaskEnv(gym.Env):
         success = bool(goals) and all(goals.values())
         terminated = terminated or success
         truncated = self._steps >= self.max_steps
-        return self._observation(), float(success), terminated, truncated, info
+        return float(success), terminated, truncated, info
 
     def render(self):
         frames = self._images()
@@ -127,6 +136,8 @@ class TaskEnv(gym.Env):
             self.renderer = None
         if self.controller is not None and getattr(self.controller, "renderer", None) is not None:
             self.controller.renderer.close()
+        if self.controller is not None and getattr(self.controller, "writer", None) is not None:
+            self.controller.writer.close()
         self.controller = None
 
     # -- observations ------------------------------------------------------

@@ -14,6 +14,7 @@ from pathlib import Path
 
 os.environ.setdefault("MUJOCO_GL", "egl")
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 
 from molmo_spaces.configs.robot_configs import RBY1MConfig
@@ -691,6 +692,10 @@ class FridgeTransfer:
                 "time": float(self.data.time), **metrics}
 
     def render_video_frame(self, stage, time):
+        if getattr(self, 'episode_label', None):
+            from cross_episode_sim.tasks.history_views import render_history_views
+            self.writer.append_data(render_history_views(self, record_raw=True))
+            return
         self.update_recording_cameras()
         frames = []
         for camera in self.cameras:
@@ -753,6 +758,9 @@ class FridgeTransfer:
     def tick(self, seconds):
         for _ in range(ceil(seconds / self.model.opt.timestep)):
             self.before_step()
+            hold = getattr(self, '_public_base_hold', None)
+            if hold is not None and not np.allclose(self.data.ctrl[hold[0]], hold[1], atol=1e-9, rtol=0):
+                raise RuntimeError('This atomic skill cannot command base motion; call navigate explicitly')
             mujoco.mj_step(self.model, self.data)
             if getattr(self, 'strict_mesh_self_collision', False):
                 depth = self.robot_self_penetration(self.data)
@@ -768,9 +776,13 @@ class FridgeTransfer:
                 if depth > limit and not getattr(self, "drop_only_grasp", False):
                     raise RuntimeError(
                         f'Robot self collision exceeded {limit * 1000:.1f} mm; stopping physics')
-            self.report["max_unintended_robot_penetration_m"] = max(
-                self.report["max_unintended_robot_penetration_m"], self.unintended_penetration()
-            )
+            penetration = self.unintended_penetration()
+            if penetration > self.report["max_unintended_robot_penetration_m"]:
+                self.report["max_unintended_robot_penetration_m"] = penetration
+                self.report['max_unintended_robot_penetration_context'] = dict(
+                    time=float(self.data.time), stage=self.stage,
+                    pairs=[[self.model.body(self.model.geom_bodyid[g]).name for g in (x.geom1, x.geom2)]
+                           for x in self.data.contact if abs(float(x.dist) + penetration) < 1e-8])
             contact = self.finger_object_contact()
             self.report["max_finger_object_penetration_m"] = max(
                 self.report["max_finger_object_penetration_m"], contact["depth_m"]
@@ -1015,7 +1027,7 @@ class FridgeTransfer:
                 for fraction in np.linspace(0., 1., count+1)[1:]:
                     probe.qpos[:] = self.data.qpos
                     probe.qpos[addresses] = previous + fraction*(waypoint-previous)
-                    mujoco.mj_forward(self.model, probe)
+                    forward_collision(self.model, probe)
                     depth = self.robot_self_penetration(probe)
                     if depth > .0003:
                         raise RuntimeError(
@@ -1329,7 +1341,9 @@ class FridgeTransfer:
         self.tick(0.6)
         if not getattr(self, "drop_only_grasp", False) and self.report["max_unintended_robot_penetration_m"] > 0.003:
             raise RuntimeError("Initial layout has unintended robot penetration")
-        self.prepare_pickup()
+        if not (getattr(self, '_public_skill_navigation', None) is False
+                and getattr(self, '_fixture_pick_prepared', None) == self.object_name):
+            self.prepare_pickup()
         start = self.bread_pose().copy()
         self.pickup_start_height = float(start[2, 3])
         bounds = self.bread_vertices()
@@ -1515,17 +1529,29 @@ class FridgeTransfer:
 
     def execute_transfer(self):
         """Compose robot actions; the task controller keeps the existing policy."""
+        from cross_episode_sim.skills.atomic import CallbackSkill
         actions = getattr(self, 'robot_actions', None)
-        if actions is None:
-            self.pick_payload()
+        pick = (self.pick_payload if actions is None else
+                lambda: actions.pick(self.object_name, self.source))
+        if getattr(self, 'atomic_pickup', False):
+            pick()
         else:
-            actions.pick(self.object_name, self.source)
+            CallbackSkill(self, 'pickup', (None,), lambda _: pick(),
+                          lambda: bool(self.holding_loaf and len(self.contacts()) >= 2)).run()
         if self.args.pickup_only:
             self.report["success"] = True
             self.report["scope"] = "pickup-only diagnostic; shelf placement not attempted"
             self.stage = "PASS: physical loaf pickup only"
             self.tick(3)
             return 0
+        self.attach_payload_to_planner()
+        if getattr(self, 'atomic_delivery', False):
+            return self.deliver_payload()
+        return CallbackSkill(self, 'delivery', (None,), lambda _: self.deliver_payload(),
+                             lambda: bool(self.report.get('success'))).run()
+
+    def attach_payload_to_planner(self):
+        """Register a physically grasped payload for loaded collision planning."""
         # Attach a conservative local bounding box to cuRobo only.
         object_pose = self.bread_pose()
         local = (self.bread_vertices() - object_pose[:3, 3]) @ object_pose[:3, :3]
@@ -1540,7 +1566,6 @@ class FridgeTransfer:
             (hi - lo) / 2,
         )
         self.attached = True
-        return self.deliver_payload()
 
     def deliver_payload(self):
         """Carry and place an already grasped payload; a retry boundary for oracles."""

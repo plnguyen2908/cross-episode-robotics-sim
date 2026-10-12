@@ -27,10 +27,12 @@ class Operation:
 
 
 class CompositeEpisode:
-    def __init__(self, controller, operations, verify_goal):
+    def __init__(self, controller, operations, verify_goal, setup=None, recover=None):
         self.controller = controller
         self.operations = operations
         self.verify_goal = verify_goal
+        self.setup = setup
+        self.recover = recover
 
     def run(self, task_id, steps):
         c = self.controller
@@ -38,6 +40,7 @@ class CompositeEpisode:
         success = False
         c.report.update(composite_task=task_id, composite_steps=history, success=False)
         try:
+            (c.output / 'composite_plan.json').write_text(json.dumps(steps, indent=2))
             if not steps:
                 raise ValueError('Empty composite plan')
             # Check the complete binding set before touching physics.
@@ -48,14 +51,35 @@ class CompositeEpisode:
                     raise ValueError(f"Unbound composite operation: {step['operation']}")
                 op = self.operations[step['operation']]
                 op.validate_arguments(**step['arguments'])
+            if self.setup is not None:
+                self.setup()
             for index, step in enumerate(steps):
                 op = self.operations[step['operation']]
                 event = dict(index=index, **step, success=False, start_time=float(c.data.time))
                 history.append(event)
                 self.save(history)
-                op.run(**step['arguments'])
+                print(json.dumps(dict(progress=dict(step=index+1, total=len(steps),
+                    operation=step['operation'], arguments=step['arguments'], status='running'))), flush=True)
+                try:
+                    op.run(**step['arguments'])
+                except RuntimeError as exc:
+                    extra = self.recover(step, exc) if self.recover is not None else None
+                    if not extra:
+                        raise
+                    for retry in extra:
+                        self.operations[retry['operation']].validate_arguments(**retry['arguments'])
+                    event.update(error=str(exc), recovered_by_explicit_calls=True, end_time=float(c.data.time))
+                    steps[index+1:index+1] = extra
+                    (c.output / 'composite_plan.json').write_text(json.dumps(steps, indent=2))
+                    self.save(history)
+                    print(json.dumps(dict(progress=dict(step=index+1, total=len(steps),
+                        operation=step['operation'], arguments=step['arguments'], status='retrying',
+                        error=str(exc), recovery=extra))), flush=True)
+                    continue
                 event.update(success=True, end_time=float(c.data.time))
                 self.save(history)
+                print(json.dumps(dict(progress=dict(step=index+1, total=len(steps),
+                    operation=step['operation'], arguments=step['arguments'], status='completed'))), flush=True)
             evidence = self.verify_goal()
             # Missing/empty evidence cannot qualify a task.
             if not isinstance(evidence, dict) or not evidence:
@@ -63,7 +87,8 @@ class CompositeEpisode:
             c.report['composite_goal_evidence'] = evidence
             success = all(value is True for value in evidence.values())
             if not success:
-                raise RuntimeError('Composite final goal not satisfied')
+                failed = ', '.join(k for k, v in evidence.items() if v is not True)
+                raise RuntimeError('Composite final goal not satisfied: ' + failed)
         except Exception as exc:
             c.report.update(error=str(exc), traceback=traceback.format_exc())
             if history and not history[-1]['success']:
@@ -91,6 +116,7 @@ def cabinet_operations(controller):
     """Bind existing CabinetTransfer motions without invoking its round-trip demo."""
     import numpy as np
     from cross_episode_sim.skills.fixtures import FixtureAccessSkill
+    from cross_episode_sim.skills.transfer import TransferOperation
     c = controller
 
     def transfer(object_name, source, destination):
@@ -113,7 +139,7 @@ def cabinet_operations(controller):
         c.execute_transfer()
 
     return {
-        'transfer': Operation(transfer, lambda object_name, source, destination:
+        'transfer': TransferOperation(c, transfer, lambda object_name, source, destination:
             c.assignment().get(object_name) == destination and not c.attached
             and not getattr(c, 'holding_loaf', False)),
         'cabinet_access': FixtureAccessSkill(c, 'cabinet', c._door_cycle_once),

@@ -29,16 +29,30 @@ class TaskSpec:
 
 
 def finger_contact_bodies(controller):
-    """Bodies (other than the robot) touched by a gripper pad."""
+    """Contacted task-object roots, including contacts on nested asset bodies."""
     model, data = controller.model, controller.data
-    pads = {model.body(controller.profile.namespace + name).id for name in controller.profile.finger_bodies}
+    cached = getattr(controller, '_policy_contact_maps', None)
+    if cached is None or cached[0] != id(model):
+        pads = {model.body(controller.profile.namespace + name).id for name in controller.profile.finger_bodies}
+        objects = {model.body(i['body']).id for i in controller.manifest['bindings']}
+        fingers, roots = [False]*model.nbody, list(range(model.nbody))
+        for body in range(1, model.nbody):
+            ancestor = body
+            while ancestor:
+                if ancestor in pads:
+                    fingers[body] = True
+                if ancestor in objects:
+                    roots[body] = ancestor
+                ancestor = int(model.body_parentid[ancestor])
+        cached = controller._policy_contact_maps = (id(model), fingers, roots)
+    _, fingers, roots = cached
     touched = set()
     for contact in data.contact[: data.ncon]:
         a, b = model.geom_bodyid[contact.geom1], model.geom_bodyid[contact.geom2]
-        if a in pads and b not in pads:
-            touched.add(b)
-        elif b in pads and a not in pads:
-            touched.add(a)
+        if fingers[a] and not fingers[b]:
+            touched.add(roots[b])
+        elif fingers[b] and not fingers[a]:
+            touched.add(roots[a])
     return touched
 
 
@@ -46,7 +60,7 @@ def room_of(controller, info):
     """Task room whose support currently holds the object, or None (held, fallen)."""
     try:
         return controller.current_room(info)
-    except StopIteration:
+    except (StopIteration, RuntimeError):
         return None
 
 

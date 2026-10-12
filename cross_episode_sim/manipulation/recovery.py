@@ -1,6 +1,7 @@
 """Local alternate-stance recovery using shared physical A* and base execution."""
 from pathlib import Path
 import mujoco
+from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from scipy.spatial.transform import Rotation
 from cross_episode_sim.manipulation.grasp_qualification import GraspQualification
@@ -40,7 +41,7 @@ class RecoveringManipulation(ThinEdgeAccessMixin, GraspQualification):
                 rotation=Rotation.from_euler('z',pose[2]-start[2])
                 probe.qpos[object_address:object_address+3]=rotation.apply(object_position-np.array([*start[:2],0.]))+np.array([*pose[:2],0.])
                 probe.qpos[object_address+3:object_address+7]=(rotation*object_rotation).as_quat(scalar_first=True)
-            mujoco.mj_forward(self.model,probe)
+            forward_collision(self.model, probe)
             return self.navigation_penetration(probe,carrying)<=0 and self.robot_self_penetration(probe)<=.0005
         # Restrict to the source room's floor and the local vicinity of the object.
         floor=[]

@@ -5,13 +5,23 @@
 #
 # Skills: cross-room, cabinet-door, cabinet-transfer, drawer, drawer-loop,
 #         drawer-pick-place, stove-knob, faucet, microwave-button, toaster-lever,
-#         toaster-insertion, oven-rack, oven-pick-place, blender-lid
+#         toaster-insertion, oven-rack, oven-pick-place, blender-lid,
+#         detach-portafilter, attach-portafilter
 set -euo pipefail
 
 skill="${1:?usage: scripts/run_skill.sh <skill> [output_dir] [flags...]}"
 shift
 output="${1:-runs/${skill}_$(date +%Y%m%d_%H%M%S)}"
 [[ $# -gt 0 ]] && shift
+
+case "$skill" in
+  detach-portafilter|attach-portafilter)
+    export MUJOCO_GL="${MUJOCO_GL:-egl}"
+    python -u -m cross_episode_sim.fixtures.portafilter \
+      --action "${skill%-portafilter}" --output "$output" "$@"
+    exit $?
+    ;;
+esac
 
 data="${CES_DATA_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/data}"
 honey=(--recording "$data/skill_scenes/saved_grasp_reuse/robocasa__lightwheel__honey_bottle__HoneyBottle003__2001/initial_scene"
@@ -30,6 +40,11 @@ case "$skill" in
 esac
 
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
+interface=()
+case "$skill" in
+  cross-room|drawer-pick-place|cabinet-door|drawer|stove-knob|faucet|microwave-button|toaster-insertion|oven-rack|blender-lid)
+    interface=(--skill-interface) ;;
+esac
 mkdir -p "$(dirname "$output")"
 python -u -m cross_episode_sim.manipulation.robocasa "${scene[@]}" \
-  --approach-policy any-above-table "--$skill" --output "$output" "$@"
+  --approach-policy any-above-table "--$skill" --output "$output" "${interface[@]}" "$@"

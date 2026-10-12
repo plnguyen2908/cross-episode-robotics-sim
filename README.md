@@ -76,6 +76,8 @@ python3.11 -m venv ~/.venvs/sim && source ~/.venvs/sim/bin/activate
 pip install -r requirements-lock.txt -e ".[dev]"     # exact versions the demos were validated with
 export ROBOCASA_DIR="$PWD/external/robocasa/robocasa"   # the inner package directory
 python scripts/install_data.py                           # starting scenes, grasp registry (~500 MB)
+# Check the actual local asset installation before launching a long example:
+python -c 'from cross_episode_sim.manipulation.molmo_objects import assets_root; print(assets_root())'
 # MolmoSpaces downloads robot models and object assets (~20 GB) on first use into ~/.cache;
 # to put them elsewhere, set these before the first run:
 #   export MLSPACES_CACHE_DIR=/big/disk/molmo-spaces-resources
@@ -87,7 +89,14 @@ python -m cross_episode_sim.tasks.breakfast.gather --seed 17 --output runs/break
 python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee
 python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee2 --cups 2   # two cups
 python -m cross_episode_sim.tasks.full_breakfast --seed 7 --output runs/example7   # 2 histories + current
-scripts/run_skill.sh drawer runs/drawer      # any of the 14 skill demos, see docs/tasks.md
+# Default: 1–3 paired settings, added furniture, randomized furniture/vessel/machine poses.
+python -m cross_episode_sim.tasks.full_breakfast --seed 19 --prepare-only   # scene checks, no robot execution
+python -m cross_episode_sim.tasks.full_breakfast --seed 19 --people 3 --extra-furniture 2 --gpus 0 1 2
+# Reproduce the earlier two-setting layout profile:
+python -m cross_episode_sim.tasks.full_breakfast --seed 7 --layout-profile baseline --gpus 0 1 2
+scripts/run_skill.sh drawer runs/drawer      # skill demos, see docs/tasks.md
+scripts/run_skill.sh detach-portafilter runs/pf_detach
+scripts/run_skill.sh attach-portafilter runs/pf_attach
 ```
 
 Each run directory holds `report.json` (measured outcome and every stage), `trace.json`
@@ -100,7 +109,9 @@ See [docs/installation.md](docs/installation.md) for details and troubleshooting
 |---|---|
 | [Installation](docs/installation.md) | Environments, RoboCasa patch, MolmoSpaces assets, data bundle |
 | [Tasks](docs/tasks.md) | Breakfast, coffee, cross-episode examples and the atomic skills: what they do, success criteria, commands |
-| [Running and training policies](docs/policies.md) | `TaskEnv` API, rollouts, dataset export, behavior cloning example |
+| [Generation interfaces](docs/generation_interfaces.md) | JSON and Python APIs for reusable histories and composed current examples |
+| [History task design](docs/history_task_design.md) | Three task layers, four history categories, and reusable histories for current-task generation |
+| [Running and training policies](docs/policies.md) | VLM/agent evaluation with oracle or VLA skills, `TaskEnv`, rollouts, dataset export, behavior cloning |
 | [Adding a task](docs/adding_a_task.md) | Scene preparation, transactional skills, composite episodes, goals |
 | [Architecture](docs/architecture.md) | Package layout, controller layers, navigation and manipulation stack |
 | [Data](docs/data.md) | What the data bundle contains and how to regenerate it |
@@ -141,8 +152,11 @@ for each skill, and check `report.json` for `"success": true`.
   geometry). They are ground truth for evaluating memory and policies, not a camera-only policy.
 - Coffee brewing is a timed state model without fluid or heat simulation. Grounds and food are
   free rigid bodies.
-- The policy environment supports **breakfast**. Coffee's machine model still reads the
-  demonstrator's internal phase flags, so coffee runs as a demonstration only for now.
+- Model evaluation supports **VLM planners and agents**, with oracle skills, VLA skills, or
+  direct actions on breakfast. Coffee/current supports both planners with oracle skills;
+  VLA/direct coffee still needs machine events independent of demonstrator phase flags.
+  See the [evaluation interfaces and commands](docs/policies.md#evaluating-vlm-planners)
+  and [batch generation, collection, and Qwen evaluation](docs/policies.md#batch-generation-and-qwen-evaluation).
 - Composite tasks are validated on the seeds listed in [docs/tasks.md](docs/tasks.md); atomic
   skills on the fixture and object listed there, not on every RoboCasa asset. 13 of the 14 skill
   demonstrations pass reliably; the cabinet round trip is unreliable because the object is

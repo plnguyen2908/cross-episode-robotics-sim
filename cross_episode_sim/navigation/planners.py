@@ -37,7 +37,7 @@ def make_cross_room_planner(scene_xml, reach_map):
 
 
 def plan_cross_room_route(scene_xml, reach_map, start, final, pose_clear,
-                          planner=None):
+                          planner=None, path_clear=None):
     """RB-Y1's clearance-weighted A* with 25 mm sweeps and eight replans."""
     start = np.asarray(start, dtype=float)
     final = np.asarray(final, dtype=float)
@@ -54,14 +54,22 @@ def plan_cross_room_route(scene_xml, reach_map, start, final, pose_clear,
         if np.linalg.norm(points[-1]-final[:2]) > 1e-4:
             points = np.vstack([points, final[:2]])
         poses = [start.copy()]
+        def append_pose(xy, heading):
+            # The base yaw accumulates complete turns during execution. Sweep
+            # the shortest equivalent turn, matching the navigation controller,
+            # rather than rotating through obstacles on the long way round.
+            previous = poses[-1][2]
+            heading = previous + np.arctan2(np.sin(heading-previous),
+                                            np.cos(heading-previous))
+            poses.append(np.array([*xy, heading]))
         for point in points[1:]:
             delta = point-poses[-1][:2]
             if np.linalg.norm(delta) < 1e-4:
                 continue
             heading = float(np.arctan2(delta[1], delta[0]))
-            poses.append(np.array([*poses[-1][:2], heading]))
-            poses.append(np.array([*point, heading]))
-        poses.append(final.copy())
+            append_pose(poses[-1][:2], heading)
+            append_pose(point, heading)
+        append_pose(final[:2], final[2])
         return [p for i, p in enumerate(poses)
                 if i == 0 or np.linalg.norm(p-poses[i-1]) > 1e-7]
 
@@ -81,12 +89,45 @@ def plan_cross_room_route(scene_xml, reach_map, start, final, pose_clear,
             break
         path = poses_from_waypoints(waypoints)
         failed = swept_failure(path)
-        if failed is None:
+        # Holonomic execution can slide out of a tight dock before turning.
+        # Let its exact swept-segment validator test that alternative before
+        # blacklisting an otherwise usable XY route.
+        if failed is None or (path_clear is not None and path_clear(path)):
             return path, dict(
                 map_replans=attempt,
-                route_method='LinearBot clearance-weighted A* on robot physics reach map',
+                route_method='clearance-weighted A* on robot physics reach map',
                 astar_waypoints=int(len(waypoints)))
         planner.blacklist.append(
             np.array([failed[0], failed[1], 0.], dtype=float))
         planner.apply_black_list()
-    raise RuntimeError('LinearBot A* found no full-body swept-clear route')
+    raise RuntimeError('A* found no full-body swept-clear route')
+
+
+def plan_cross_room_escape(scene_xml, reach_map, start, final, pose_clear, on_floor):
+    """Leave a tight dock sideways before asking A* to turn toward the goal.
+
+    Keep the departure orientation and check the whole robot/payload every
+    25 mm. This only plans a prefix; no base movement occurs until a complete
+    route from the escape endpoint has passed the same swept checks.
+    """
+    start = np.asarray(start, dtype=float)
+    forward = np.array([np.cos(start[2]), np.sin(start[2])])
+    sideways = np.array([-forward[1], forward[0]])
+    checked = 0
+    for distance in (.20, .35, .50, .65):
+        for direction in (sideways, -sideways):
+            escaped = start.copy()
+            escaped[:2] += distance * direction
+            samples = np.linspace(0., 1., int(np.ceil(distance / .025)) + 1)
+            if not all(on_floor(start + u * (escaped-start)) and
+                       pose_clear(start + u * (escaped-start)) for u in samples):
+                continue
+            checked += 1
+            try:
+                path, metrics = plan_cross_room_route(scene_xml, reach_map, escaped, final, pose_clear)
+            except RuntimeError:
+                continue
+            metrics.update(departure_escape_m=distance, departure_escape_candidates=checked,
+                           route_method='checked sideways departure then cross-room A*')
+            return [start.copy(), *path], metrics
+    raise RuntimeError('No swept-clear sideways departure with a complete cross-room route')
