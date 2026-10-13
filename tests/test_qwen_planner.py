@@ -17,7 +17,7 @@ def test_invalid_decision_is_not_executed(text):
 def test_qwen_uses_history_images_live_cameras_and_feedback(monkeypatch):
     monkeypatch.setattr('cross_episode_sim.evaluation.history.sample_video',
                         lambda path, frames: dict(timestamps_seconds=[0.], frames=[np.zeros((32,32,3), np.uint8)]))
-    planner = QwenPlanner()
+    planner = QwenPlanner(history_frames=8)
     context = dict(skill_backend='oracle', instruction='Serve breakfast',
                    skill_catalog=[dict(name='pick', parameters={})],
                    histories=[dict(name='history_1', video_path='history_1.mp4')],
@@ -47,3 +47,19 @@ def test_bad_json_is_repaired_without_submitting_a_skill(monkeypatch):
     monkeypatch.setattr(planner, '_request', lambda messages: next(outputs))
     assert planner.plan({}, None) == {'finish':True}
     assert planner.memory == []
+
+
+def test_native_video_keeps_complete_paths_without_harness_sampling(monkeypatch, tmp_path):
+    def forbidden(*args):
+        raise AssertionError('Harness must not sample native videos')
+    monkeypatch.setattr('cross_episode_sim.evaluation.history.sample_video', forbidden)
+    planner = QwenPlanner()
+    video = tmp_path / 'history video.mp4'
+    planner.reset(dict(skill_backend='oracle', histories=[dict(name='history_1', video_path=str(video))]))
+    assert planner.histories[1] == dict(type='video_url', video_url=dict(url=video.as_uri()))
+    assert planner.video_fps is None
+
+
+def test_sampling_modes_are_exclusive():
+    with pytest.raises(ValueError):
+        QwenPlanner(history_frames=8, video_fps=1)

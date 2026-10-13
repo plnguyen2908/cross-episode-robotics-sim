@@ -21,9 +21,12 @@ def main():
     p.add_argument('--limit', type=int)
     p.add_argument('--unique-layouts', action='store_true', help='Evaluate one example per layout fingerprint')
     p.add_argument('--gpu', default='3', help='Simulator GPU; inference server uses its own GPU')
+    p.add_argument('--request-timeout', type=float, default=1800., help='Seconds to wait for each model response')
     p.add_argument('--model', default='Qwen/Qwen3.5-9B')
     p.add_argument('--endpoint', default='http://127.0.0.1:8000/v1')
-    p.add_argument('--history-frames', type=int, default=8)
+    sampling = p.add_mutually_exclusive_group()
+    sampling.add_argument('--history-frames', type=int, help='Legacy image-only ablation')
+    sampling.add_argument('--video-fps', type=float, help='Override Qwen processor video sampling rate')
     p.add_argument('--max-planner-steps', type=int, help='Short interface test; an incomplete task remains unsuccessful')
     p.add_argument('--wall-seconds', type=float, default=10800.)
     args = p.parse_args()
@@ -68,9 +71,9 @@ def main():
             budgets['tool_calls'] = 2 * args.max_planner_steps
         command = [sys.executable, '-m', 'scripts.evaluate_models', '--planner', 'vlm', '--backend', 'oracle',
                    '--model', 'cross_episode_sim.evaluation.qwen:QwenPlanner',
-                   '--model-options', json.dumps(dict(model=args.model, endpoint=args.endpoint, history_frames=args.history_frames)),
+                   '--model-options', json.dumps(dict(model=args.model, endpoint=args.endpoint, history_frames=args.history_frames, video_fps=args.video_fps, timeout=args.request_timeout)),
                    '--session', 'cross_episode_sim.evaluation.coffee:from_example',
-                   '--session-options', json.dumps(dict(example=str(example), cameras=['robot_0/wrist_cam'], image_size=[336, 448])),
+                   '--session-options', json.dumps(dict(example=str(example), any_vessel=True, visual_grounding=False, cameras=['robot_0/wrist_cam'], image_size=[336, 448])),
                    '--history-example', str(example),
                    '--gpu', args.gpu, '--seed', str(entry['seed']), '--output', str(trial), '--budgets', json.dumps(budgets)]
         write_json(root / f'{i:03d}_command.json', dict(command=command, example=entry))

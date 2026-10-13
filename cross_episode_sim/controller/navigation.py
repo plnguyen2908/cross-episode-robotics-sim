@@ -7,6 +7,7 @@ for the arm. The fridge starts open; no door operation or full kitchen RunTask.
 
 import argparse
 import heapq
+import time
 from math import ceil
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import mujoco
 from cross_episode_sim.control.collision_probe import forward_collision
 import numpy as np
 from cross_episode_sim.control.timing import settle_arm, wait_until_ready, base_ready
-from cross_episode_sim.navigation.blended_route import blend_route
+from cross_episode_sim.navigation.blended_route import blend_route, shortcut_segments
 from scipy.spatial.transform import Rotation as R
 
 from cross_episode_sim.robot.arm_planner import RightArmPlanner
@@ -1160,7 +1161,9 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
             else "to distant table"
         )
         self.stage = "plan forward navigation " + label
+        planning_started = time.monotonic()
         path = self.plan_route(goal, carrying, face=face)
+        route_planning_seconds = time.monotonic() - planning_started
         requires_blended = getattr(self, '_cross_room_requires_blended', False)
         self._cross_room_requires_blended = False
         self.record(navigation_path_xy_yaw=[p.tolist() for p in path], carrying=carrying)
@@ -1170,6 +1173,18 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                 path, float(self.base_pose()[2]), self.route_pose_clear(carrying),
                 nav_speed=self.args.nav_speed, turn_speed=self.args.turn_speed,
                 reverse_first=bool((carrying or self.args.kitchen) and self.navigation_undock()))
+            if segments and getattr(self, 'shortcut_navigation', False):
+                original = segments
+                shortcut_started = time.monotonic()
+                on_floor = self.nav_map_filter(goal)
+                clear = self.route_pose_clear(carrying)
+                segments = shortcut_segments(
+                    original, lambda pose: on_floor(pose) and clear(pose),
+                    nav_speed=self.args.nav_speed, turn_speed=self.args.turn_speed)
+                self.record(route_segments_before=len(original), route_segments_after=len(segments),
+                            route_duration_before_s=sum(s.duration for s in original),
+                            route_duration_after_s=sum(s.duration for s in segments),
+                            route_shortcut_wall_seconds=time.monotonic()-shortcut_started)
             self.record(base_motion="blended" if segments is not None
                         else "turn_drive (blended sweep not clear)",
                         blended_segments=None if segments is None else [
@@ -1177,6 +1192,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                                  duration_s=s.duration) for s in segments])
         if requires_blended and segments is None:
             raise RuntimeError('A* route requires a clear blended departure; refusing an unchecked turn')
+        execution_started = time.monotonic()
         start, previous = self.base_pose(), self.base_pose()
         reference = np.linalg.inv(self.tcp()) @ self.bread_pose()
         distance = max_slip = worst = max_heading_error = lateral_distance = reverse_distance = (
@@ -1337,6 +1353,8 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
             carrying=carrying,
             start_xy=start[:2].tolist(),
             goal_xy=list(goal),
+            route_planning_wall_seconds=route_planning_seconds,
+            route_execution_wall_seconds=time.monotonic()-execution_started,
             measured_distance_m=distance,
             endpoint_error_m=error,
             max_payload_slip_m=max_slip,

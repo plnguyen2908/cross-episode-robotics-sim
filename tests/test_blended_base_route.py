@@ -71,3 +71,39 @@ def test_reverse_undock_is_kept_straight():
     assert segments[0].kind == 'reverse'
     assert segments[0].rotation == 0
     assert segments[1].kind == 'blend'
+
+
+def test_shortcut_reduces_stop_segments_and_preserves_endpoint():
+    from cross_episode_sim.navigation.blended_route import make_segment, shortcut_segments
+    points = [np.array([x, 0., 0.]) for x in (0., .2, .4, .6, .8)]
+    segments = [make_segment(a, b[:2], 0., 0., 'slide', .24, .6) for a, b in zip(points, points[1:])]
+    probes = []
+    merged = shortcut_segments(segments, lambda pose: probes.append(pose.copy()) or True,
+                               nav_speed=.24, turn_speed=.6)
+    assert len(merged) == 1 and probes
+    assert sum(s.duration for s in merged) < sum(s.duration for s in segments)
+    np.testing.assert_allclose(merged[0].start, points[0])
+    np.testing.assert_allclose(merged[-1].end, points[-1])
+
+
+def test_shortcut_keeps_obstacle_detour_and_reverse_undock():
+    from cross_episode_sim.navigation.blended_route import make_segment, shortcut_segments
+    points = [np.array(p) for p in [(0., 0., 0.), (0., 1., 0.), (1., 1., 0.), (1., 0., 0.)]]
+    segments = [make_segment(a, b[:2], 0., 0., 'slide', .24, .6) for a, b in zip(points, points[1:])]
+    clear = lambda p: not (.1 < p[0] < .9 and p[1] < .95)
+    result = shortcut_segments(segments, clear, nav_speed=.24, turn_speed=.6)
+    assert len(result) == 3
+    reverse = make_segment(np.array([-.1, 0., 0.]), points[0][:2], 0., 0., 'reverse', .08, .6)
+    result = shortcut_segments([reverse, *segments], lambda p: True, nav_speed=.24, turn_speed=.6)
+    assert result[0] is reverse
+
+
+def test_shortcut_probe_budget_never_accepts_partially_checked_motion():
+    from cross_episode_sim.navigation.blended_route import make_segment, shortcut_segments
+    points = [np.array([x, 0., 0.]) for x in (0., .2, .4)]
+    segments = [make_segment(a, b[:2], 0., 0., 'drive', .24, .6) for a, b in zip(points, points[1:])]
+    probes = []
+    result = shortcut_segments(segments, lambda p: probes.append(p) or True,
+                               nav_speed=.24, turn_speed=.6, probe_budget=3)
+    assert len(probes) == 3
+    assert len(result) == 2 and result[0] is segments[0] and result[1] is segments[1]

@@ -20,7 +20,7 @@ coffee = create_history(
     library='runs/history_library', gpu='0',
 )
 breakfast = create_history(
-    HistoryConfig(task='breakfast', seed=101, parameters={'people': 4}),
+    HistoryConfig(task='breakfast', seed=101, parameters={'people': 3}),
     library='runs/history_library', gpu='1',
 )
 example = create_current(
@@ -182,7 +182,7 @@ need to register the built-in breakfast-with-coffee task.
 coffee_config = HistoryConfig(
     task="coffee", seed=100, parameters={"cups": 1}, scene={})
 breakfast_config = HistoryConfig(
-    task="breakfast", seed=101, parameters={"people": 4}, scene={})
+    task="breakfast", seed=101, parameters={"people": 3}, scene={})
 current_config = CurrentConfig(
     task="breakfast_with_coffee", seed=102,
     histories=[str(coffee_history), str(breakfast_history)],
@@ -195,3 +195,298 @@ history configs store counts inside `parameters`. Existing top-level history
 `people` values and the old current task name `full_breakfast` remain readable.
 The internal physical worker is still named `full_breakfast`; its behavior is
 unchanged by this naming/configuration update.
+
+## Video timing
+
+New breakfast, coffee, and breakfast-with-coffee videos play at **1× simulation
+time**, including stationary waits. They use the untrimmed accepted execution
+trace, sampled at 25 frames per simulated second. Older saved controller settings
+cannot restore the previous 3× speedup. Existing videos are unchanged.
+
+The video shows the physical robot/object trajectory. Time spent computing
+physics, planning, scene setup, and deferred rendering is wall-clock overhead,
+not extra video duration. Rejected trials rolled back by atomic skills remain in
+separate diagnostics, not the accepted demonstration. Failed-run diagnostic videos
+may append an endpoint caption; successful demonstrations retain the recorded
+simulation timeline (within frame sampling precision).
+
+## Generate independent history batches
+
+From the repository root, in your simulation environment:
+
+```bash
+COUNT=30 bash scripts/generate_history_library.sh
+```
+
+This starts two independent workers concurrently: **30 successful one-cup coffee
+histories** and **30 successful breakfast histories total**, balanced across
+1–3 people (10 successes each). Each worker runs its episodes sequentially and automatically leases an idle GPU
+for each attempt, holding it until physics and rendering complete. Nothing is generated for current yet. This is
+an actual simulation run and can take substantial time; four-person batches are disabled because initial kitchen placement repeatedly fails. Failed seeds do not count toward the target.
+
+The shell shows two live tqdm bars on stderr, including success counts, active
+seed, serving count, and attempt number. Detailed stage output goes to separate
+stdout logs. The bars advance only when a history passes validation; a long
+physical execution may stay at the same count. Watch individual stages with:
+
+```bash
+tail -f runs/history_batches_XXXXXX/coffee.log \
+        runs/history_batches_XXXXXX/breakfast.log
+```
+
+Set `PYTHON_BIN=/path/to/venv/bin/python` if needed. Optional environment variables
+`COFFEE_START_SEED` and `BREAKFAST_START_SEED` default to 100 and 1000. To resume,
+pass the same directory (saved target and scene settings are retained):
+
+```bash
+bash scripts/generate_history_library.sh runs/history_batches_XXXXXX
+```
+
+Or launch either history type independently:
+
+```bash
+python -m scripts.generate_coffee_histories \
+  --count 30 --start-seed 100 --gpu auto --output runs/coffee_histories
+python -m scripts.generate_breakfast_histories \
+  --count 30 --start-seed 1000 --people 1 2 3 --gpu auto \
+  --output runs/breakfast_histories
+```
+
+Use `--resume DIRECTORY` in place of `--output` to continue. Omit `--output` to
+create a unique batch folder. An existing explicit output is rejected to avoid
+replacing work. `--scene-config FILE` accepts a JSON object of scene overrides.
+`--max-attempts N` optionally caps attempts in that invocation; the default keeps
+trying new seeds until the success target is reached. Ctrl-C preserves completed
+histories and stops the active worker. Interrupted attempts advance to a new seed
+on resume unless a validated history was already published and can be recovered.
+
+Each task batch retains:
+
+- `batch.json`: target, saved settings, next seed, and all attempts/errors.
+- `histories.json`: successful history IDs, absolute paths, categories, task
+  configs, sampled settings, compatibility contract, hashes and validation evidence.
+- `attempt_XXXX_seedN/`: each attempt's original run and diagnostics, including its
+  `history.json` if successful. Do not delete the library assets after indexing.
+
+These indices are private generation metadata for later mix-and-match. For example:
+
+```python
+import json
+from pathlib import Path
+from cross_episode_sim.generation import CurrentConfig, create_current
+
+batch = Path('runs/history_batches_XXXXXX')
+coffee = json.loads((batch / 'coffee/histories.json').read_text())['histories'][0]
+breakfast = json.loads((batch / 'breakfast/histories.json').read_text())['histories'][0]
+example = create_current(CurrentConfig(
+    task='breakfast_with_coffee', seed=2000,
+    histories=[coffee['path'], breakfast['path']], parameters={}, scene={}),
+    output='runs/composed_example', gpu='2')
+```
+
+For breakfast-with-coffee, final output keeps the existing datagen layout:
+`episode.json`, `run_manifest.json`, `prompt.txt`, `history_1.mp4`, `history_2.mp4`,
+`current.mp4`, and `runs/{history_1,history_2,current}/`, plus configuration and
+validation metadata. Existing collection/evaluation loading continues to work.
+The histories are reused; only current physics is executed for each combination.
+
+### Automatic GPU assignment
+
+The batch scripts default to `--gpu auto`; the shell launcher needs no per-task
+GPU variables. Before each attempt they query `nvidia-smi`, restrict candidates
+to `CUDA_VISIBLE_DEVICES` when set, and choose an idle GPU with at least 8 GiB
+free memory, at most 10% utilization, and no listed compute process. Cooperative
+file locks keep these history workers from choosing the same GPU. The selected
+UUID is saved in `batch.json`. A waiting worker displays `waiting for GPU`.
+
+With only one eligible GPU, workers take turns. Use `CUDA_VISIBLE_DEVICES=0,1,2`
+to restrict the automatic pool, or the Python scripts' `--gpu INDEX` for an
+explicit assignment. External applications do not participate in these locks,
+so availability checks cannot reserve a device against unrelated jobs.
+
+Breakfast batch generation is currently limited to **1–3 people**. Resuming an
+older 1–4 batch automatically removes four from future selections, retaining all
+completed histories and failed-attempt diagnostics. Existing low-level four-person
+scene/config support remains experimental; it is not used by batch generation.
+
+### Live stage progress
+
+Each batch bar now includes the active seed, number of people, atomic step count,
+status, and latest detailed stage, refreshed about every 10 seconds. For example:
+
+```text
+coffee successful histories: 3/30 ... seed=108 people=1 [3/16] running | pour grounds
+breakfast successful histories: 4/30 ... seed=1010 people=2 [0/?] preparing | scene setup
+```
+
+Statuses include waiting for GPU, preparing, running/retrying, rendering,
+validating, completed, and failed. A `?` total means the scene's skill plan is not
+available yet. Rendering is shown as a phase, not a measured frame percentage.
+Each task's `progress.json` records the latest status and full stage text; its
+stdout log retains the stage history. Existing running Python launchers need to
+be stopped and resumed to pick up this display change.
+
+## Sample current tasks from history batches
+
+```bash
+python -m scripts.sample_current_tasks \
+  --config examples/generation/sample_breakfast_with_coffee.json \
+  --history-batches runs/history_batches_BbuBNu \
+  --count 1 --sampling-seed 7 --output runs/current_selections
+```
+
+This command only selects histories and writes configs. Add `--execute` to run
+current physics on an automatically assigned GPU and assemble the complete
+existing datagen example. Without it, no robot execution is started. Supply
+multiple batch directories (or individual `histories.json` indexes) to combine
+libraries. Selection reads each index once per requested example; incomplete
+attempts absent from successful-history indexes are not candidates.
+
+The config's `task` selects the registered task's dependency rules. Built-in
+`breakfast_with_coffee` requires a one-cup coffee demonstration and a breakfast
+history matching `parameters.people` (1–3). Omit `people` to sample any supported
+count and derive current's count from the selected history. Coffee compatibility
+currently uses the existing `breakfast-coffee-v1` contract; no separate fictional
+procedure ID is inferred for old histories.
+
+Optional `history_requirements` adds filters per dependency slot. For example:
+
+```json
+{
+  "task": "breakfast_with_coffee",
+  "seed": 2000,
+  "parameters": {"people": 2},
+  "scene": {},
+  "history_requirements": {
+    "coffee": {"settings": {"machine_room": ["kitchen", "living"]}},
+    "breakfast": {"parameters": {"people": 2}}
+  }
+}
+```
+
+Nested objects match the listed fields; lists permit any listed value. Filters
+may narrow the task's dependencies but cannot replace them with conflicting
+requirements. `scene` controls the new current layout independently; filtering
+coffee history to the kitchen does not force current's machine into the kitchen.
+No matching history produces an explicit error rather than an incompatible pair.
+Selected histories undergo the normal video, goal, and integrity validation;
+the task's composition check also runs before publishing a current config.
+
+Each `selection_XXXX/` contains `current_config.json` and private `selection.json`
+with the sampling seed, source indexes, slot-to-history IDs/paths, constraints,
+eligible counts, and hashes. With `--execute`, it additionally contains an
+`example/` in the normal datagen layout and `result.json`; the example also stores
+`history_selection.json`. Selection metadata is not injected into planner prompts.
+
+`--count` counts selections, not successful physical runs. A failed execution
+stops this script and retains diagnostics. Histories are sampled with replacement
+across selections; reuse is intentional, and exact pair repeats are possible.
+Seeds are incremented for current layouts and selection RNG separately. Repeating
+with the same inputs and unchanged library reproduces the selected histories.
+
+New current definitions can supply a `history_requirements(request)` callback in
+`CurrentTaskDefinition`; use `--task-module` to load their registration. The
+`coffee_practice` plugin already supports this and requires only a coffee history.
+History generation currently supplies coffee and breakfast records; adding a new
+current name does not create unsupported history types automatically.
+
+Shell wrapper (samples histories AND executes current by default; 30 attempts with 1–3 people inferred from the sampled breakfast histories):
+
+```bash
+bash scripts/sample_current_tasks.sh \
+  --history-batches runs/history_batches_BbuBNu \
+  --output runs/current_selections
+```
+
+The shell wrapper always enables execution and writes complete datagen examples
+under `selection_XXXX/example/`, including both history videos and current video.
+The Python CLI remains available for selection-only use. All Python CLI options are forwarded;
+`--config FILE`, `--count N`, and `--sampling-seed N` override defaults. Paths are
+resolved from your working directory. Set `PYTHON_BIN` to select your environment.
+
+### Faster navigation trial
+
+`sample_breakfast_with_coffee_fast.json` requests 0.36 m/s mean base travel and
+0.8 rad/s mean turning, versus the default 0.24 m/s and 0.6 rad/s. Use it explicitly:
+
+```bash
+bash scripts/sample_current_tasks.sh \
+  --config examples/generation/sample_breakfast_with_coffee_fast.json \
+  --history-batches runs/history_batches_BbuBNu --count 1
+```
+
+This profile has configuration validation only; loaded-cup/bowl physical
+qualification and measured speedup are pending. It does not speed up arm contact
+motion or change grip, collision, and endpoint checks. Segment minimum durations
+and slow reverse undocking remain in force. Existing workers keep their settings.
+
+### Assemble a small test set from existing successful currents
+
+```bash
+bash scripts/mix_match_test_set.sh
+# Override inputs or size:
+python -m scripts.mix_match_test_set \
+  --currents runs/current_examples_sb9eo4qc \
+  --history-batches runs/history_batches_BbuBNu \
+  --count 5 --sampling-seed 0 --output datasets/test_set_v1
+```
+
+The shell defaults select the two completed currents in `current_examples_sb9eo4qc`
+and histories from `history_batches_BbuBNu`. The script validates existing currents,
+round-robins them, and samples distinct compatible combinations using task dependency
+contracts and the recorded serving count. Coffee supplies a one-cup machine-use
+demonstration; breakfast must match the current's number of people. Current settings
+must exactly match the recomposed configuration. Physics and rendering are not rerun.
+
+The output has `dataset.json` for `scripts.evaluate_dataset`, plus complete example
+folders containing history/current videos, prompts, runs, metadata, oracle reports,
+and frozen initial scenes. `history_selection.json` and `provenance.json` record
+source choices. Files are hardlinked when possible; treat source and assembled
+artifacts as immutable. Existing output directories receive a unique suffix.
+Progress bars cover validation, matching, and assembly.
+
+Five combinations from two currents are **two independent current scenes**, not five.
+The index records `unique_currents` and `current_group` so downstream splits and
+analysis can group repeats. `layout_fingerprint` includes histories as in the
+existing dataset collector; use `current_group` to identify reused current scenes.
+The current implementation supports the breakfast-with-coffee serving-count contract.
+
+### History EQA alongside action tests
+
+Mix-matched examples now include `eqa_questions.json` and `eqa_answers.json`.
+Each example has three single-answer multiple-choice questions: required breakfast
+bowls, required coffee cups (one per person), and the coffee machine's room in the
+**coffee history**, not its current room. Counts come from the matched breakfast
+history and must agree with the current serving count. Room answers are checked
+against the coffee history's scene manifest. Choices are deterministically shuffled.
+
+Only `eqa_questions.json` and its referenced history videos are model inputs;
+`eqa_answers.json` contains private scoring labels and evidence. The two files live
+in the same example directory as the action task. To add/update them for an existing
+assembled dataset without rerunning simulation:
+
+```bash
+python -m scripts.create_eqa --dataset datasets/test_set_v1
+```
+
+The first version has five examples / fifteen questions. Since both source currents
+serve one person, every count answer in this small dataset is one; broader count
+coverage requires currents with two and three people. This adds QA data only;
+scoring model QA responses is separate from action-task evaluation.
+
+Evaluate EQA with the running Qwen native-video server (no simulator needed):
+
+```bash
+bash scripts/evaluate_eqa.sh --endpoint http://127.0.0.1:8020/v1
+# Or: python -m scripts.evaluate_eqa --dataset datasets/test_set_v1
+```
+
+This submits all three questions together with the referenced complete history videos
+for each example. The model processor owns video sampling; `--video-fps` is an optional
+explicit override. Requests default to a 1,800-second timeout (`--request-timeout`).
+Outputs go to a fresh `runs/qwen_eqa*` directory with raw responses, per-question
+predictions and `summary.json` containing accuracy overall and by question/category.
+Missing or invalid choices count as incorrect. Request failures are reported separately
+and stop the run, marking the summary incomplete rather than presenting a partial
+score as full-set accuracy. Private answer keys and current rollout videos are never
+included in requests. No EQA inference is launched by dataset generation itself.

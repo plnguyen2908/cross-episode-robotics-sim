@@ -230,6 +230,17 @@ class AnnotatedGraspMixin:
             candidates.append((score, index, width, pose))
         proven = getattr(self, 'successful_grasp_annotations', {}).get(asset, set())
         candidates.sort(key=lambda item: (item[1] % annotation_count not in proven, item[0]))
+        from cross_episode_sim.datagen.motion_source import source_for
+        motion_source = source_for(self)
+        if (motion_source is not None and motion_source.grasp.get('asset_id') == asset
+                and 'local_transform' in motion_source.grasp):
+            demonstrated = self.bread_pose() @ np.asarray(motion_source.grasp['local_transform'])
+            def matches_demonstration(item):
+                pose = item[3]
+                return (np.linalg.norm(pose[:3, 3]-demonstrated[:3, 3]) < .003
+                        and Rotation.from_matrix(pose[:3, :3] @ demonstrated[:3, :3].T).magnitude() < .05)
+            candidates.sort(key=lambda item: not matches_demonstration(item))
+            self.record(demonstrated_grasp_candidates=int(sum(matches_demonstration(c) for c in candidates)))
         self.report["annotation_selection"] = {
             "asset_id": asset,
             "file": str(path),

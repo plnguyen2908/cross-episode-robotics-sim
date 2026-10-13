@@ -16,6 +16,9 @@ from cross_episode_sim.controller.manipulation import TableReorder
 
 
 class BreakfastEpisode(CrossRoomManipulation):
+    # Preserve simulated time, including waits, in history and current videos.
+    trim_video_pauses = False
+    shortcut_navigation = True
     atomic_pickup = True
     atomic_delivery = True
     video_filename = 'breakfast_three_rooms.mp4'
@@ -26,6 +29,9 @@ class BreakfastEpisode(CrossRoomManipulation):
     lower_vessel_release_fallback = True
 
     def __init__(self, args, selection, manifest):
+        # Coffee can load controller arguments from an older accelerated run.
+        args.video_speedup = 1.0
+        args.video_fps = 25  # Matches the 0.04-second recorded-state interval.
         self.manifest = manifest
         # Banner in the videos naming a cross-episode role, e.g. "History 1 (given)".
         self.episode_label = manifest.get("episode_label")
@@ -809,7 +815,7 @@ def build_controller(output, manifest, episode_class=BreakfastEpisode, overrides
     args=parse_args(['--assets',str(assets_root()),'--output',str(output),
         '--robot','franka_tidybot','--kitchen','--native-object','--soft-finger',
         '--object-name',first['body'],'--clearance','0','--motion-slowdown','1',
-        '--move-retries','2','--video-fps','25','--video-speedup','3','--defer-video',
+        '--move-retries','2','--video-fps','25','--video-speedup','1','--defer-video',
         '--grip-open','.05','--grip-force','10','--lift-height','.12','--base-servo-scale','2',
         '--base-motion','blended','--turn-speed','.4'])
     values=dict(scene_xml=scene,source_table=supports[first['source']],spawn=spawn,

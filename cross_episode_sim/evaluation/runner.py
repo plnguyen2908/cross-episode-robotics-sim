@@ -128,15 +128,19 @@ class EvaluationTools:
     def _observe(self):
         observation = self._session.observe()
         # Deliberately whitelist robot sensors; never forward env.step's info/goals.
-        public = {key: deepcopy(observation[key]) for key in ('state', 'images', 'sim_time', 'calibration', 'depth')
+        public = {key: deepcopy(observation[key]) for key in ('state', 'images', 'sim_time', 'calibration', 'depth', 'raw_images', 'targets', 'target_masks', 'perception')
                   if key in observation}
         path = self._output / 'observations' / f'{self._observations:06d}.npz'
         arrays = {'state': np.asarray(public.get('state', [])),
-                  **{f'image_{i}': image for i, image in enumerate(public.get('images', {}).values())}}
+                  **{f'image_{i}': image for i, image in enumerate(public.get('images', {}).values())},
+                  **{f'raw_image_{i}': image for i, image in enumerate(public.get('raw_images', {}).values())},
+                  **{f'mask_{i}': mask for i, mask in enumerate(public.get('target_masks', {}).values())}}
         np.savez_compressed(path, **arrays)
         self._observations += 1
         self._log(dict(kind='observation', artifact=str(path.relative_to(self._output)),
                        cameras=list(public.get('images', {})), calibration=public.get('calibration'),
+                       targets=public.get('targets'), mask_keys=list(public.get('target_masks', {})),
+                       perception=public.get('perception'),
                        sim_time=self._session.sim_time()))
         return public
 
@@ -144,7 +148,7 @@ class EvaluationTools:
     def observe(self):
         self._check(call=True)
         observation = self._observe()
-        return dict(images=observation.get('images', {})) if self._backend != 'direct' else observation
+        return {k: observation[k] for k in ('images', 'targets', 'perception') if k in observation} if self._backend != 'direct' else observation
 
     @serialized
     def status(self):
@@ -297,7 +301,11 @@ class EvaluationTools:
             elif self._score():
                 self._stop = 'task_success'
         else:
-            self._vla.start_skill(name, deepcopy(arguments), self.context())
+            vla_context = self.context()
+            if hasattr(self._session, 'grounding'):
+                vla_context['targets'] = deepcopy(self._session.grounding.targets)
+                vla_context['perception'] = 'oracle_instance_segmentation'
+            self._vla.start_skill(name, deepcopy(arguments), vla_context)
             count = 0
             result = dict(status='skill_budget', verification='unverified')
             while count < self._budgets.skill_actions:
@@ -309,7 +317,13 @@ class EvaluationTools:
                 if 'done' in decision:
                     if decision['done'] is not True:
                         raise ValueError('VLA done must be true')
-                    result = dict(status='model_reported_done', verification='unverified')
+                    if hasattr(self._session, 'verify_skill'):
+                        verified = self._session.verify_skill(name, arguments)
+                        result = dict(status='succeeded' if verified else 'failed',
+                                      verification='measured_postcondition',
+                                      error=None if verified else 'postcondition_failed')
+                    else:
+                        result = dict(status='model_reported_done', verification='unverified')
                     break
                 count += self._chunk(decision['actions'], self._budgets.skill_actions-count)
                 if self._stop:
@@ -380,7 +394,7 @@ def evaluate(model, session, output, *, planner='vlm', backend='oracle', vla=Non
                 if backend in ('oracle', 'vla'):
                     # Symbolic planners see current images, never ground-truth
                     # localization, proprioception, calibration, or simulator time.
-                    observation = dict(images=observation.get('images', {}))
+                    observation = {k: observation[k] for k in ('images', 'targets', 'perception') if k in observation}
                 bar.set_description('Planner: inference')
                 decision = model.plan(observation, deepcopy(feedback))
                 tools._check()
@@ -406,6 +420,13 @@ def evaluate(model, session, output, *, planner='vlm', backend='oracle', vla=Non
     finally:
         bar.close()
     result = tools.result(error)
+    if getattr(session, 'any_vessel', False):
+        result['target_interface'] = 'object_type'
+        result['dynamic_clutter'] = True
+        result['object_selection'] = 'oracle_private_instance_selection'
+    if hasattr(session, 'grounding'):
+        result['perception'] = 'oracle_instance_segmentation'
+        result['target_interface'] = 'persistent_visible_ids_v1'
     result['planner'] = planner
     result['planner_input_contract'] = ('complete_history_videos_and_current_images_v2'
                                         if backend != 'direct' else 'robot_observations')

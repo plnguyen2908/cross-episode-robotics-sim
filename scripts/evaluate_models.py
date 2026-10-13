@@ -86,6 +86,13 @@ def main():
                           planner=args.planner, skill_backend=args.backend)
         finally:
             if session is not None:
+                if result is not None and hasattr(session, 'finalize_video'):
+                    tqdm.write(f'episode_{index:03d}: rendering model rollout')
+                    try:
+                        result['video'] = session.finalize_video(result, episode_output)
+                    except Exception as exc:
+                        # Rendering failure must not change the measured task outcome.
+                        result['video'] = dict(status='failed', error=f'{type(exc).__name__}: {exc}')
                 try:
                     session.close()
                 except Exception as exc:

@@ -1,0 +1,13 @@
+{
+  "task": "breakfast_with_coffee",
+  "seed": 2000,
+  "parameters": {},
+  "scene": {},
+  "history_requirements": {
+    "coffee": {
+      "parameters": {
+        "cups": 1
+      }
+    }
+  }
+}

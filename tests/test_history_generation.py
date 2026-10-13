@@ -181,3 +181,80 @@ def test_matching_config_schema_and_legacy_records(tmp_path, worker):
 def test_history_parameter_validation(kwargs):
     with pytest.raises(ValueError):
         HistoryConfig(seed=1, **kwargs)
+
+
+def test_default_coffee_histories_vary_machine_placement():
+    settings = [library._settings(HistoryConfig(task='coffee', seed=seed,
+                    parameters={'cups': 1}), 1) for seed in range(100, 130)]
+    assert {s['machine_room'] for s in settings} == {'kitchen', 'living', 'dining'}
+    assert len({s['placement_seed'] for s in settings}) == 30
+    assert len({tuple(s['machine_offset']) for s in settings if s['machine_room'] == 'kitchen'}) > 1
+    assert all(s['randomize_scene'] and s['people'] == 1 for s in settings)
+    for s in settings:
+        args = library.command('coffee', s, '/tmp/unused', 'History')
+        assert args[args.index('--machine-room') + 1] == s['machine_room']
+        assert '--randomize-scene' in args
+
+
+def test_sampler_matches_dependencies_and_preserves_datagen_layout(tmp_path, worker):
+    from cross_episode_sim.generation.history_batch import history_metadata
+    from cross_episode_sim.generation.sampling import sample_current
+    histories = [create_history(HistoryConfig(task='coffee', seed=seed), tmp_path / 'lib') for seed in (1, 2)]
+    histories += [create_history(HistoryConfig(task='breakfast', seed=10+n,
+                    parameters={'people': n}), tmp_path / 'lib') for n in (1, 2, 3)]
+    index = tmp_path / 'histories.json'
+    write_json(index, dict(histories=[history_metadata(path) for path in histories]))
+    request = dict(task='breakfast_with_coffee', seed=2000, parameters={'people': 2}, scene={})
+    config, audit = sample_current(request, [tmp_path], sampling_seed=7)
+    assert audit['selected']['coffee']['eligible_count'] == 2
+    assert audit['selected']['breakfast']['eligible_count'] == 1
+    assert config.histories[1] == str(histories[3])
+    assert sample_current(request, [tmp_path], sampling_seed=7) == (config, audit)
+    root = create_current(config, tmp_path / 'composed')
+    assert worker[-1][1]['people'] == 2
+    assert all((root / name).exists() for name in ('episode.json', 'run_manifest.json', 'prompt.txt',
+                                                  'history_1.mp4', 'history_2.mp4', 'current.mp4'))
+    assert collect([root], tmp_path / 'dataset')['count'] == 1
+    with pytest.raises(ValueError, match='conflicts'):
+        sample_current({**request, 'history_requirements': {'breakfast': {'parameters': {'people': 3}}}}, [tmp_path])
+    with pytest.raises(ValueError, match='No matching'):
+        sample_current({**request, 'history_requirements': {'coffee': {'settings': {'machine_room': 'nowhere'}}}}, [tmp_path])
+    with pytest.raises(ValueError, match='Unknown history'):
+        sample_current({**request, 'history_requirements': {'typo': {}}}, [tmp_path])
+
+
+def test_sampler_validates_selected_video_integrity(tmp_path, worker):
+    from cross_episode_sim.generation.history_batch import history_metadata
+    from cross_episode_sim.generation.sampling import sample_current
+    coffee = create_history(HistoryConfig('coffee', 1), tmp_path / 'lib')
+    breakfast = create_history(HistoryConfig('breakfast', 2), tmp_path / 'lib')
+    write_json(tmp_path / 'histories.json', dict(histories=[history_metadata(p) for p in (coffee, breakfast)]))
+    (coffee / 'runs/history_1/report.json').write_text('{}')
+    with pytest.raises(ValueError, match='changed since validation'):
+        sample_current(dict(task='breakfast_with_coffee', seed=3), [tmp_path])
+
+
+def test_default_sampler_infers_one_to_three_from_selected_history(tmp_path, worker):
+    from pathlib import Path
+
+    from cross_episode_sim.generation.history_batch import history_metadata
+    from cross_episode_sim.generation.sampling import sample_current
+    paths = [create_history(HistoryConfig('coffee', 1), tmp_path / 'lib')]
+    paths += [create_history(HistoryConfig('breakfast', 10+n, parameters={'people': n}), tmp_path / 'lib')
+              for n in (1, 2, 3)]
+    write_json(tmp_path / 'histories.json', dict(histories=[history_metadata(p) for p in paths]))
+    request = json.loads((Path(__file__).resolve().parents[1] /
+                         'examples/generation/sample_breakfast_with_coffee.json').read_text())
+    counts = set()
+    for seed in range(12):
+        config, audit = sample_current(request, [tmp_path], sampling_seed=seed)
+        records = [library.load_history(p)[2] for p in config.histories]
+        plan = library.current_task(config.task).compose(config, records)
+        expected = library.HistoryConfig(**records[1]['config']).people
+        assert plan.settings['people'] == expected
+        assert audit['resolved_parameters'] == {'people': expected}
+        assert audit['resolved_settings'] == plan.settings
+        assert records[0]['task'] == 'coffee'
+        assert audit['selected']['breakfast']['eligible_count'] == 3
+        counts.add(expected)
+    assert counts == {1, 2, 3}

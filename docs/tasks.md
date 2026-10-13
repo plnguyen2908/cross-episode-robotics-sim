@@ -12,7 +12,7 @@ Every run writes to its `--output` directory:
 | `report.json` | `success`, the measured goal predicates (`composite_goal_evidence`), every stage with its measurements, accepted and rejected trials |
 | `task_manifest.json`, `instruction.txt` | the episode as authored, and the instruction a policy would receive |
 | `trace.json` | full simulator state every 0.04 s of the accepted execution |
-| `trace_trimmed.json` | the same with motionless pauses removed; the videos are rendered from it |
+| `trace_trimmed.json` | Legacy/other-task artifact when pause trimming is enabled; new breakfast and coffee videos use the untrimmed accepted trace |
 | `rejected_trials/` | diagnostics for every candidate the controller tried and rolled back |
 | `*.mp4` | overview, manipulation detail and wrist camera, rendered after physics ends |
 

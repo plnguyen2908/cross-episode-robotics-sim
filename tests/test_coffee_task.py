@@ -310,3 +310,19 @@ def test_alternate_spout_dock_uses_machine_support_in_another_room():
     assert c.navigate_to_site.call_args.args[2] is False
     c.task_navigate.assert_not_called()
     assert c.machine_dock == [4., -4., 0.]
+
+
+def test_return_to_machine_reuses_successful_preplanned_route():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from cross_episode_sim.tasks.coffee.brew import BrewActions
+    route = [np.array([0., 0., 0.]), np.array([1., 0., 0.])]
+    c = SimpleNamespace(machine_dock=[1., 0., 0.], holding_loaf=True,
+                        tuck_for_navigation=Mock(), plan_route=Mock(return_value=route), rebuild=Mock())
+    def navigate(goal, carrying, face):
+        assert c._accepted_route is route
+    c.task_navigate = Mock(side_effect=navigate)
+    BrewActions.return_to_machine(c)
+    c.plan_route.assert_called_once()
+    c.task_navigate.assert_called_once()

@@ -487,6 +487,7 @@ def main(argv=None, *, execution_handler=None, scene_loader=None):
     p.add_argument('--second-mug-xy',type=float,nargs=2,default=[2.55,-.48],metavar=('X','Y'),help='Counter spot of the second mug, in the machine\'s validated frame (with --cups 2)')
     p.add_argument('--mug-navigation',choices=['auto','on','off'],default='auto',help='Drive to each mug before picking it and to its spot before setting it down, like the atomic pick and place (auto: on with --cups 2 or more)')
     p.add_argument('--clutter',type=int,default=0,help='Loose objects on table and counter tops away from the machine (dining table, side table, right counter in turn)')
+    p.add_argument('--dynamic-clutter', action='store_true', help='Keep scattered object joints active for generic evaluation skills')
     p.add_argument('--floor-objects',type=int,default=0,help='Loose objects on the floor, one room after another')
     p.add_argument('--table-setting',choices=('office','dining'),default='office',help='dining: remove the office monitor, keyboard and mouse')
     p.add_argument('--episode-label',help='Banner shown in the videos, e.g. "History 2 (given): coffee"')
@@ -616,6 +617,9 @@ def main(argv=None, *, execution_handler=None, scene_loader=None):
             setattr(ca, key, getattr(args, key))
     ca.dynamic_objects=list(ca.dynamic_objects)+[PORTAFILTER,BUTTON,POWER_BUTTON]+manifest['coffee']['coffee_mugs'][1:]
     if args.serve_breakfast:ca.dynamic_objects+=[i['body'] for i in manifest['bindings'] if i['role'].startswith('bowl')]
+    if args.dynamic_clutter:
+        ca.dynamic_objects = list(dict.fromkeys([*ca.dynamic_objects,
+            *(o['body'] for o in manifest.get('scattered_objects', []))]))
     import torch
     random.seed(manifest['seed']);np.random.seed(manifest['seed']);torch.manual_seed(manifest['seed'])
     if args.serve_breakfast:

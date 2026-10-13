@@ -25,7 +25,7 @@ def compose(config, histories):
     settings.update(config.scene)
     prompt = (f'Prepare {cups} cup(s) of coffee using the procedure demonstrated in the history. '
               'Return each brewed cup to its kitchen home and finish with your gripper empty.\n')
-    return CurrentPlan('coffee', settings, prompt, VIDEO['coffee'])
+    return CurrentPlan('coffee', settings, prompt, VIDEO['coffee'], parameters={'cups': cups})
 
 
 def execute(plan, output, gpu):
@@ -36,4 +36,9 @@ def verify(plan, run):
     _validate_count(run, plan.settings['people'])
 
 
-register_current_task('coffee_practice', CurrentTaskDefinition(validate, compose, execute, verify))
+def requirements(request):
+    return {'coffee': dict(task='coffee', category='imitation', contract='breakfast-coffee-v1', parameters={'cups': 1})}
+
+
+register_current_task('coffee_practice', CurrentTaskDefinition(
+    validate, compose, execute, verify, history_requirements=requirements))

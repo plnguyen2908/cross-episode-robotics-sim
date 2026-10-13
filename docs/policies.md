@@ -182,7 +182,7 @@ Start with a short test in the simulator environment, using a different GPU:
 ```bash
 python -m scripts.evaluate_dataset --dataset datasets/successful_examples \
     --endpoint http://127.0.0.1:8019/v1 --gpu 4 \
-    --limit 1 --history-frames 8 --max-planner-steps 3
+    --limit 1 --max-planner-steps 3
 ```
 
 Then omit `--max-planner-steps` for full tasks and use `--unique-layouts` to evaluate one
@@ -198,9 +198,11 @@ normal repository data installation. It also checks recorded object, furniture, 
 machine layouts. A layout mismatch stops that trial with an error rather than silently
 evaluating a different arrangement. No successful rollout checkpoint is used to initialize it.
 Symbolic planner adapters receive complete history-video paths and decide how to decode,
-sample, or otherwise process them. The Qwen adapter currently chooses uniform sampling
-(default eight frames per video, configured through its `history_frames` model option or
-`evaluate_dataset --history-frames`). This is an adapter choice, not a harness restriction.
+sample, or otherwise process them. Qwen now sends complete videos to its native processor
+using `video_url` blocks. The local helper requires shared filesystem `file://` paths.
+Sampling and temporal encoding use processor defaults (installed Qwen3-VL processor: 2 fps,
+up to 768 frames per video). `--video-fps 1` explicitly overrides the rate;
+`--history-frames 8` is an opt-in legacy image-only ablation, not the default.
 Qwen sees the public instruction, its sampled history frames, current wrist-camera images,
 skill descriptions/schemas, and previous calls/feedback. Symbolic observations contain only
 `images`: no base pose, arm joints, gripper command, calibration, or simulation time.
@@ -485,3 +487,169 @@ to `wrist_cam_body` under `fr3_link7`. The upstream `franka_droid/model.xml` pla
 that body at `[0.05, 0, 0.107]` m relative to link 7 and uses `fovy=90`. Its source
 contains a TODO to add the camera mount and move the camera. This matches the
 simulator asset; it is not a calibrated physical-camera specification.
+
+### Navigation route reuse and shortening
+
+Coffee returns to the machine now reuse the route already checked during dock
+selection instead of running the same A* query again. Breakfast/coffee navigation
+also attempts bounded shortcuts over the fixed route's execution segments: each
+connector must pass floor and full robot/payload swept-clearance checks at the
+existing 25 mm / 5 degree sampling resolution. Reverse undocking is preserved;
+blocked or incompletely checked shortcuts keep the original segments. The extra
+work is capped at 512 collision probes and eight segments of lookahead per group.
+There is no additional A* call for route shortening and no online replanning while
+following a valid route. Initial collision-rejected route/dock recovery is retained.
+
+Logs record segment counts, planned duration before/after shortening, shortcut
+checking time, and route planning/execution wall time. These changes reduce
+redundant planning and potential stop/start execution overhead; they do not change
+physics timestep, navigation speeds, contact limits, or payload checks. Existing
+workers must restart to load the code. Route regression checks pass, but a new
+full physical rollout is needed to quantify end-to-end improvement.
+
+For multi-GPU local inference, restart the helper in the Qwen environment with, for example:
+
+```bash
+CUDA_VISIBLE_DEVICES=2,3,4,5 python -m scripts.serve_qwen \
+    --device auto --gpu-memory 20GiB --port 8020
+python -m scripts.evaluate_dataset --dataset datasets/test_set_v1 \
+    --endpoint http://127.0.0.1:8020/v1 --gpu 6
+```
+
+`--device auto` uses Accelerate balanced model placement across visible GPUs. This is
+weight sharding, not tensor parallelism or four concurrent evaluations. Long-video
+activation memory and latency still require measurement; four GPUs do not guarantee fit.
+The helper logs actual input token counts and video grids. Its video decoder requires
+a supported Transformers decoding backend (the torchvision fallback requires PyAV).
+Restart an older running helper before using the new native-video default.
+
+The local server uses a streaming PyAV decoder while preserving the Qwen processor's
+frame-index selection and temporal metadata. This avoids torchvision's fallback,
+which loads every frame before sampling. Server logs separate lock wait,
+preprocessing, and generation times. In a CPU preprocessing check of test-set example
+0001's two full histories, streaming took about 35 seconds with 8.9 GiB peak process
+RAM; this does not measure model generation. A short-video comparison produced
+identical processor tensors to the original decoder. Restart the server to load
+this decoder change; active requests on an older process still use its old decoder.
+
+Separate action and EQA inference servers can avoid sharing an inference queue:
+
+```bash
+# In the Qwen environment, separate terminals:
+CUDA_VISIBLE_DEVICES=2,3 python -m scripts.serve_qwen --device auto --gpu-memory 11GiB --port 8020
+CUDA_VISIBLE_DEVICES=4,5 python -m scripts.serve_qwen --device auto --gpu-memory 11GiB --port 8021
+# Simulator environment:
+python -m scripts.evaluate_dataset --dataset datasets/test_set_v1 --endpoint http://127.0.0.1:8020/v1 --gpu 6
+bash scripts/evaluate_eqa.sh --endpoint http://127.0.0.1:8021/v1
+```
+
+EQA now defaults to port 8021. These processes share CPU/storage resources but have
+separate model instances, inference locks, and GPU allocations.
+
+Coffee/current action evaluations now finalize the model-executed controller trace
+into `episode_000/rollout.mp4` after scoring, including unsuccessful evaluations.
+`result.json` records video status and its relative path; render errors do not
+replace the task's measured success/failure. Full report and trace are retained
+under `scene_000/`. Playback uses normal simulation speed and retains simulated
+waits (failed rollouts also have the existing two-second endpoint hold).
+This is the accepted execution branch; oracle checkpoint trials rejected and rolled
+back are kept separately, not spliced into the main video. CPU inference waiting
+does not advance simulation time and is not included in video duration.
+
+Live observations are independent of deferred video export: the decision loop
+calls `observe()` again after each skill return, renders the latest simulator
+state, and passes those images to Qwen. Those exact observations are saved under
+`episode_000/observations/`. Rollout export changes apply to newly launched
+workers; existing evaluation processes must finish/restart to use the new code.
+
+### Experimental visual targets (not the standard evaluation interface)
+
+Explicitly configured experimental grounding sessions expose `target_id: "obj_N"` instead of simulator role names
+such as `cup_01`. IDs are allocated on first visibility and stay stable for the
+session, including across cameras and after occlusion. Each ID has a distinct
+persistent RGB color, a translucent mask overlay, a box, and a text label.
+The physical object appearance/material is unchanged. Hidden, never-observed
+objects are not enumerated in the skill catalog. Previously observed invisible
+targets retain their ID but have no current boxes or masks.
+
+This baseline uses **oracle instance segmentation and simulator identity** for
+perception/tracking, explicitly marked in observations and result metadata. Body
+names, internal role mappings and object poses are not sent to the symbolic planner.
+The experimental grounding configuration supplies three fixed room-camera views and wrist view,
+as requested, so objects outside the wrist camera can be observed. History videos
+remain unchanged, and IDs are local to the current session, not transferred from histories.
+
+Oracle calls resolve the public ID privately to the original role and use the
+unchanged skill executor. VLA calls keep the same public ID; VLA observations
+include `images` (annotated), `raw_images`, `targets` (IDs/colors/current boxes),
+`target_masks` keyed by camera and ID, and the existing supported robot state.
+Symbolic observations receive only annotated images, target metadata, and perception
+provenance. The model adapter must explicitly consume target conditioning; colors
+alone do not make an untrained VLA succeed. A VLA `done` response is checked with
+the session's atomic postcondition verifier when available, instead of being accepted
+as verified success. Unsupported low-level coffee/current execution remains disabled.
+
+Grounding is an evaluation adapter: existing oracle dataset-generation plans continue
+using their internal role arguments. Target masks and labels are recorded beside
+exact observations in the evaluation journal/NPZ files; the deferred rollout video
+continues showing the unmodified physical scene. Start a new evaluation worker to
+load this interface; model servers need no restart.
+
+### Standard interface: any suitable vessel type (oracle baseline)
+
+The former version 2 is now the single dataset-evaluation interface: **type-only
+requests without colors or public object IDs**. The `--interface-version` switch
+has been removed. Internal role-based datagen executors and experimental grounding
+helpers remain available for their separate uses.
+
+```bash
+python -m scripts.evaluate_dataset --dataset datasets/test_set_v1 \
+  --endpoint http://127.0.0.1:8020/v1 --gpu 6 \
+  --max-planner-steps 40
+```
+
+The public catalog uses `asset_type` instead of `role`. Vessel transport accepts
+`Mug` and `Bowl`; navigation and pickup also attempt other scene types such as
+`Plate`, `Apple`, `Vase`, and `SaltShaker`. Omit navigation destination to approach
+the object. A different pick type after navigation returns `target_type_mismatch`.
+Source navigation chooses an unserved, non-retired instance by proximity, using
+private current scene geometry (not the oracle witness plan). Following calls
+remain bound to that same instance, with the actual held object taking precedence.
+After successful serving, another source-navigation call selects a new instance.
+Destination, source, and place-setting arguments retain their original semantics.
+Fixed-object skills such as `pick_dosing_box` are unchanged.
+
+Navigation failure may try another instance through the existing atomic executor;
+its recorded checkpoint trials retain their existing rollback semantics. A failed
+surface grasp retires that candidate and requires another explicit source-navigation
+call, rather than adding navigation inside pick. Exhaustion returns
+`no_feasible_target`. Ordering/precondition failures do not retire vessels. This is
+an oracle instance-selection baseline, not evidence all randomized vessels are
+reachable. Private selection attempts are saved in `scene_000/type_selection.json`.
+
+This adapter is evaluation-only and requires existing interchangeable-vessel goals.
+It neither edits datagen tasks nor recolors objects nor changes history videos,
+initial object poses, physical atomic skills, or final goal scoring. Existing test examples can be
+reused without regeneration. Coffee/current VLA physical execution remains
+unsupported; this does not claim that a VLA has been integrated or validated.
+
+A reproducible physical navigation-and-pick check (no model required):
+
+```bash
+python -m scripts.test_any_vessel --example datasets/test_set_v1/examples/example_0002 --gpu 7
+# --asset-type Bowl checks bowl selection; --render-video saves the diagnostic rollout.
+```
+
+This check reports only navigation/pick success, not a successful breakfast episode.
+
+The [breakfast and coffee skill API](breakfast_skill_api.md) documents each
+function's preconditions, effects, argument combinations, and local call examples.
+The live skill catalog includes these argument semantics for the symbolic planner.
+
+Generic navigation/pick attempts now keep scattered-object joints active in new
+object-type evaluation sessions (`--dynamic-clutter` internally). Previous runs
+froze these objects. This intentionally changes their physical mobility, not their
+initial placement or task-goal membership. Evaluation results record
+`dynamic_clutter: true`; compare old/new runs with this difference in mind. Datagen
+keeps its existing default. Generic attempt details are stored separately in
+`scene_000/generic_skill_calls.json` (or the session's scene directory).

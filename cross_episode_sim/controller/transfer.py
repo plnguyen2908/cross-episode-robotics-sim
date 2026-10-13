@@ -17,6 +17,7 @@ class TableTransfer(AnnotatedGraspMixin, NavigationTransfer):
     video_filename = "table_transfer.mp4"
     contact_pair_detail = PhysicalReorderCheck.contact_pair_detail
     plan_contact_path = PhysicalReorderCheck.plan_contact_path
+    _checked_contact_targets = PhysicalReorderCheck._checked_contact_targets
     mesh_contact_move = PhysicalReorderCheck.mesh_contact_move
     robot_self_penetration = PhysicalReorderCheck.robot_self_penetration
 

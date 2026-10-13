@@ -63,6 +63,7 @@ class CurrentPlan:
     settings: dict
     prompt: str
     video: str
+    parameters: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class CurrentTaskDefinition:
     execute: Callable
     verify: Callable
     version: str = '1'
+    history_requirements: Callable | None = None
 
 
 _CURRENT_TASKS = {}
@@ -167,12 +169,14 @@ def _settings(config, people):
     return settings
 
 
-def run_episode(task, settings, output, name, gpu='0'):
+def run_episode(task, settings, output, name, gpu='0', *, progress=None):
     """Run one existing physical worker, with bounded failure shutdown and progress."""
     from cross_episode_sim.rendering_gpu import resolve_gpus, worker_environment
     from cross_episode_sim.tasks.full_breakfast.fail_fast import definitive_failure, stop_workers
     from cross_episode_sim.tasks.full_breakfast.progress import format_progress, snapshot
     env = dict(os.environ)
+    if settings.get('motion_source'):
+        env['CES_MOTION_SOURCE'] = str(Path(settings['motion_source']).resolve())
     env.setdefault('MUJOCO_GL', 'egl')
     repo = Path(__file__).resolve().parents[2]
     if (repo / 'external/robocasa/robocasa').exists():
@@ -192,10 +196,15 @@ def run_episode(task, settings, output, name, gpu='0'):
                 code = process.poll()
                 failure = definitive_failure(output, {name: code})
                 if failure:
+                    if progress:
+                        progress(snapshot(output, name, code))
                     write_json(output / 'generation_failure.json', failure)
                     raise RuntimeError(f"{name}: {failure['error']}")
                 if time.monotonic() >= next_update or code is not None:
-                    print(format_progress(snapshot(output, name, code)), flush=True)
+                    row = snapshot(output, name, code)
+                    print(format_progress(row), flush=True)
+                    if progress:
+                        progress(row)
                     next_update = time.monotonic() + 10
                 if code is not None:
                     break
@@ -244,7 +253,7 @@ def history_config_dict(config):
     return record
 
 
-def create_history(config: HistoryConfig, library, *, gpu='0'):
+def create_history(config: HistoryConfig, library, *, gpu='0', progress=None):
     """Generate one validated history in a unique library directory; return its path."""
     settings = _settings(config, config.people)
     root = create_output(None, config.seed, Path(library))
@@ -252,7 +261,11 @@ def create_history(config: HistoryConfig, library, *, gpu='0'):
     write_json(root / 'config.json', history_config_dict(config))
     write_json(root / 'run_manifest.json', dict(skill_interface_required=True,
                episodes={'history_1': dict(task=config.task, settings=settings)}))
-    run_episode(config.task, settings, root, 'history_1', gpu)
+    if progress:
+        run_episode(config.task, settings, root, 'history_1', gpu, progress=progress)
+        progress(dict(status='validating', step=None, total=None, operation='video and physical goals', stage=''))
+    else:
+        run_episode(config.task, settings, root, 'history_1', gpu)
     run = root / 'runs/history_1'
     evidence = _validate_run(run, config.task)
     _validate_count(run, config.people)
@@ -338,8 +351,10 @@ def create_current(config: CurrentConfig, output=None, *, gpu='0'):
 def _validate_breakfast_current(config):
     _validate(config.seed, 1, config.layout_profile, config.scene)
     _task_options('full_breakfast', config.scene)
-    if config.parameters:
-        raise ValueError('breakfast_with_coffee derives its parameters from histories')
+    if set(config.parameters) - {'people'}:
+        raise ValueError('breakfast_with_coffee parameters: people (optional, must match history)')
+    if 'people' in config.parameters and (type(config.parameters['people']) is not int or config.parameters['people'] not in (1, 2, 3)):
+        raise ValueError('Current sampling supports 1–3 people')
     if len(config.histories) != 2:
         raise ValueError('Provide exactly one coffee and one breakfast history directory')
 
@@ -349,8 +364,10 @@ def _compose_breakfast_current(config, histories):
     if len(histories) != 2 or set(by_task) != {'coffee', 'breakfast'}:
         raise ValueError('Current needs one coffee and one breakfast history')
     people = HistoryConfig(**by_task['breakfast']['config']).people
+    if config.parameters.get('people', people) != people:
+        raise ValueError('Current people must match the breakfast history')
     settings = _settings(config, people)
-    return CurrentPlan('full_breakfast', settings, PROMPT, VIDEO['full_breakfast'])
+    return CurrentPlan('full_breakfast', settings, PROMPT, VIDEO['full_breakfast'], parameters={'people': people})
 
 
 def _execute_breakfast_current(plan, output, gpu):
@@ -361,9 +378,18 @@ def _verify_breakfast_current(plan, run):
     _validate_count(run, plan.settings['people'])
 
 
+def _breakfast_history_requirements(request):
+    return {
+        'coffee': dict(task='coffee', category='imitation', contract=CONTRACT, parameters={'cups': 1}),
+        'breakfast': dict(task='breakfast', category='counting', contract=CONTRACT,
+                          parameters={'people': request.get('parameters', {}).get('people', [1, 2, 3])}),
+    }
+
+
 register_current_task('full_breakfast', CurrentTaskDefinition(
     validate_config=_validate_breakfast_current, compose=_compose_breakfast_current,
     execute=_execute_breakfast_current, verify=_verify_breakfast_current,
+    history_requirements=_breakfast_history_requirements,
 ))
 
 # Keep previously written configs readable.

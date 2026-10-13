@@ -285,7 +285,7 @@ class BrewActions:
         self.tuck_for_navigation()
         goal=np.array(dock[:2])
         try:
-            self.plan_route(goal,True,face=dock[2])
+            self._accepted_route = self.plan_route(goal,True,face=dock[2])
         except RuntimeError as exc:
             self.record(machine_return_direct_rejected=str(exc))
             target=np.asarray(self.spec['mug_target_pose']).copy()

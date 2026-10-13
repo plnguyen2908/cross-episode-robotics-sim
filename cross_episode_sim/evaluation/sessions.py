@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 
+from .grounding import TargetRegistry, grounded_observation
 from .kinematics import RobotKinematics, camera_calibration
 
 ACTION_SPEC = dict(shape=[11], type='absolute_position_targets',
@@ -22,7 +24,7 @@ class TaskSession:
     supports_actions = True
 
     def __init__(self, task='breakfast', *, output_root='runs/evaluation_scenes', seed=17,
-                 options=None, cameras=('robot_0/wrist_cam',), image_size=(224, 224), max_steps=25000):
+                 options=None, cameras=('robot_0/wrist_cam',), image_size=(224, 224), max_steps=25000, visual_grounding=False):
         from cross_episode_sim.env.task_env import TaskEnv
         if task not in ('breakfast', 'tidy_up'):
             raise ValueError('TaskSession supports breakfast and tidy_up; coffee needs an independent policy task adapter')
@@ -34,18 +36,27 @@ class TaskSession:
         if task == 'breakfast':
             from cross_episode_sim.skills.gather_interface import gather_skill_interface
             self.interface = gather_skill_interface(self.env.controller)
+        if visual_grounding:
+            self.grounding = TargetRegistry(c.model, c.manifest['bindings'])
         self.instruction = self.env.controller.manifest['instruction']
 
     def catalog(self):
-        return [] if self.interface is None else self.interface.list_skills()
+        return [] if self.interface is None else (self.grounding.catalog(self.interface.list_skills())
+            if hasattr(self, 'grounding') else self.interface.list_skills())
+
+    def _resolve_skill(self, name, arguments):
+        if hasattr(self, 'grounding'):
+            return self.grounding.resolve(name, arguments, self.interface)
+        self.interface.validate(name, arguments)
+        return arguments
 
     def validate_skill(self, name, arguments):
         if self.interface is None:
             raise ValueError('This task has no registered skill catalog')
-        self.interface.validate(name, arguments)
+        self._resolve_skill(name, arguments)
 
     def oracle_skill(self, name, arguments):
-        result = self.interface.execute_skill(name, arguments)
+        result = self.interface.execute_skill(name, self._resolve_skill(name, arguments))
         # The same environment event (human filling) is available in every mode.
         if result['success']:
             self.env.spec_.after_step(self.env.controller)
@@ -54,8 +65,17 @@ class TaskSession:
     def observe(self):
         raw = self.env._observation()
         c = self.env.controller
-        return dict(state=raw['state'], images={name: raw[name] for name in self.env.cameras}, sim_time=self.sim_time(),
+        views = grounded_observation(self.grounding, self.env.renderer, c, self.env.cameras,
+                                     {name: raw[name] for name in self.env.cameras}) if hasattr(self, 'grounding') else dict(images={name: raw[name] for name in self.env.cameras})
+        return dict(state=raw['state'], **views, sim_time=self.sim_time(),
                     calibration=camera_calibration(c.model, c.data, self.env.cameras, self.env.image_size))
+
+    def verify_skill(self, name, arguments):
+        arguments = self._resolve_skill(name, arguments)
+        try:
+            return bool(self.interface.bindings[name].skill.verify(**arguments))
+        except (RuntimeError, ValueError):
+            return False
 
     def robot_state(self):
         return self.env.state()
@@ -85,8 +105,14 @@ class ControllerSession:
     explicitly provided. A demonstrator's phase flags are not a valid VLA scorer.
     """
     def __init__(self, controller, interface, verify_goal, *, cameras=('robot_0/wrist_cam',),
-                 image_size=(224, 224), action_adapter=None):
+                 image_size=(224, 224), action_adapter=None, visual_grounding=False, any_vessel=False):
         import mujoco
+        if any_vessel:
+            if visual_grounding or action_adapter is not None:
+                raise ValueError('Any-vessel oracle mode cannot be combined with ID grounding or low-level execution')
+            from .any_vessel import AnyVesselInterface
+            interface = AnyVesselInterface(controller, interface)
+        self.any_vessel = any_vessel
         self._c, self.interface, self._goals = controller, interface, verify_goal
         self._actions = action_adapter
         self.supports_actions = action_adapter is not None
@@ -94,16 +120,31 @@ class ControllerSession:
         self._image_size = image_size
         self.kinematics = RobotKinematics(controller.model, controller.data, controller.profile)
         self._renderer = mujoco.Renderer(controller.model, height=image_size[0], width=image_size[1]) if cameras else None
+        if visual_grounding:
+            self.grounding = TargetRegistry(controller.model, controller.manifest['bindings'])
         self.instruction = controller.manifest.get('instruction', '')
 
     def catalog(self):
-        return self.interface.list_skills()
+        return self.grounding.catalog(self.interface.list_skills()) if hasattr(self, 'grounding') else self.interface.list_skills()
+
+    def _resolve_skill(self, name, arguments):
+        if hasattr(self, 'grounding'):
+            return self.grounding.resolve(name, arguments, self.interface)
+        self.interface.validate(name, arguments)
+        return arguments
 
     def validate_skill(self, name, arguments):
-        self.interface.validate(name, arguments)
+        self._resolve_skill(name, arguments)
 
     def oracle_skill(self, name, arguments):
-        return self.interface.execute_skill(name, arguments)
+        return self.interface.execute_skill(name, self._resolve_skill(name, arguments))
+
+    def verify_skill(self, name, arguments):
+        arguments = self._resolve_skill(name, arguments)
+        try:
+            return bool(self.interface.bindings[name].skill.verify(**arguments))
+        except (RuntimeError, ValueError):
+            return False
 
     def robot_state(self):
         c = self._c; p = c.profile; ns = p.namespace
@@ -120,7 +161,8 @@ class ControllerSession:
             self._renderer.update_scene(c.data, camera=camera,
                                         scene_option=getattr(c, 'render_scene_option', None))
             images[camera] = self._renderer.render().copy()
-        return dict(state=self.robot_state(), images=images, sim_time=self.sim_time(),
+        views = grounded_observation(self.grounding, self._renderer, c, self._cameras, images) if self._renderer and hasattr(self, 'grounding') else dict(images=images)
+        return dict(state=self.robot_state(), **views, sim_time=self.sim_time(),
                     calibration=camera_calibration(c.model, c.data, self._cameras, self._image_size))
 
     def step(self, action):
@@ -137,10 +179,37 @@ class ControllerSession:
     def action_spec(self):
         return deepcopy(ACTION_SPEC)
 
+    def finalize_video(self, result, output):
+        """Render this model's recorded trajectory only after goal scoring ends."""
+        c = self._c
+        if not hasattr(c, 'finish_run_outputs'):
+            return dict(status='unsupported')
+        c.report.update(evaluation_result=deepcopy(result),
+                        composite_goal_evidence=result.get('goals', {}),
+                        error=result.get('error') or result.get('termination'))
+        c.args.video_speedup = 1
+        c.trim_video_pauses = False
+        try:
+            c.finish_run_outputs(bool(result.get('success', False)))
+        finally:
+            # finish_run_outputs owns and closes these, including on render failure.
+            for name in ('writer', 'head_writer', 'renderer'):
+                setattr(c, name, None)
+        status = c.report.get('video_status', 'unknown')
+        info = dict(status=status, scope='model-executed accepted trajectory; rejected oracle trials remain separate',
+                    report=str(c.output / 'report.json'), trace=str(c.output / 'trace.json'))
+        if status == 'complete':
+            output = Path(output)
+            output.mkdir(parents=True, exist_ok=True)
+            from cross_episode_sim.generation.library import _link_or_copy
+            _link_or_copy(c.output / c.video_filename, output / 'rollout.mp4')
+            info['path'] = 'rollout.mp4'
+        return info
+
     def close(self):
         if self._renderer is not None:
             self._renderer.close(); self._renderer = None
-        for name in ('writer', 'renderer'):
+        for name in ('writer', 'head_writer', 'renderer'):
             resource = getattr(self._c, name, None)
             if resource is not None:
                 resource.close()

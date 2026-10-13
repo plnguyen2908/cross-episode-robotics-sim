@@ -2,7 +2,6 @@
   "task": "coffee",
   "seed": 100,
   "scene": {
-    "machine_room": "kitchen",
     "nav_speed": 0.24,
     "turn_speed": 0.6
   },

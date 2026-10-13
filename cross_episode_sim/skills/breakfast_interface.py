@@ -43,23 +43,38 @@ def breakfast_skill_interface(c):
         return bool(np.linalg.norm(delta[:2]) < .025 and abs(np.arctan2(np.sin(delta[2]), np.cos(delta[2]))) < .03)
 
     def add(name, skill, schema, pre, description, navigation=False):
+        argument_docs = {
+            'role': 'The cup or bowl to act on. Keep the same vessel across navigation, pickup and placement; not the navigation destination.',
+            'dock': 'Optional approach candidate index as a string, default "0". Use another available index to try another dock; this does not change the target object.',
+        }
+        if name == 'navigate':
+            argument_docs['destination'] = ('source: empty-hand approach for pickup; spout: carry cup to machine '
+                '(or return empty-handed to its ready cup); home: carry cup to recorded home; '
+                'serving: carry cup/bowl to dining. Only values in this enum are available.')
+        elif name == 'pick':
+            argument_docs['source'] = 'surface: cup/bowl at source dock; spout: cup ready under machine at spout dock. Both require empty hand.'
+        elif name == 'place':
+            argument_docs['destination'] = 'spout: release cup under machine; home: release cup at home; serving: release cup/bowl at dining. Requires matching dock and held vessel.'
+        for key, text in argument_docs.items():
+            if key in schema['properties']:
+                schema['properties'][key]['description'] = text
         bindings[name] = SkillBinding(skill, description, schema, pre, navigation)
 
     add("detach_portafilter", DetachPortafilterSkill(c), parameters(),
         lambda: dict(empty_hand=empty(), seated=c.fixture_phase in ("seated", "locked")),
-        "Detach the portafilter from its bayonet and leave it supported on the loading counter.")
+        "Arguments: {}. Requires empty hand and a seated/locked portafilter. Detach it and leave it supported on the loading counter; the hand is empty afterward. Does not pick up or pour grounds.")
     add("pick_dosing_box", PickDosingBoxSkill(c), parameters(),
         lambda: dict(empty_hand=empty(), portafilter_detached=bool(detached(c))),
-        "Grasp and lift the grounds box at the current machine dock.")
+        "Arguments: {}. Requires empty hand and detached portafilter. Grasp the CoffeeDosingBox at the machine dock; afterward the box is held, but no grounds have been poured. Use pour_grounds to dose, then place_dosing_box to free the hand. Calling pick_dosing_box again while holding it is invalid.")
     add("pour_grounds", PourGroundsSkill(c, track_portafilter=True), parameters(),
         lambda: dict(box_held=bool(c.object_name == c.spec['dosing_body'] and c.holding_loaf and len(c.contacts()) >= 2)),
-        "Pour the held grounds box into the detached portafilter, then return it upright.")
+        "Arguments: {}. Requires the grounds box already held (pick_dosing_box). Pour grounds into the detached portafilter and return the box upright. The box remains held: use place_dosing_box before any empty-hand skill.")
     add("place_dosing_box", ParkDosingBoxSkill(c), parameters(),
         lambda: dict(box_held=bool(c.object_name == c.spec['dosing_body'] and c.holding_loaf and len(c.contacts()) >= 2)),
-        "Place and release the held grounds box on its parking counter.")
+        "Arguments: {}. Requires the grounds box held. Put it on its parking counter and release it; afterward the hand is empty. This does not pour grounds. Use this dedicated skill for the box, not vessel place.")
     add("attach_portafilter", AttachPortafilterSkill(c), parameters(),
         lambda: dict(empty_hand=empty(), detached=bool(detached(c)), grounds_ready=bool(c.grounds_ready())),
-        "Grasp the supported portafilter, insert and lock its measured bayonet, then release.")
+        "Arguments: {}. Requires empty hand, detached portafilter and grounds ready. Grasp the supported portafilter, insert and lock it, then release; afterward the hand is empty.")
 
     def configure_bowl(role):
         info = c.info(role)
@@ -129,7 +144,7 @@ def breakfast_skill_interface(c):
             description='Dining place setting to use when destination is serving; choose the requested settings from the histories.')
     add('navigate', BoundSkill(c, 'navigate', navigate, nav_verify),
         navigation_schema, nav_pre,
-        'Navigate and dock at an object, coffee spout, home counter spot, or dining place setting. Carry a held object upright.', True)
+        'Move the base and dock; never pick or place implicitly. destination=source: approach the selected vessel for surface pickup; requires empty hand. destination=spout: cups only, carry the selected held cup to the machine; also allows empty-hand return to that same cup when it is already ready under the spout. destination=home: cups only, carry the selected held cup to its recorded home counter; home must be known. destination=serving: carry the selected held cup or bowl to its dining setting. Holding a different object (including the grounds box) is invalid. For surface pickup use navigate(destination=source), then pick(source=surface) on the same vessel. For delivery use navigate(destination=X), then place(destination=X) on the same vessel. dock chooses an approach candidate, not an object; setting selects the dining placement only for destination=serving.', True)
 
     def pick(role, source, candidate=None):
         if role in cups:
@@ -160,7 +175,7 @@ def breakfast_skill_interface(c):
 
     add('pick', VesselPickSkill(c, 'pick'),
         parameters(role=roles, source=('surface', 'spout')), pick_pre,
-        'Grasp and lift at the current dock. Spout pickup also extracts the cup through its constrained clearance; no base navigation.')
+        'Requires empty hand and the matching vessel pickup dock; no base navigation. source=surface: lift a cup or bowl after navigate(destination=source) for the same vessel. source=spout: cups only, extract the selected cup already ready under the machine spout at its spout dock. To collect brewed coffee, finish wait_until_brewed first. Success leaves the selected vessel held. Neither mode picks the grounds box; use pick_dosing_box for that.')
 
     def place(role, destination, candidate=None):
         if destination == 'serving' and not hasattr(c, 'serve_start_time'):
@@ -199,25 +214,29 @@ def breakfast_skill_interface(c):
         parameters(role=roles, destination=('spout', 'home', 'serving') if full else ('spout', 'home')),
         lambda role, destination: dict(object_held=held(role), at_destination_dock=at_dock(role, destination),
                                        destination_supported=role in cups or destination == 'serving'),
-        'Place and release the held vessel at the current dock, then withdraw the hand. No base navigation.')
+        'Requires the selected vessel held and a matching destination dock from navigate for the same vessel. destination=spout: cups only, position and release under the machine for brewing. destination=home: cups only, return and release at its recorded counter home. destination=serving: release a cup or bowl at the dining setting selected during navigate. Success leaves the hand empty. No base navigation; no pouring or brewing. Bowls support only serving. Grounds box uses place_dosing_box instead.')
 
     for action in ('power', 'brew'):
         def pre(action=action):
             return dict(empty_hand=empty(), prerequisites=(action == 'power' or bool(
                 c.machine_cycle.ready(c.data.time) and c.installed() and c.grounds_ready() and c.mug_ready())))
         add('press_' + action, press_button_skill(c, action), parameters(), pre,
-            'Physically press and release the ' + action + ' button.')
+            ('Arguments: {}. Requires empty hand. Physically press and release power to power the machine; '
+             'use wait_until_ready for warmup. Does not brew.' if action == 'power' else
+             'Arguments: {}. Requires empty hand, warmed-up machine, installed portafilter, grounds ready '
+             'and a cup ready under the spout. Press and release brew to start the cycle; '
+             'use wait_until_brewed before collecting the cup.'))
     add('wait_until_ready', BoundSkill(c, 'wait_until_ready', c.wait_machine_ready, lambda: c.machine_cycle.ready(c.data.time)),
         parameters(), lambda: dict(powered=c.machine_cycle.powered_at is not None, empty_hand=empty()),
-        'Wait for the modeled machine warmup; verify its ready state.')
+        'Arguments: {}. Requires machine powered on and empty hand. Advance simulated warmup until the machine is ready. Does not press power or start brewing.')
     add('wait_until_brewed', BoundSkill(c, 'wait_until_brewed', c.finish_brew,
                                       lambda: c.machine_cycle.completed and c.mug_ready()),
         parameters(), lambda: dict(brew_started=c.machine_cycle.started_at is not None, empty_hand=empty()),
-        'Wait for the modeled brew cycle and verify completion with the cup still under the spout.')
+        'Arguments: {}. Requires an already-started brew cycle and empty hand. Wait for completion with the cup still ready under the spout. Does not start brewing or pick the cup; use press_brew to start and pick(source=spout) to collect afterward.')
     if full:
         add('wait_for_bowls', BoundSkill(c, 'wait_for_bowls', c.fill_bowls, c.bowls_filled), parameters(),
             lambda: dict(empty_hand=empty(), bowls_in_kitchen=c.bowls_in_kitchen()),
-            'Wait for the authored human intervention that fills all requested bowls. Filling is an environment event, not robot manipulation.')
+            'Arguments: {}. Requires empty hand and requested bowls in the kitchen. Wait for the authored human intervention that fills the requested bowls. Filling is an environment event, not robot manipulation. Does not navigate, pick or serve bowls.')
     return SkillInterface(c, bindings)
 
 

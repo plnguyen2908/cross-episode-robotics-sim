@@ -173,3 +173,50 @@ def blend_route(path, start_yaw, pose_clear, *, nav_speed, turn_speed,
         segments.extend(chosen)
         current = chosen[-1].end.copy()
     return segments
+
+
+def shortcut_segments(segments, pose_clear, *, nav_speed, turn_speed, lookahead=8, probe_budget=512):
+    """Shorten a fixed route without another A* search.
+
+    Join bounded groups of segments only when the complete new robot/payload
+    sweep is clear. Preserve endpoint yaw, reverse undocking, and original
+    segments whenever no faster checked connector exists.
+    """
+    result = []
+    remaining = probe_budget
+    def checked(pose):
+        nonlocal remaining
+        if remaining <= 0:
+            return False
+        remaining -= 1
+        return pose_clear(pose)
+    i = 0
+    while i < len(segments):
+        if remaining <= 0:
+            result.extend(segments[i:])
+            break
+        first = segments[i]
+        chosen, end = first, i
+        if first.kind != 'reverse':
+            for j in range(min(len(segments), i + lookahead) - 1, i, -1):
+                group = segments[i:j+1]
+                if any(segment.kind == 'reverse' for segment in group):
+                    continue
+                target = group[-1].end
+                delta = target[:2] - first.start[:2]
+                distance = float(np.linalg.norm(delta))
+                if distance < .25:
+                    continue
+                heading = first.start[2] + wrap(np.arctan2(delta[1], delta[0]) - first.start[2])
+                # Preserve the original continuous final yaw to keep the next
+                # segment's absolute actuator targets consistent.
+                candidate = make_segment(first.start, target[:2], heading, target[2],
+                                         'blend', nav_speed, turn_speed)
+                if candidate.duration >= sum(segment.duration for segment in group) - .5:
+                    continue
+                if all(checked(pose) for pose in candidate.samples()):
+                    chosen, end = candidate, j
+                    break
+        result.append(chosen)
+        i = end + 1
+    return result

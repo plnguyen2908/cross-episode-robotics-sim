@@ -740,20 +740,48 @@ class PhysicalReorderCheck(AnnotatedGraspMixin, NavigationTransfer):
 
     def plan_contact_path(self, stage, pose):
         """Plan a near-contact path without advancing the live physics state."""
+        from time import perf_counter
+
+        from cross_episode_sim.datagen.motion_source import source_for
+        source = source_for(self)
+        if source is not None:
+            targets = source.targets(self, stage, pose)
+            if targets is not None:
+                started = perf_counter()
+                try:
+                    path = self._checked_contact_targets(stage, targets)
+                except RuntimeError as exc:
+                    self.record(motion_adaptation=dict(stage=stage, status='fallback',
+                        error=str(exc), wall_seconds=perf_counter()-started))
+                else:
+                    self.record(motion_adaptation=dict(stage=stage, status='accepted',
+                        waypoints=len(path), wall_seconds=perf_counter()-started))
+                    return path
+            else:
+                self.record(motion_adaptation=dict(stage=stage, status='unmatched'))
+        start = self.tcp()
+        samples = max(6, int(np.ceil(np.linalg.norm(pose[:3,3]-start[:3,3])/.005)))
+        rotations = Slerp([0,1], Rotation.from_matrix([start[:3,:3],pose[:3,:3]]))
+        targets = []
+        for f in np.linspace(0,1,samples+1)[1:]:
+            waypoint = start.copy()
+            waypoint[:3,3] = (1-f)*start[:3,3]+f*pose[:3,3]
+            waypoint[:3,:3] = rotations(f).as_matrix()
+            targets.append(waypoint)
+        return self._checked_contact_targets(stage, targets)
+
+    def _checked_contact_targets(self, stage, targets):
+        """Shared IK/mesh validation for original and adapted contact paths."""
         start = self.tcp()
         held = getattr(self, 'holding_loaf', False)
         relative = np.linalg.inv(start) @ self.bread_pose()
         addresses = [self.model.jnt_qposadr[self.model.joint(NS+n).id] for n in self.planner.names]
         obj_address = self.model.jnt_qposadr[self.model.joint(self.object_joint).id]
         q = self.data.qpos[addresses].copy()
-        samples = max(6, int(np.ceil(np.linalg.norm(pose[:3,3]-start[:3,3])/.005)))
-        rotations = Slerp([0,1], Rotation.from_matrix([start[:3,:3],pose[:3,:3]]))
         probe = mujoco.MjData(self.model)
         path = []
-        for f in np.linspace(0,1,samples+1)[1:]:
-            waypoint = start.copy()
-            waypoint[:3,3] = (1-f)*start[:3,3]+f*pose[:3,3]
-            waypoint[:3,:3] = rotations(f).as_matrix()
+        for index, waypoint in enumerate(targets):
+            f = (index+1)/len(targets)
             q = np.asarray(self.nearby_ik(waypoint, q, preserve_self_clearance=True))
             probe.qpos[:] = self.data.qpos
             probe.qpos[addresses] = q
