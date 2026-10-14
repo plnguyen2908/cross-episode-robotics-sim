@@ -1,0 +1,202 @@
+{
+  "validation_date": "2026-10-13",
+  "scope": "Selected successful physical demonstrations; not an OOD reliability estimate.",
+  "playback": "Normal speed (1x); one successful public call per clip.",
+  "skills": {
+    "navigate": {
+      "video": "navigate.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/cabinet-door",
+      "skill": "navigate",
+      "arguments": {
+        "target": "cabinet_door"
+      },
+      "success": true,
+      "duration_seconds": 3.4,
+      "start_frame": 25,
+      "end_frame": 110
+    },
+    "pick": {
+      "video": "pick.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/drawer-pick-place",
+      "skill": "pick",
+      "arguments": {
+        "target": "test_object_main"
+      },
+      "success": true,
+      "duration_seconds": 21.6,
+      "start_frame": 50,
+      "end_frame": 590
+    },
+    "place": {
+      "video": "place.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/drawer-pick-place",
+      "skill": "place",
+      "arguments": {
+        "receptacle": "support"
+      },
+      "success": true,
+      "duration_seconds": 18.6,
+      "start_frame": 590,
+      "end_frame": 1055
+    },
+    "open_door": {
+      "video": "open_door.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/cabinet-door",
+      "skill": "open_door",
+      "arguments": {
+        "target": "cabinet_door"
+      },
+      "success": true,
+      "duration_seconds": 19.44,
+      "start_frame": 110,
+      "end_frame": 596
+    },
+    "close_door": {
+      "video": "close_door.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/cabinet-door",
+      "skill": "close_door",
+      "arguments": {
+        "target": "cabinet_door"
+      },
+      "success": true,
+      "duration_seconds": 16.08,
+      "start_frame": 596,
+      "end_frame": 998
+    },
+    "open_drawer": {
+      "video": "open_drawer.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/drawer",
+      "skill": "open_drawer",
+      "arguments": {
+        "target": "drawer"
+      },
+      "success": true,
+      "duration_seconds": 14.76,
+      "start_frame": 91,
+      "end_frame": 460
+    },
+    "close_drawer": {
+      "video": "close_drawer.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/drawer",
+      "skill": "close_drawer",
+      "arguments": {
+        "target": "drawer"
+      },
+      "success": true,
+      "duration_seconds": 10.92,
+      "start_frame": 460,
+      "end_frame": 733
+    },
+    "open_lid": {
+      "video": "open_lid.mp4",
+      "source_run": "runs/atomic_interface_suite_5kyuftx6/blender-lid",
+      "skill": "open_lid",
+      "arguments": {
+        "target": "blender_lid"
+      },
+      "success": true,
+      "duration_seconds": 15.4,
+      "start_frame": 145,
+      "end_frame": 530
+    },
+    "close_lid": {
+      "video": "close_lid.mp4",
+      "source_run": "runs/atomic_interface_suite_5kyuftx6/blender-lid",
+      "skill": "close_lid",
+      "arguments": {
+        "target": "blender_lid"
+      },
+      "success": true,
+      "duration_seconds": 18.68,
+      "start_frame": 1791,
+      "end_frame": 2258
+    },
+    "push_button": {
+      "video": "push_button.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/microwave-button",
+      "skill": "push_button",
+      "arguments": {
+        "target": "start"
+      },
+      "success": true,
+      "duration_seconds": 10.4,
+      "start_frame": 110,
+      "end_frame": 370
+    },
+    "turn_lever": {
+      "video": "turn_lever.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/faucet",
+      "skill": "turn_lever",
+      "arguments": {
+        "state": "on",
+        "target": "faucet_lever"
+      },
+      "success": true,
+      "duration_seconds": 15.2,
+      "start_frame": 174,
+      "end_frame": 554
+    },
+    "push_lever": {
+      "video": "push_lever.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/toaster-lever",
+      "skill": "push_lever",
+      "arguments": {
+        "target": "toaster_lever"
+      },
+      "success": true,
+      "duration_seconds": 17.0,
+      "start_frame": 138,
+      "end_frame": 563
+    },
+    "rotate_knob": {
+      "video": "rotate_knob.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/stove-knob",
+      "skill": "rotate_knob",
+      "arguments": {
+        "state": "on",
+        "target": "stove_knob"
+      },
+      "success": true,
+      "duration_seconds": 16.12,
+      "start_frame": 110,
+      "end_frame": 513
+    },
+    "insert": {
+      "video": "insert.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/toaster-insertion",
+      "skill": "insert",
+      "arguments": {
+        "receptacle": "toaster_slot"
+      },
+      "success": true,
+      "duration_seconds": 19.72,
+      "start_frame": 523,
+      "end_frame": 1016
+    },
+    "slide_oven_rack": {
+      "video": "slide_oven_rack.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/oven-rack",
+      "skill": "slide_oven_rack",
+      "arguments": {
+        "target": "oven_rack",
+        "state": "out"
+      },
+      "success": true,
+      "duration_seconds": 17.08,
+      "start_frame": 624,
+      "end_frame": 1051
+    },
+    "wait": {
+      "video": "wait.mp4",
+      "source_run": "runs/atomic_interface_suite_iuetvcpj/microwave-button",
+      "skill": "wait",
+      "arguments": {
+        "duration_seconds": 2.0
+      },
+      "success": true,
+      "duration_seconds": 2.0,
+      "start_frame": 370,
+      "end_frame": 420
+    }
+  }
+}

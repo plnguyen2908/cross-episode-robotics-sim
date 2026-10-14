@@ -12,8 +12,8 @@ The repository provides
 
 - **two composite tasks** with oracle demonstrations: breakfast for two (gather empty vessels
   from three rooms, a person fills them, serve them) and making espresso;
-- **ten atomic skill families** they are built from: navigation, pick and place, doors, drawers,
-  knobs, levers, buttons, insertion, sliding racks and lids, each validated on at least one fixture;
+- **a fixed interface of 16 atomic functions**, each with a successful physical demonstration
+  and a [separate normal-speed video](#atomic-skills-and-videos);
 - **a template task** (`tidy_up`: return a mug and a book to their rooms) that shows how tasks are
   composed from the skills;
 - **a Gymnasium environment** where a learned policy drives the same robot and is scored by the
@@ -21,15 +21,56 @@ The repository provides
 - **dataset export** from demonstrations to robomimic-style HDF5, with a minimal behavior
   cloning example.
 
-Watch every demonstration, including the 14 atomic skills, on the
-[project page](https://plnguyen2908.github.io/cross-episode-robotics-sim/). The previews below
-are time-lapses; the full videos (3× speed) are in [`docs/videos/`](docs/videos).
+The latest atomic demonstrations are listed [below](#atomic-skills-and-videos).
+The [project page](https://plnguyen2908.github.io/cross-episode-robotics-sim/) and
+the composite examples below contain earlier demonstrations. Those previews are
+time-lapses and their full videos are 3× speed; the new atomic clips are **1× speed**.
 
 | Breakfast for two | Making espresso |
 |---|---|
 | ![Breakfast for two, time-lapse](docs/previews/breakfast.gif) | ![Making espresso, time-lapse](docs/previews/coffee.gif) |
 | [▶ breakfast.mp4](docs/videos/breakfast.mp4) · 816 s simulated | [▶ coffee.mp4](docs/videos/coffee.mp4) · 330 s simulated |
 | Collect two mugs and two bowls from three rooms, wait while a person fills them with randomly chosen food, then carry each filled vessel to the office desk (the dining-room table). | Twist out the portafilter, pour 32 grounds from a box, reinstall and lock it, put a cup under the spout, press power, then brew. |
+
+## Atomic skills and videos
+
+The fixed public vocabulary has **16 functions**, including generic waiting.
+Each link below opens a separate successful physical demonstration. Opening and
+closing are separate clips; all clips preserve normal playback speed.
+
+| Atomic function | Purpose | Video |
+|---|---|---|
+| `navigate` | Approach a target; transport a held object when a destination is supplied. | [Watch navigate](docs/videos/atomic/navigate.mp4) |
+| `pick` | Grasp and lift an object using a top-down approach. | [Watch pick](docs/videos/atomic/pick.mp4) |
+| `place` | Place the held object, release it, and withdraw. | [Watch place](docs/videos/atomic/place.mp4) |
+| `open_door` | Grasp a handle and open a hinged fixture. | [Watch open_door](docs/videos/atomic/open_door.mp4) |
+| `close_door` | Grasp a handle and close a hinged fixture. | [Watch close_door](docs/videos/atomic/close_door.mp4) |
+| `open_drawer` | Open a drawer with a top-down handle grasp. | [Watch open_drawer](docs/videos/atomic/open_drawer.mp4) |
+| `close_drawer` | Close a drawer with a top-down handle grasp. | [Watch close_drawer](docs/videos/atomic/close_drawer.mp4) |
+| `open_lid` | Open a hinged lid or remove a detachable lid. | [Watch open_lid](docs/videos/atomic/open_lid.mp4) |
+| `close_lid` | Close a hinged lid or reseat a detachable lid. | [Watch close_lid](docs/videos/atomic/close_lid.mp4) |
+| `push_button` | Press a button and withdraw. | [Watch push_button](docs/videos/atomic/push_button.mp4) |
+| `turn_lever` | Turn a rotary lever to the requested state. | [Watch turn_lever](docs/videos/atomic/turn_lever.mp4) |
+| `push_lever` | Push a sliding lever and withdraw. | [Watch push_lever](docs/videos/atomic/push_lever.mp4) |
+| `rotate_knob` | Rotate a knob to the requested state. | [Watch rotate_knob](docs/videos/atomic/rotate_knob.mp4) |
+| `insert` | Insert an already-held object into a receptacle and release. | [Watch insert](docs/videos/atomic/insert.mp4) |
+| `slide_oven_rack` | Slide an oven rack in or out when its path is clear. | [Watch slide_oven_rack](docs/videos/atomic/slide_oven_rack.mp4) |
+| `wait` | Advance simulated time; does not require an empty hand. | [Watch wait](docs/videos/atomic/wait.mp4) |
+
+**Validation (13 October 2026):** all 16 functions have successful physical demos
+in their tested scenes. These selected successes are not a dataset-wide success
+rate or a guarantee for every object/layout. The door clips demonstrate native
+cabinet/oven fixtures; opening the newly added room doors is not yet validated.
+A removable lid can remain held after opening. Waiting advances simulation time;
+it does not independently heat objects or mark a task successful.
+
+The [video provenance manifest](docs/videos/atomic/manifest.json) records the source
+run, call arguments, and duration for every clip. Videos are downloadable from their
+GitHub file pages if the browser does not play them inline.
+
+The active direction uses these fixed capabilities for new composite tasks and
+later VLA training. Coffee pouring and portafilter operations are legacy workflows,
+not additional functions in this fixed vocabulary.
 
 ## Why
 
@@ -157,10 +198,10 @@ for each skill, and check `report.json` for `"success": true`.
   VLA/direct coffee still needs machine events independent of demonstrator phase flags.
   See the [evaluation interfaces and commands](docs/policies.md#evaluating-vlm-planners)
   and [batch generation, collection, and Qwen evaluation](docs/policies.md#batch-generation-and-qwen-evaluation).
-- Composite tasks are validated on the seeds listed in [docs/tasks.md](docs/tasks.md); atomic
-  skills on the fixture and object listed there, not on every RoboCasa asset. 13 of the 14 skill
-  demonstrations pass reliably; the cabinet round trip is unreliable because the object is
-  released tilted on the shelf (see docs/tasks.md).
+- Legacy composite validation is described in [docs/tasks.md](docs/tasks.md). The latest
+  [16 atomic demonstrations](#atomic-skills-and-videos) each passed in their tested scene;
+  this does not establish reliability across all RoboCasa assets or validate every legacy
+  composite/round-trip task.
 
 ## Acknowledgments
 
