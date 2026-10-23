@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "episode_id": "clear_and_store_07_combined",
+  "task": "clear_and_store",
+  "variant": "combined",
+  "instruction": "Clear the bowls and cups from the dining table. Put the bowls in the kitchen cabinet and the cups in the drawer. Leave both storage compartments closed.",
+  "procedure": "open_both_then_store_then_close",
+  "scene": {
+    "seed": 7,
+    "kitchen_layout": 3,
+    "kitchen_style": 1,
+    "people": 3,
+    "object_counts": {
+      "bowl": 3,
+      "cup": 3
+    },
+    "asset_instance_set": "same_category_alternatives",
+    "furniture": {
+      "dining_set": {
+        "dx": 0.35,
+        "dy": 0.05,
+        "yaw_deg": 0
+      },
+      "sofa": {
+        "dx": 0.7,
+        "dy": 0.6,
+        "yaw_deg": 8
+      },
+      "coffee_table": {
+        "dx": 0.55,
+        "dy": 0.6,
+        "yaw_deg": 8
+      }
+    },
+    "forbidden_object_categories": [
+      "plate",
+      "flat_object"
+    ],
+    "minimum_heating_seconds": null
+  },
+  "goal_keys": [
+    "bowls_in_cabinet",
+    "cups_in_drawer",
+    "cabinet_closed",
+    "drawer_closed",
+    "empty_hand"
+  ],
+  "requirements": [
+    "multi_object_transfer",
+    "cabinet_interior_placement",
+    "drawer_interior_placement",
+    "shared_fixture_manipulation"
+  ],
+  "catalog_version": "fixed-atomic-v1",
+  "video_speedup": 1.0,
+  "dataset_role": "pilot_unassigned",
+  "initial_state_policy": "deterministic_setup_from_scene_config",
+  "validation_status": "not_executed",
+  "scene_spec_sha256": "a2e8c1a510c69adb0fee483002c56715deef65b6a2a620e4ee3bee9d815fb1cf"
+}

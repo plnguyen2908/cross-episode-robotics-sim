@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "episode_id": "unpack_and_sort_groceries_01_original",
+  "task": "unpack_and_sort_groceries",
+  "variant": "original",
+  "instruction": "Put all packaged drinks in the blue basket and all packaged snacks in the yellow basket. Place both filled baskets on the dining table. Leave unrelated objects where they are.",
+  "procedure": "fill_then_move_baskets",
+  "scene": {
+    "seed": 7,
+    "kitchen_layout": 1,
+    "kitchen_style": 1,
+    "people": 3,
+    "object_counts": {
+      "drink_bottle": 2,
+      "snack_box": 2,
+      "basket": 2
+    },
+    "asset_instance_set": "baseline",
+    "furniture": {},
+    "forbidden_object_categories": [
+      "plate",
+      "flat_object"
+    ],
+    "minimum_heating_seconds": null
+  },
+  "goal_keys": [
+    "drinks_in_blue_basket",
+    "snacks_in_yellow_basket",
+    "both_baskets_on_table",
+    "unrelated_unchanged",
+    "empty_hand"
+  ],
+  "requirements": [
+    "multi_object_transfer",
+    "basket_containment",
+    "loaded_basket_transport"
+  ],
+  "catalog_version": "fixed-atomic-v1",
+  "video_speedup": 1.0,
+  "dataset_role": "pilot_unassigned",
+  "initial_state_policy": "deterministic_setup_from_scene_config",
+  "validation_status": "not_executed",
+  "scene_spec_sha256": "a6973b38f91f8978078249eb7e9f0cb71d4711df753bf6eff2e1c33d21b7b4b4"
+}

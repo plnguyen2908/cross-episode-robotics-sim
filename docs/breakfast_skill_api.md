@@ -14,10 +14,11 @@ will not resolve the failure.
 
 ## Selecting a vessel
 
-- The public interface uses `asset_type`, `"Mug"` or `"Bowl"`. The oracle
-  selects a suitable instance during source navigation and keeps that instance
-  through pickup, brewing and placement. After serving, source navigation selects
-  another available instance. Start a new selection with source navigation.
+- The public interface accepts asset types. Pickup privately selects a matching
+  object visible in the current input cameras, independently of previous navigation.
+  Visibility is checked again on every pickup using occlusion-aware simulator
+  rendering. Instance IDs and segmentation are not sent to the planner.
+  Once grasped, that object's identity is preserved for transport and placement.
 - The grounds box is `CoffeeDosingBox` and uses dedicated no-argument skills.
   It is not selected through the cup/bowl arguments.
 
@@ -33,13 +34,13 @@ vessel transport, not unrestricted navigation to any named room or object.
 
 | destination | Supported vessel | Meaning and requirement |
 | --- | --- | --- |
-| `source` | Cup or bowl | Approach the vessel for surface pickup. Hand must be empty. |
+| `source` | Cup or bowl | Approach the object. May carry another object while approaching. |
 | `spout` | Cup | Carry that held cup to the machine. Also permits returning empty-handed to that same cup already ready under the spout. |
 | `home` | Cup | Carry that held cup to its recorded home counter spot. Its home must be known. |
 | `serving` | Cup or bowl | Carry that held vessel to its dining place setting. |
 
 Holding a grounds box does not satisfy a cup's transport precondition. Holding
-anything prevents `source` navigation in the current executor.
+another object is allowed during `source` navigation.
 
 Optional `dock` is an approach candidate index string (default `"0"`); it changes
 the approach, not the selected vessel. Use only indices listed in the schema.
@@ -52,29 +53,29 @@ this scene. `default` uses the vessel's configured serving position. Subsequent
 
 | Call arguments (plus vessel selector) | Requirement | Successful effect |
 | --- | --- | --- |
-| `pick(source="surface")` | Empty hand; matching source dock from `navigate(destination="source")` | Lift selected cup/bowl; leave it held. |
-| `pick(source="spout")` | Empty hand; matching spout dock; selected cup ready under spout | Extract and hold cup. For brewed coffee, wait for brewing to finish first. |
-| `place(destination="spout")` | Selected cup held; matching spout dock | Release cup under machine. Does not brew. |
-| `place(destination="home")` | Selected cup held; matching home dock | Release cup at its home counter. |
-| `place(destination="serving")` | Selected cup/bowl held; matching serving dock | Release vessel at dining setting. |
+| `pick(source="surface")` | Empty hand; matching object visible in current camera views | Lift selected cup/bowl; leave it held. |
+| `pick(source="spout")` | Empty hand; matching visible cup physically under spout | Extract and hold cup. |
+| `place(destination="spout")` | Selected cup held | Release cup under machine. Does not brew. |
+| `place(destination="home")` | Selected cup held | Release cup at its home counter. |
+| `place(destination="serving")` | Selected cup/bowl held | Release vessel at dining setting. |
 
 Pick and place do not navigate the base. Bowls support surface pickup and serving
-placement only. The selected vessel must match across navigate/pick/place.
+placement only. No previous navigation call is required. Visibility does not guarantee reachability: physical grasp or placement attempts may fail. Pickup may select a different visible type from the previous navigation target.
 
 ## No-argument skills
 
 | Function | Prerequisites | Successful effect |
 | --- | --- | --- |
 | `detach_portafilter` | Empty hand; portafilter seated/locked | Detach and support it on loading counter; hand empty. |
-| `pick_dosing_box` | Empty hand; portafilter detached | Hold grounds box. No grounds poured yet. |
+| `pick_dosing_box` | Empty hand; box visible | Hold grounds box. No grounds poured yet. |
 | `pour_grounds` | Grounds box held | Pour into detached portafilter, return box upright; box remains held. |
 | `place_dosing_box` | Grounds box held | Park and release box; hand empty. Does not pour. |
-| `attach_portafilter` | Empty hand; portafilter detached; grounds ready | Insert and lock portafilter, release; hand empty. |
+| `attach_portafilter` | Portafilter physically detached (empty or filled) | Insert and lock portafilter, release; hand empty. |
 | `press_power` | Empty hand | Press power button. Warmup is handled separately. |
-| `wait_until_ready` | Empty hand; machine powered | Wait for machine warmup. Does not start brewing. |
-| `press_brew` | Empty hand; machine ready; portafilter installed; grounds ready; cup ready under spout | Start brew cycle. |
-| `wait_until_brewed` | Empty hand; brew started | Wait for completed brew with cup under spout. Cup remains there. |
-| `wait_for_bowls` | Empty hand; requested bowls in kitchen | Wait for authored human filling event. Does not pick or serve. Only exposed in full breakfast. |
+| `wait_until_ready` | Machine powered; occupied hand allowed | Wait for machine warmup. Does not start brewing. |
+| `press_brew` | Empty hand | Physically press brew. The machine accepts a cycle only if its physical operating conditions hold. |
+| `wait_until_brewed` | Brew started; occupied hand allowed | Wait for completed brew with cup under spout. Cup remains there. |
+| `wait_for_bowls` | Requested bowls in kitchen; occupied hand allowed | Wait for authored human filling event. Does not pick or serve. Only exposed in full breakfast. |
 
 ## Local usage examples
 
@@ -134,9 +135,9 @@ to an enum for these two skills. Missing types return `target_not_found`.
 {"skill":"pick","arguments":{"asset_type":"Plate","source":"surface"}}
 ```
 
-A successful approach binds a private instance. A subsequent pick with a different
-type returns `target_type_mismatch`; pick does not navigate or silently switch
-instances. Generic pickup uses the existing annotated grasp planner and physical
+A previous approach does not restrict pickup. Any currently visible matching
+instance may be attempted with an empty hand. An off-camera target returns
+`target_not_visible`; pickup does not move the base. Generic pickup uses the existing annotated grasp planner and physical
 hold checks. Missing annotations, unreachable grasps and failed physical attempts
 return failure. Floor objects are approached near their actual position; floor
 pickup remains subject to reach and collision constraints. Generic object placement
@@ -184,3 +185,29 @@ Separately, `navigate(asset_type="Mug", destination="spout")` transports the
 selected held mug to the machine's spout (or returns empty-handed to its ready
 cup under the documented exception). Navigation does not detach the portafilter;
 that operation remains the separate `detach_portafilter` skill.
+
+## Dependency semantics and verification
+
+Attachment checks that the portafilter is physically detached; it does not check
+grounds or require an empty hand at the symbolic boundary. An occupied hand can
+still make the physical grasp fail. Button-press success means contact was made,
+not that coffee was brewed. Final task success still requires the actual goal.
+
+Regression coverage: `tests/test_skill_interface.py`,
+`tests/test_any_vessel.py`, and `tests/test_visibility.py`.
+These check tool admission and visibility; they are not claims that every visible
+object is physically graspable or that every action ordering completes the task.
+
+Run the physical dependency checks on a frozen example (choose idle GPUs):
+
+```bash
+ROBOCASA_DIR="$PWD/external/robocasa/robocasa" python -m scripts.test_skill_dependencies --case box --gpu 7
+ROBOCASA_DIR="$PWD/external/robocasa/robocasa" python -m scripts.test_skill_dependencies --case attach --gpu 7
+```
+
+The box case powers on, approaches and picks the box before detachment, waits
+while holding it, then approaches a mug while still carrying the box.
+The attachment case detaches and reattaches without adding grounds.
+Each run uses a unique `runs/skill_dependencies_*` folder and writes per-call
+results to `result.json`. A physical failure is reported as failure rather than
+treated as proof that the whole sequence works.

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "episode_id": "prepare_and_serve_meal_06_object_instances",
+  "task": "prepare_and_serve_meal",
+  "variant": "object_instances",
+  "instruction": "Run the microwave with the food container inside for at least 30 seconds. Bring it, the cold drink from the fridge to the dining table. Leave the microwave off and both appliance doors closed.",
+  "procedure": "heat_while_retrieving",
+  "scene": {
+    "seed": 7,
+    "kitchen_layout": 1,
+    "kitchen_style": 1,
+    "people": 3,
+    "object_counts": {
+      "food_container": 1,
+      "drink_bottle": 1
+    },
+    "asset_instance_set": "same_category_alternatives",
+    "furniture": {},
+    "forbidden_object_categories": [
+      "plate",
+      "flat_object"
+    ],
+    "minimum_heating_seconds": 30.0
+  },
+  "goal_keys": [
+    "food_heated_long_enough",
+    "all_meal_items_served",
+    "microwave_off",
+    "microwave_closed",
+    "fridge_closed",
+    "empty_hand"
+  ],
+  "requirements": [
+    "multi_object_transfer",
+    "fridge_retrieval",
+    "microwave_loading",
+    "microwave_controls",
+    "private_duration_tracking"
+  ],
+  "catalog_version": "fixed-atomic-v1",
+  "video_speedup": 1.0,
+  "dataset_role": "pilot_unassigned",
+  "initial_state_policy": "deterministic_setup_from_scene_config",
+  "validation_status": "not_executed",
+  "scene_spec_sha256": "865ccaee012b97dbfd9d53bc5289f1190d26f756f17cc051ea70bc655d9250f4"
+}

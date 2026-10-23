@@ -1,0 +1,70 @@
+task: unpack_and_sort_groceries
+seed: 4203
+count: 7
+base_layout:
+  rooms:
+  - 5
+  - 7
+  max_attempts: 100
+  loop_probability: 0.8
+fixed:
+  scene.people: 2
+controls:
+  execution_order:
+    procedure:
+      choices:
+      - drinks_first
+      - snacks_first
+  kitchen_layout:
+    scene.kitchen_layout:
+      choices:
+      - 1
+      - 3
+  object_instances:
+    scene.asset_instance_set:
+      choices:
+      - baseline
+      - same_category_alternatives
+  furniture_translation:
+    scene.furniture.dining_set.dx:
+      uniform:
+      - -0.2
+      - 0.2
+    scene.furniture.dining_set.dy:
+      uniform:
+      - -0.2
+      - 0.2
+  furniture_rotation:
+    scene.furniture.dining_set.yaw_deg:
+      uniform:
+      - -10
+      - 10
+  furniture_instances:
+    scene.furniture_instance_seed:
+      randint:
+      - 0
+      - 2147483647
+  appearance_theme:
+    scene.appearance.preset:
+      choices:
+      - warm_home
+      - cool_daylight
+      - sage_neutral
+  door_route:
+    room_route:
+      choices:
+      - default
+      - open_shortcut
+      - living_room_detour
+  object_color:
+    scene.appearance.object_rgb:
+      rgb_uniform:
+      - - 0.25
+        - 0.25
+        - 0.25
+      - - 0.8
+        - 0.8
+        - 0.8
+randomize_controls:
+  min_active: 0
+  max_active: 9

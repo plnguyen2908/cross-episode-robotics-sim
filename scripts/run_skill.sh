@@ -32,7 +32,8 @@ bread=(--recording "$data/skill_scenes/toaster_bread_initial"
        --asset lightwheel/sandwich_bread/SandwichBread005 --grasp-source surface)
 
 case "$skill" in
-  cross-room|cabinet-door|drawer|stove-knob|faucet|microwave-button|oven-rack) scene=("${honey[@]}") ;;
+  cross-room) scene=("${honey[@]/qualified/surface}") ;;
+  cabinet-door|drawer|stove-knob|faucet|microwave-button|oven-rack) scene=("${honey[@]}") ;;
   cabinet-transfer|drawer-loop|drawer-pick-place|oven-pick-place) scene=("${egg[@]}") ;;
   blender-lid) scene=("${egg[@]/qualified/molmo}") ;;
   toaster-lever|toaster-insertion) scene=("${bread[@]}") ;;
@@ -42,9 +43,9 @@ esac
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 interface=()
 case "$skill" in
-  cross-room|drawer-pick-place|cabinet-door|drawer|stove-knob|faucet|microwave-button|toaster-insertion|oven-rack|blender-lid)
+  cross-room|drawer-pick-place|cabinet-door|drawer|stove-knob|faucet|microwave-button|toaster-lever|toaster-insertion|oven-rack|blender-lid)
     interface=(--skill-interface) ;;
 esac
 mkdir -p "$(dirname "$output")"
-python -u -m cross_episode_sim.manipulation.robocasa "${scene[@]}" \
-  --approach-policy any-above-table "--$skill" --output "$output" "${interface[@]}" "$@"
+exec python -u -m cross_episode_sim.manipulation.robocasa "${scene[@]}" \
+  --approach-policy top-down "--$skill" --output "$output" "${interface[@]}" "$@"

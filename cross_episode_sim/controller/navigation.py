@@ -155,7 +155,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
 
     def record_camera_frames(self, frames):
         # Raw, unannotated head RGB is separate from the external review views.
-        self.head_writer.append_data(frames[2])
+        self.head_writer.append_data(frames[-1])
 
     def run(self):
         try:
@@ -264,16 +264,30 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                     if trajectory is not None:
                         break
                 if trajectory is None:
-                    raise RuntimeError(f'No actual-mesh-clear tuck path: {rejected}')
+                    # Conservative fixture boxes may enclose a just-released
+                    # door posture. A direct fold is eligible only after the
+                    # dense native sweep, including omitted robot self pairs.
+                    end = np.asarray([targets[n] for n in self.planner.names])
+                    count = max(2, int(np.ceil(np.max(np.abs(end-positions))/.01)))
+                    path = np.linspace(positions, end, count+1)[1:]
+                    try:
+                        self.preflight_empty_arm_trajectory(path)
+                    except RuntimeError as exc:
+                        rejected.append(str(exc))
+                        raise RuntimeError(f'No actual-mesh-clear tuck path: {rejected}') from exc
+                    trajectory = path
+                    self.record(empty_tuck_method='native-mesh checked joint interpolation')
             if rejected:
                 self.record(rejected_tuck_paths=rejected)
             dt = (
                 ceil(self.planner.dt * self.args.motion_slowdown / self.model.opt.timestep)
                 * self.model.opt.timestep
             )
-            for q in trajectory:
+            from cross_episode_sim.control.smooth_action import joint_commands
+            trajectory, durations = joint_commands(self, trajectory, dt, start=positions)
+            for q, sample_dt in zip(trajectory, durations):
                 self.data.ctrl[self.arm_aids] = q
-                self.tick(dt)
+                self.tick(float(sample_dt))
         else:
             starts = [float(self.data.joint(NS + name).qpos[0]) for name, _, _ in joints]
             steps = ceil(seconds / self.model.opt.timestep)
@@ -1149,7 +1163,9 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
 
     def navigate(self, goal, carrying, face=None):
         if getattr(self, '_public_skill_navigation', None) is False:
-            raise RuntimeError('This atomic skill cannot navigate; call navigate explicitly')
+            from cross_episode_sim.skills.door_motion import local_reposition_allowed
+            if not local_reposition_allowed(self, goal, carrying):
+                raise RuntimeError('This atomic skill cannot navigate; call navigate explicitly unless performing released, empty-hand local door repositioning')
         self._public_navigation_goal = (list(goal), face)
         label = (
             "to fridge handle"
@@ -1190,8 +1206,31 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                         blended_segments=None if segments is None else [
                             dict(kind=s.kind, end=s.end.tolist(),
                                  duration_s=s.duration) for s in segments])
+        if segments and getattr(self, 'smooth_waypoint_experiment', False):
+            from cross_episode_sim.control.smooth_waypoints import smooth_route
+            before = len(segments)
+            smooth_started = time.monotonic()
+            on_floor = self.nav_map_filter(goal)
+            clear = self.route_pose_clear(carrying)
+            segments, accepted = smooth_route(segments, lambda p: on_floor(p) and clear(p))
+            self.record(smooth_route=dict(accepted=accepted, before=before, after=len(segments),
+                                         validation_seconds=time.monotonic()-smooth_started))
+        if getattr(self, 'forward_curve_experiment', False):
+            from cross_episode_sim.control.forward_route import forward_route
+            from cross_episode_sim.control.smooth_action import components_enabled
+            on_floor = self.nav_map_filter(goal)
+            clear = self.route_pose_clear(carrying)
+            segments = forward_route(path, lambda p: on_floor(p) and clear(p),
+                                     nav_speed=self.args.nav_speed, turn_speed=self.args.turn_speed,
+                                     reverse_first=bool((carrying or self.args.kitchen) and self.navigation_undock()),
+                                     straight_corners=bool(components_enabled(self)))
+            if segments is None:
+                raise RuntimeError('No collision-free forward-facing route')
+            self.record(forward_route_segments=[dict(kind=s.kind, duration_s=s.duration) for s in segments])
         if requires_blended and segments is None:
             raise RuntimeError('A* route requires a clear blended departure; refusing an unchecked turn')
+        from cross_episode_sim.control.smooth_action import navigation_segments
+        segments = navigation_segments(self, segments)
         execution_started = time.monotonic()
         start, previous = self.base_pose(), self.base_pose()
         reference = np.linalg.inv(self.tcp()) @ self.bread_pose()
@@ -1202,7 +1241,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
         max_reverse_error = 0.0
         holonomic_distance = max_tracking = 0.0
 
-        def check_motion(driving, reversing, holonomic=False):
+        def check_motion(driving, reversing, holonomic=False, sample_dt=.04):
             nonlocal \
                 previous, \
                 holonomic_distance, \
@@ -1218,6 +1257,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
             displacement = actual[:2] - previous[:2]
             travelled = float(np.linalg.norm(displacement))
             distance += travelled
+            previous_yaw = previous[2]
             previous = actual
             if driving:
                 # Forward is the CHASSIS axis, not the head camera's optical axis.
@@ -1226,7 +1266,10 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                 # conflates "where the body is going" with "where the head looks"
                 # and this gate fails on correct behaviour. At pan = 0 the two are
                 # identical, so re-basing does not loosen the existing numbers.
-                forward = np.array([np.cos(actual[2]), np.sin(actual[2])], dtype=float)
+                # Displacement spans the sample interval: use its midpoint
+                # heading so turning itself is not miscounted as sideways slip.
+                mid_yaw = .5 * (previous_yaw + actual[2])
+                forward = np.array([np.cos(mid_yaw), np.sin(mid_yaw)], dtype=float)
                 along = float(np.dot(displacement, forward))
                 sideways = float(displacement[0] * forward[1] - displacement[1] * forward[0])
                 lateral_distance += abs(sideways)
@@ -1235,7 +1278,7 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                 # settle the base sideways by about a millimetre even though the
                 # commanded x/y is stationary.  Judge heading once meaningful
                 # along-track motion begins; total lateral drift is bounded below.
-                if abs(along) / 0.04 > 0.02:
+                if abs(along) / sample_dt > 0.02:
                     alignment = (-along if reversing else along) / travelled
                     angle = float(np.degrees(np.arccos(np.clip(alignment, -1, 1))))
                     if reversing:
@@ -1261,10 +1304,10 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
             # Start from the measured pose, as the primitive executor does, so a
             # few millimetres of settling never become a commanded correction.
             segment.start = self.base_pose()
-            moving = segment.length > 1e-6
+            moving = segment.kind != "turn" and segment.length > 1e-6
             rotating = segment.rotation > 1e-3
             reversing = segment.kind == "reverse"
-            straight = segment.kind in ("drive", "reverse")
+            straight = segment.kind in ("drive", "reverse", "forward_curve")
             holonomic = moving and not straight
             self.stage = (
                 "reverse undock " if reversing
@@ -1274,18 +1317,28 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
                 else "turn in place "
             ) + label
             turns += int(not moving and rotating)
-            for u in np.linspace(0, 1, ceil(segment.duration / 0.04) + 1):
-                target = segment.pose(u)
+            from cross_episode_sim.control.smooth_action import enabled
+            control_dt = (.02 if enabled(self) else
+                          getattr(self, "forward_curve_control_dt", .02)
+                          if segment.kind == "forward_curve" else .04)
+            for u in np.linspace(0, 1, ceil(segment.duration / control_dt) + 1):
+                target = segment.pose(u).copy()
+                # Equivalent headings differing by 2π must not command a full
+                # revolution when a curve follows a turn across the ±π seam.
+                actual_yaw=float(self.base_pose()[2])
+                target[2]=actual_yaw+np.arctan2(np.sin(target[2]-actual_yaw),
+                                               np.cos(target[2]-actual_yaw))
                 for name, value in zip(["base_x", "base_y", "base_theta"], target):
                     self.data.actuator(NS + name + "_act").ctrl[0] = value
-                self.tick(0.04)
-                check_motion(straight, reversing, holonomic)
+                self.tick(control_dt)
+                check_motion(straight, reversing, holonomic, control_dt)
                 max_tracking = max(max_tracking, float(
                     np.linalg.norm(self.base_pose()[:2] - target[:2])))
             wait_until_ready(self, .8, lambda: base_ready(self, segment.end),
                              label="navigation_endpoint",
                              after_step=lambda: check_motion(straight, reversing, holonomic))
-            yaw_error = abs(self.base_pose()[2] - segment.end[2])
+            yaw_delta=self.base_pose()[2]-segment.end[2]
+            yaw_error = abs(np.arctan2(np.sin(yaw_delta),np.cos(yaw_delta)))
             self.record(
                 base_xy_yaw=self.base_pose().tolist(),
                 heading_error_deg=float(np.degrees(yaw_error)),
@@ -1323,6 +1376,12 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
             else:
                 turns += 1
                 duration = max(3.0, angle / self.args.turn_speed)
+            from cross_episode_sim.control.smooth_action import enabled, factor
+            if enabled(self) and not reversing:
+                original_duration = duration
+                duration /= factor(self, 'navigation')
+                self.record(smooth_action=dict(kind='navigation', original_duration_s=original_duration,
+                                              duration_s=duration))
             # Loads can leave the measured base a few millimetres from the
             # nominal waypoint after a turn.  Starting the next ramp at the old
             # nominal point commands a short sideways correction.  Begin at the
@@ -1369,7 +1428,8 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
             turn_translation_drift_m=turn_drift,
             turns=turns,
             final_yaw_rad=float(self.base_pose()[2]),
-            base_motion="blended" if segments is not None else "turn_drive",
+            base_motion=("forward_curve" if getattr(self, "forward_curve_experiment", False)
+                         else "blended" if segments is not None else "turn_drive"),
             holonomic_distance_m=holonomic_distance,
             max_base_tracking_error_m=max_tracking,
         )
@@ -1452,6 +1512,8 @@ class NavigationTransfer(DoorOperations, FridgeTransfer):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
+    from cross_episode_sim.control.smooth_action import add_arguments
+    add_arguments(p)
     p.add_argument('--robot', default='rby1m',
                    choices=('rby1m', 'franka_tidybot'))
     p.add_argument("--assets", type=Path, required=True)

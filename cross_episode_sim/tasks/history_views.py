@@ -1,4 +1,4 @@
-"""Fixed whole-room views plus the live robot camera for cross-episode videos."""
+"""Onboard video rendering; legacy room cameras retained for diagnostic tools only."""
 import mujoco
 import numpy as np
 from PIL import Image, ImageDraw
@@ -52,22 +52,25 @@ def room_cameras(model, data):
 
 
 def render_history_views(controller, *, record_raw=False):
-    """2x2 synchronized panels, with no privileged stage/goal overlays."""
-    if not hasattr(controller, '_whole_room_cameras'):
-        controller._whole_room_cameras = room_cameras(controller.model, controller.data)
-    frames, raw = [], []
-    cameras = [*controller._whole_room_cameras, controller.profile.namespace + controller.profile.head_camera]
-    for name, camera in zip((*ROOMS, 'robot wrist camera' if controller.profile.head_camera == 'wrist_cam' else 'robot head camera'), cameras):
-        controller.renderer.update_scene(controller.data, camera=camera,
-                                        scene_option=getattr(controller, 'render_scene_option', None))
-        raw.append(controller.renderer.render().copy())
-        frame = Image.fromarray(raw[-1])
-        draw = ImageDraw.Draw(frame)
-        draw.rectangle((0, 0, frame.width, 22), fill='black')
-        draw.text((8, 5), name, fill='white')
+    """Two rows: navigation RGB/depth above wrist RGB/depth at one state."""
+    from cross_episode_sim.robot.observations import render_onboard_observations, depth_rgb
+    observations=render_onboard_observations(controller.renderer,controller.data,controller.profile,
+                                            getattr(controller,'render_scene_option',None))
+    controller.latest_navigation_depth_m=observations['navigation_depth_m']
+    controller.latest_wrist_depth_m=observations['wrist_depth_m']
+    frames=[]
+    raw=[observations['navigation_rgb'],observations['wrist_rgb']]
+    panels=[raw[0],depth_rgb(observations['navigation_depth_m']),raw[1],depth_rgb(observations['wrist_depth_m'])]
+    for name,pixels in zip(('Navigation RGB','Navigation depth | 0-8 m | dark=near','Wrist RGB','Wrist depth | 0-8 m | dark=near'),panels):
+        frame=Image.fromarray(pixels)
+        draw=ImageDraw.Draw(frame);draw.rectangle((0,0,frame.width,22),fill='black');draw.text((8,5),name,fill='white')
         frames.append(np.asarray(frame))
     if record_raw:
-        # Existing recorder hooks expect the first-person camera at index 2.
-        controller.record_camera_frames([raw[0], raw[1], raw[3]])
-    return np.concatenate((np.concatenate(frames[:2], axis=1),
-                           np.concatenate(frames[2:], axis=1)), axis=0)
+        # Preserve the existing two-RGB callback contract for consumers.
+        controller.record_camera_frames(raw)
+        if hasattr(controller,'record_navigation_depth'):
+            controller.record_navigation_depth(observations['navigation_depth_m'],observations['simulation_time'])
+        if hasattr(controller,'record_wrist_depth'):
+            controller.record_wrist_depth(observations['wrist_depth_m'],observations['simulation_time'])
+    return np.concatenate([np.concatenate(frames[:2],axis=1),
+                           np.concatenate(frames[2:],axis=1)],axis=0)

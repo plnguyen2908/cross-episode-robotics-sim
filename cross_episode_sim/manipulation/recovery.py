@@ -132,6 +132,8 @@ class RecoveringManipulation(ThinEdgeAccessMixin, GraspQualification):
         except RuntimeError as exc:
             if str(exc)!='No annotated grasp passed robot reachability and collision checks':raise
             history.append(dict(stance=self.base_pose().tolist(),error=str(exc)))
+        if getattr(self, '_public_skill_navigation', None) is False:
+            raise RuntimeError('Grasp unreachable at current dock; call navigate with another dock before retrying pick')
         if getattr(self,'_recovery_exhausted',False):raise RuntimeError('Saved grasp plans exhausted after stance recovery')
         self._recovery_exhausted=True
         self.tuck_for_navigation()

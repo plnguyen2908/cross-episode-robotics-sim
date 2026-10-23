@@ -191,7 +191,7 @@ def main():
     labels = {task: f'History {i+1} (given): {task}' for i, task in enumerate(order)}
     labels['full_breakfast'] = 'Current (to solve): breakfast with coffee'
     names = {order[0]: 'history_1', order[1]: 'history_2', 'full_breakfast': 'current'}
-    (out/'run_manifest.json').write_text(json.dumps(dict(seed=args.seed, layout_profile=args.layout_profile, history_video_layout='wall_corners_plus_robot_2x2_v3', prepare_only=args.prepare_only, pour_step_deg=args.pour_step_deg,
+    (out/'run_manifest.json').write_text(json.dumps(dict(seed=args.seed, layout_profile=args.layout_profile, history_video_layout='onboard_navigation_wrist_1x2_v1', prepare_only=args.prepare_only, pour_step_deg=args.pour_step_deg,
                                                        portafilter_step_deg=args.portafilter_step_deg,
                                                        fail_fast=args.fail_fast,
                                                        skill_interface_required=True, episodes={

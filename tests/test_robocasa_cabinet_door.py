@@ -48,6 +48,7 @@ class CabinetExportTest(unittest.TestCase):
 
     def test_blocked_handle_candidate_tries_next_before_execution(self):
         check = CabinetDoorTest.__new__(CabinetDoorTest)
+        check.adaptive_motion_settling = False
         check.embodiment = Mock()
         check.profile = SimpleNamespace(gripper_close=0.)
         check.embodiment.planner_tool_offset.return_value = 0.
@@ -172,6 +173,42 @@ class CabinetExportTest(unittest.TestCase):
         with self.assertRaises(HingePlanningError):
             check.plan_and_move('pull cabinet open', np.eye(4), hinge_target=1.5)
         check.planner.plan.assert_not_called()
+        check.tick.assert_not_called()
+
+    def test_local_contact_path_checks_interior_self_collision(self):
+        from cross_episode_sim.fixtures.cabinet_door import HingePlanningError
+        check = CabinetDoorTest.__new__(CabinetDoorTest)
+        check.planner = SimpleNamespace(
+            self_clearance=lambda q: -.001 if .04 < q[0] < .06 else .02)
+        with self.assertRaises(HingePlanningError):
+            check.local_contact_path(np.zeros(7), np.array([.1, 0, 0, 0, 0, 0, 0]))
+
+    def test_local_contact_path_has_bounded_steps_and_exact_endpoint(self):
+        check = CabinetDoorTest.__new__(CabinetDoorTest)
+        check.planner = SimpleNamespace(self_clearance=lambda q: .02)
+        start = np.zeros(7)
+        target = np.array([.13, -.03, 0, 0, 0, 0, 0])
+        path = check.local_contact_path(start, target)
+        self.assertLessEqual(np.max(np.abs(np.diff(np.vstack([start, path]), axis=0))), .025)
+        np.testing.assert_allclose(path[-1], target)
+
+    def test_withdrawal_fallback_must_pass_native_swept_validation(self):
+        check = CabinetDoorTest.__new__(CabinetDoorTest)
+        check.load_world = Mock()
+        check.model = SimpleNamespace(jnt_qposadr=np.array([0]),
+                                     joint=lambda name: SimpleNamespace(id=0))
+        check.data = SimpleNamespace(qpos=np.array([0.]))
+        check.planner = Mock(names=['joint'])
+        check.planner.plan.side_effect = RuntimeError('conservative box blocked')
+        check.embodiment = Mock()
+        check.embodiment.planner_tool_offset.return_value = 0.
+        check.nearby_ik = Mock(return_value=np.array([.1]))
+        check.local_contact_path = Mock(return_value=[np.array([.1])])
+        check.validate_door_path = Mock(side_effect=RuntimeError('native collision'))
+        check.tick = Mock()
+        with self.assertRaisesRegex(RuntimeError, 'native collision'):
+            check.plan_and_move('withdraw from cabinet handle', np.eye(4))
+        check.validate_door_path.assert_called_once()
         check.tick.assert_not_called()
 
     def test_missing_door_is_explicit_error(self):

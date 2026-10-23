@@ -814,13 +814,35 @@ class PhysicalReorderCheck(AnnotatedGraspMixin, NavigationTransfer):
             path = self.plan_contact_path(stage, pose)
         addresses = [self.model.jnt_qposadr[self.model.joint(NS+n).id] for n in self.planner.names]
         bias = np.clip(self.data.ctrl[self.arm_aids] - self.data.qpos[addresses], -.08, .08)
-        for q in path:
+        contact_dt = .32
+        if getattr(self, 'smooth_waypoint_experiment', False):
+            from cross_episode_sim.control.smooth_waypoints import checked_contact_samples
+            path, contact_dt, accepted = checked_contact_samples(self, path)
+            self.record(smooth_contact=dict(accepted=accepted, samples=len(path), dt=contact_dt))
+        from cross_episode_sim.control.smooth_action import joint_commands
+        path, durations = joint_commands(self, path, contact_dt, contact=True)
+        for q, contact_dt in zip(path, durations):
             self.data.ctrl[self.arm_aids] = q + bias
-            self.tick(.32)
+            self.tick(float(contact_dt))
             if not getattr(self, 'drop_only_grasp', False) and self.report['max_unintended_robot_penetration_m'] > .003:
                 raise RuntimeError(f'Physical collision in contact move: {stage}')
             actual = self.data.qpos[addresses]
-            bias = np.clip(bias + .5*(q-actual), -.08, .08)
+            bias = np.clip(bias + (1.-.5**(contact_dt/.32))*(q-actual), -.08, .08)
+        from cross_episode_sim.control.smooth_action import fast
+        if fast(self) and len(path):
+            from cross_episode_sim.control.timing import arm_ready
+            # Compressed movement gives the gravity/contact bias integrator
+            # less time. Finish at the same checked endpoint with measured
+            # feedback; do not accept a larger TCP error or move the target.
+            for _ in range(30):
+                if arm_ready(self, pose, position_tolerance=.005):
+                    break
+                actual = self.data.qpos[addresses]
+                bias = np.clip(bias + (1.-.5**(.02/.32))*(path[-1]-actual), -.08, .08)
+                self.data.ctrl[self.arm_aids] = self.bounded_arm_command(path[-1]+bias)
+                self.tick(.02)
+                if not getattr(self, 'drop_only_grasp', False) and self.report['max_unintended_robot_penetration_m'] > .003:
+                    raise RuntimeError(f'Physical collision in contact endpoint feedback: {stage}')
         settle_arm(self, .4, pose)
         error = float(np.linalg.norm(self.tcp()[:3,3]-pose[:3,3]))
         self.record(contact_method='actual mesh checked IK and joint feedback',tcp_error_m=error)
@@ -833,7 +855,7 @@ class PhysicalReorderCheck(AnnotatedGraspMixin, NavigationTransfer):
             raise RuntimeError(f'Contact servo tracking error: {error:.4f} m at {stage}')
 
     def move(self, stage, pose):
-        if stage in ('lift bread vertically', 'lift bread') or (
+        if stage in ('lift bread vertically', 'lift bread', 'withdraw held object from compartment') or (
             self.source == self.fridge and stage in ('lower onto native counter', 'withdraw from counter object')
         ):
             # Contact extraction must preserve the validated grasp posture on

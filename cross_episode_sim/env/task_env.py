@@ -39,7 +39,7 @@ class TaskEnv(gym.Env):
         self,
         task: str = "breakfast",
         output_root: str | Path = "runs/env",
-        cameras: tuple[str, ...] = ("robot_0/wrist_cam",),
+        cameras: tuple[str, ...] = ("robot_0/navigation_cam", "robot_0/wrist_cam"),
         image_size: tuple[int, int] = (224, 224),
         control_dt: float = CONTROL_DT,
         max_steps: int = 25 * 60 * 30,
@@ -48,6 +48,8 @@ class TaskEnv(gym.Env):
         super().__init__()
         self.spec_: TaskSpec = TASKS[task]
         self.output_root = Path(output_root)
+        from cross_episode_sim.robot.cameras import validate_onboard_cameras
+        validate_onboard_cameras(cameras)
         self.cameras = tuple(cameras)
         self.image_size = image_size
         self.control_dt = control_dt

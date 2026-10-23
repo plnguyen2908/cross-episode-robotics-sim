@@ -1,9 +1,9 @@
 """One native passive RoboCasa cabinet hinge, operated by physical finger contact."""
 import copy
 import json
-from pathlib import Path
 import traceback
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import mujoco
 import numpy as np
@@ -63,7 +63,7 @@ class CabinetDoorTest(CrossRoomManipulation):
         assert not any(self.model.actuator_trnid[a, 0] == self.door_joint
                        and self.model.actuator_trntype[a] == mujoco.mjtTrn.mjTRN_JOINT
                        for a in range(self.model.nu))
-        self.args.motion_slowdown = 4.
+        self.args.motion_slowdown = 1. if getattr(args, 'fixed_atomic_interface', False) else 4.
 
     def stage_record(self, metrics):
         item = super().stage_record(metrics)
@@ -74,7 +74,7 @@ class CabinetDoorTest(CrossRoomManipulation):
         return 'cabinet door'
 
     def interaction_label(self):
-        return 'cabinet handle'
+        return ('door panel push' if getattr(self, '_door_push', False) else 'cabinet handle')
 
     def gaze_target(self):
         if hasattr(self, 'handle_geom'):
@@ -127,9 +127,12 @@ class CabinetDoorTest(CrossRoomManipulation):
             other, robot = (b, na) if ra else (a, nb)
             if (self.model.body(other).name or '').startswith('floor_'):
                 continue
-            if other in self.handle_bids and (self.embodiment.is_finger(robot) or
-                    robot in {self.profile.namespace+'gripper/'+side+'_follower'
-                              for side in ('left', 'right')}):
+            intended = (robot.endswith(('/left_pad', '/right_pad'))
+                        if getattr(self, '_door_push', False)
+                        else self.embodiment.is_finger(robot) or robot in {
+                            self.profile.namespace+'gripper/'+side+'_follower'
+                            for side in ('left', 'right')})
+            if other in self.handle_bids and intended:
                 continue
             return dict(bodies=[na, nb], depth_m=-float(c.dist))
         depth = self.robot_self_penetration(data)
@@ -142,7 +145,24 @@ class CabinetDoorTest(CrossRoomManipulation):
         self.arm_aids = self.actuator_ids(self.planner.names)
         self.load_world()
 
+    def before_step(self):
+        super().before_step()
+        if getattr(self, '_door_push', False):
+            from cross_episode_sim.fixtures.door_push import pad_force
+            self._panel_push_force_peak = max(getattr(self, '_panel_push_force_peak', 0.),
+                                             pad_force(self, self.handle_geom))
+
     def plan_and_move(self, stage, pose, hinge_target=None):
+        if stage == 'push cabinet closed' and getattr(self, 'base_assisted_handle_close', False):
+            from cross_episode_sim.fixtures.base_articulation import move_contact
+            return move_contact(self, stage, pose, hinge_target,
+                                speed=getattr(self, 'contact_base_speed', .08))
+        if (stage == 'push door panel open' or (stage == 'push door panel closed' and
+                getattr(self, 'base_assisted_close', False))) and getattr(self, 'base_assisted_articulation', True):
+            from cross_episode_sim.fixtures.base_articulation import move_contact
+            return move_contact(self, stage, pose, hinge_target,
+                                speed=getattr(self, 'contact_base_speed', .24),
+                                follow_arm=not getattr(self, 'fixed_arm_panel_push', False))
         self.stage = stage
         self.load_world()
         addresses = [self.model.jnt_qposadr[self.model.joint('robot_0/'+n).id]
@@ -151,33 +171,107 @@ class CabinetDoorTest(CrossRoomManipulation):
         cached = getattr(self, '_door_plans', {}).pop(stage, None)
         if cached is not None:
             path = cached
+            method = 'cached validated path'
         elif hinge_target is None:
             goal = list(pose[:3, 3]-[0, 0, self.embodiment.planner_tool_offset()]) + list(
                 Rotation.from_matrix(pose[:3, :3]).as_quat(scalar_first=True))
-            path = self.planner.plan(current.tolist(), goal)
+            try:
+                path = self.planner.plan(current.tolist(), goal)
+                method = 'cuRobo'
+            except RuntimeError:
+                if stage != 'withdraw from cabinet handle':
+                    raise
+                # Conservative fixture boxes can reject the just-released
+                # handle pose. A short empty-hand escape is still eligible
+                # only if local IK and the native swept checks below pass.
+                q = self.withdrawal_ik(pose, current)
+                path = self.local_contact_path(current, q)
+                method = 'native-mesh checked local withdrawal'
         else:
             try:
                 q = self.nearby_ik(pose, current, trust_radius=.4, preserve_self_clearance=True)
-                path = self.planner.plan_joints(current.tolist(), q)
+                if getattr(self.args, 'fixed_atomic_interface', False):
+                    # Small contact strokes already have a continuous local IK
+                    # branch. Sweep-check it below instead of invoking a global
+                    # optimizer for each centimetre of hinge/rack motion.
+                    path = self.local_contact_path(current, q)
+                    method = 'local IK with swept collision checks'
+                else:
+                    path = self.planner.plan_joints(current.tolist(), q)
+                    method = 'cuRobo'
             except RuntimeError as exc:
                 # A free pose plan can leave the hinge arc and pull the hand off
                 # the handle even if its endpoint is correct. Do not execute it.
                 self.record(hinge_local_plan_blocked=str(exc))
                 raise HingePlanningError(str(exc)) from exc
-        self.validate_door_path(path, current, hinge_target=hinge_target)
+        try:
+            self.validate_door_path(path, current, hinge_target=hinge_target)
+        except RuntimeError as exc:
+            if hinge_target is not None:
+                # Regrasp is safe only for a pre-execution planning rejection.
+                # Execution/contact failures below must still fail the skill.
+                raise HingePlanningError(str(exc)) from exc
+            if stage != 'withdraw from cabinet handle' or method.startswith('native-mesh'):
+                raise
+            q = self.withdrawal_ik(pose, current)
+            path = self.local_contact_path(current, q)
+            method = 'native-mesh checked local withdrawal'
+            self.validate_door_path(path, current)
         dt = max(.04, self.planner.dt*self.args.motion_slowdown)
-        for q in path:
+        from cross_episode_sim.control.smooth_action import joint_commands
+        path, durations = joint_commands(self, path, dt, contact=(hinge_target is not None or bool(getattr(self, 'articulating', False))
+                        or stage.startswith(('press ', 'contact ', 'push '))), start=current)
+        for q, sample_dt in zip(path, durations):
             self.data.ctrl[self.arm_aids] = self.bounded_arm_command(q)
-            self.tick(dt)
+            self.tick(float(sample_dt))
             bad = self.door_collision(self.data)
             if bad:
                 raise RuntimeError(f'Cabinet execution collision: {bad}')
-        self.tick(.15)
+        from cross_episode_sim.control.timing import settle_arm
+        # Intermediate hinge targets are tracking checkpoints, not releases.
+        # Requiring zero joint velocity here stops every three-degree stroke.
+        if getattr(self, '_hinge_continuation', False):
+            from cross_episode_sim.control.timing import wait_until_ready
+            wait_until_ready(self, .15,
+                lambda: np.linalg.norm(self.tcp()[:3, 3]-pose[:3, 3]) <= .005,
+                label='hinge_tracking')
+        else:
+            settle_arm(self, .15, pose, position_tolerance=.005)
         error = float(np.linalg.norm(self.tcp()[:3, 3]-pose[:3, 3]))
         self.record(door_angle_deg=float(np.degrees(self.angle())), tcp_error_m=error,
-                    handle_contacts=self.handle_contacts(), arm_planner='cuRobo')
+                    handle_contacts=self.handle_contacts(), arm_planner=method)
+        if (error > .015 and stage == 'withdraw from cabinet handle'
+                and getattr(self, '_door_push', False) and not getattr(self, '_panel_correcting', False)):
+            q = self.nearby_ik(pose, self.data.qpos[addresses].copy(), trust_radius=.4,
+                               preserve_self_clearance=True)
+            correction = self.local_contact_path(self.data.qpos[addresses].copy(), q)
+            self.validate_door_path(correction, self.data.qpos[addresses].copy())
+            self.record(panel_withdrawal_local_correction=True, original_error_m=error)
+            self._door_plans[stage] = correction
+            self._panel_correcting = True
+            try:
+                return self.plan_and_move(stage, pose, hinge_target=hinge_target)
+            finally:
+                self._panel_correcting = False
         if error > .015:
             raise RuntimeError(f'Cabinet TCP tracking error: {error:.4f} m')
+
+    def withdrawal_ik(self, pose, current):
+        """Allow an empty-hand wrist unwind beyond the small contact-step box."""
+        for radius in (.5, 1.5):
+            try:
+                return self.nearby_ik(pose, current, trust_radius=radius,
+                                      preserve_self_clearance=True)
+            except RuntimeError:
+                if radius == 1.5:
+                    raise
+
+    def local_contact_path(self, current, target):
+        count = max(2, int(np.ceil(np.max(np.abs(np.asarray(target)-current))/.025)))
+        path = np.linspace(current, target, count+1)[1:]
+        if any(self.planner.self_clearance(q.tolist()) < .001 for q in path):
+            raise HingePlanningError('Local contact path lacks padded self clearance')
+        return path
 
     def validate_door_path(self, path, current, hinge_target=None, initial_qpos=None):
         """Check a candidate in scratch physics without moving the live robot."""
@@ -213,24 +307,34 @@ class CabinetDoorTest(CrossRoomManipulation):
     def plan_handle_grasp(self, current, goal, grasp):
         return self.planner.plan(current, goal)
 
-    def grasp_handle(self):
+    def handle_grasp_candidates(self, handle):
+        rolls = (True, False) if getattr(self, 'prefer_flipped_handle', False) else (False, True)
+        for height, flipped in ((h, roll) for h in self.handle_offsets for roll in rolls):
+            for pitch in getattr(self,'handle_pitch_candidates',(0.,)):
+                local = np.eye(4)
+                local[:3, :3] = Rotation.from_euler('x',pitch,degrees=True).as_matrix() @ np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]])
+                if flipped:
+                    local[:3, :3] = local[:3, :3] @ np.diag([-1., -1., 1.])
+                for yaw in getattr(self, 'handle_yaw_candidates', (0.,)):
+                    angled = local.copy()
+                    angled[:3, :3] = Rotation.from_euler('z', yaw, degrees=True).as_matrix() @ local[:3, :3]
+                    angled[:3, 3] = Rotation.from_euler('z', yaw, degrees=True).apply([0., -.008, 0.])
+                    angled[2, 3] = height
+                    yield height, flipped, handle @ angled
+
+    def grasp_handle(self, _refresh_attempt=0):
         self.articulating = False
         self.open_handle_gripper()
-        self.tick(.5)
+        from cross_episode_sim.control.timing import wait_for_open_gripper
+        wait_for_open_gripper(self, .5)
         self.rebuild_planner()
         handle = self.handle_pose()
+        planned_angle = self.angle()
         current = [float(self.data.joint('robot_0/'+n).qpos[0]) for n in self.planner.names]
         rejected = []
         # Plan the final grasp first, then solve the pregrasp on that same IK
         # branch. A separately planned pregrasp can trap the wrist at its limit.
-        rolls = (True, False) if getattr(self, 'prefer_flipped_handle', False) else (False, True)
-        for height, flipped in ((h, roll) for h in self.handle_offsets for roll in rolls):
-            local = np.eye(4)
-            local[:3, :3] = np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]])
-            if flipped:
-                local[:3, :3] = local[:3, :3] @ np.diag([-1., -1., 1.])
-            local[:3, 3] = [0., -.008, height]
-            grasp = handle @ local
+        for height, flipped, grasp in self.handle_grasp_candidates(handle):
             pre = grasp.copy(); pre[:3, 3] -= self.handle_standoff*grasp[:3, 2]
             pre[:3, :3] = Rotation.from_rotvec(
                 self.data.xaxis[self.door_joint]*(-self.handle_unwind_angle())).as_matrix() @ pre[:3, :3]
@@ -239,6 +343,9 @@ class CabinetDoorTest(CrossRoomManipulation):
             try:
                 grasp_path = self.plan_handle_grasp(current, goal, grasp)
                 grasp_q = np.asarray(grasp_path[-1])
+                target=getattr(self,'requested_hinge_target',None)
+                if target is not None:
+                    self.preflight_hinge_ik(grasp,grasp_q,target)
                 pre_goal = list(pre[:3, 3]-[0, 0, self.embodiment.planner_tool_offset()]) + list(
                     Rotation.from_matrix(pre[:3, :3]).as_quat(scalar_first=True))
                 withdrawal = self.planner.plan(grasp_q.tolist(), pre_goal)
@@ -276,43 +383,161 @@ class CabinetDoorTest(CrossRoomManipulation):
         else:
             raise RuntimeError(f'No complete cabinet handle approach: {rejected}')
         self.plan_and_move('reach cabinet handle', pre)
+        # A passive door can continue swinging during the free-space reach.
+        # The cached contact approach is valid only for the measured handle
+        # pose used to plan it; refresh instead of driving into a moving bar.
+        if abs(self.angle()-planned_angle) > np.radians(1.):
+            self._door_plans = {}
+            if _refresh_attempt >= 2:
+                raise RuntimeError('Cabinet handle kept moving during approach; contact plan invalidated')
+            self.record(handle_approach_refreshed=True,
+                        door_drift_deg=float(np.degrees(self.angle()-planned_angle)))
+            return self.grasp_handle(_refresh_attempt=_refresh_attempt+1)
         self.plan_and_move('approach cabinet handle', grasp)
         self.stage = 'close gripper on cabinet handle'
         self.embodiment.command_gripper(self.data, self.profile.gripper_close)
-        self.tick(1.)
+        from cross_episode_sim.control.timing import wait_for_stable_condition
+        wait_for_stable_condition(self, 1.,
+            lambda: len(self.handle_contacts()) >= 2, label="fixture_grasp")
         self.record(handle_contacts=self.handle_contacts(), door_angle_deg=float(np.degrees(self.angle())))
         if len(self.handle_contacts()) < 2:
             raise RuntimeError('Cabinet handle not physically grasped between both fingers')
         self.articulating = True
         self.rebuild_planner()
 
-    def follow_hinge(self, target):
+    def preflight_hinge_ik(self,grasp,joints,target):
+        """Choose a handle grasp whose IK branch reaches the whole stroke.
+
+        Execution still checks each segment against the physical door meshes.
+        This check prevents selecting a grasp that reaches the handle but runs
+        out of wrist range halfway through opening it.
+        """
+        if getattr(self, 'base_assisted_handle_close', False):
+            from cross_episode_sim.fixtures.base_articulation import preflight_handle_hinge
+            return preflight_handle_hinge(self, grasp, joints, target)
+        start=self.angle()
+        anchor=self.data.xanchor[self.door_joint].copy()
+        axis=self.data.xaxis[self.door_joint].copy()
+        q=np.asarray(joints)
+        for angle in np.linspace(start,target,1+int(np.ceil(abs(target-start)/np.radians(3))))[1:]:
+            rotation=Rotation.from_rotvec(axis*(angle-start)).as_matrix()
+            pose=grasp.copy()
+            pose[:3,3]=anchor+rotation@(grasp[:3,3]-anchor)
+            pose[:3,:3]=rotation @ grasp[:3,:3]
+            try:
+                q=np.asarray(self.nearby_ik(pose,q,trust_radius=.4,preserve_self_clearance=True))
+            except RuntimeError as exc:
+                raise RuntimeError(f'Handle arc IK failed at {np.degrees(angle):.1f} degrees: {exc}') from exc
+
+    def follow_hinge(self, target, allow_partial=False):
         start = self.angle()
+        if getattr(self, 'base_assisted_handle_close', False):
+            from cross_episode_sim.control.trajectory_budget import hinge_contact_speed
+            self.contact_base_speed = hinge_contact_speed(self, target,
+                getattr(self, 'contact_base_speed', .08))
+            self.record(hinge_budget_contact_speed_m_s=self.contact_base_speed)
         initial_tcp = self.tcp().copy()
         anchor = self.data.xanchor[self.door_joint].copy()
         axis = self.data.xaxis[self.door_joint].copy()
-        stage = 'pull cabinet open' if target > start else 'push cabinet closed'
+        stage = 'pull cabinet open' if abs(target) > abs(start) else 'push cabinet closed'
+        if getattr(self, '_room_push_handle', False):
+            stage = 'push room door by handle'
         for q in np.linspace(start, target, 1+int(np.ceil(abs(target-start)/np.radians(3))))[1:]:
             rotation = Rotation.from_rotvec(axis*(q-start)).as_matrix()
             pose = initial_tcp.copy()
             pose[:3, 3] = anchor+rotation@(initial_tcp[:3, 3]-anchor)
             pose[:3, :3] = rotation@initial_tcp[:3, :3]
-            self.plan_and_move(stage, pose, hinge_target=float(q))
+            try:
+                from cross_episode_sim.control.smooth_action import fast
+                self._hinge_continuation = fast(self) and abs(q-target) > 1e-9
+                try:
+                    self.plan_and_move(stage, pose, hinge_target=float(q))
+                finally:
+                    self._hinge_continuation = False
+            except HingePlanningError as exc:
+                if not allow_partial or abs(self.angle()-start) < np.radians(3):
+                    raise
+                self.record(door_regrasp_needed=str(exc), measured_angle_deg=float(np.degrees(self.angle())))
+                return
             if abs(self.angle()-q) > np.radians(8):
                 raise RuntimeError('Passive cabinet hinge did not follow the physical grasp')
+
+    def reachable_hinge_target(self, minimum, target):
+        """Extend a grasp without releasing, only along a checked hinge arc.
+
+        This is scratch-state prediction, not door actuation. Execution still
+        follows the passive door through physical contact and checks tracking.
+        """
+        start = self.angle()
+        pose = self.tcp().copy()
+        anchor = self.data.xanchor[self.door_joint].copy()
+        axis = self.data.xaxis[self.door_joint].copy()
+        addresses = [self.model.jnt_qposadr[self.model.joint('robot_0/'+n).id]
+                     for n in self.planner.names]
+        current = self.data.qpos[addresses].copy()
+        probe = mujoco.MjData(self.model)
+        reached = start
+        for angle in np.linspace(start, target,
+                1+int(np.ceil(abs(target-start)/np.radians(3))))[1:]:
+            rotation = Rotation.from_rotvec(axis*(angle-start)).as_matrix()
+            goal = pose.copy()
+            goal[:3, 3] = anchor+rotation@(pose[:3, 3]-anchor)
+            goal[:3, :3] = rotation@pose[:3, :3]
+            try:
+                q = self.nearby_ik(goal, current, trust_radius=.4, preserve_self_clearance=True)
+                path = self.local_contact_path(current, q)
+                for i, joints in enumerate(path, 1):
+                    probe.qpos[:] = self.data.qpos
+                    probe.qpos[addresses] = joints
+                    probe.qpos[self.door_address] = reached+(angle-reached)*i/len(path)
+                    mujoco.mj_forward(self.model, probe)
+                    if self.door_collision(probe):
+                        raise HingePlanningError('Retained grasp arc blocked by native geometry')
+            except RuntimeError as exc:
+                self.record(door_continuation_blocked=str(exc),
+                            checked_angle_deg=float(np.degrees(angle)))
+                break
+            current = np.asarray(q)
+            reached = float(angle)
+        # Preserve the originally preflighted stroke when no extension is
+        # available; never claim an unchecked extended endpoint.
+        result = reached if (target-start)*(reached-minimum) > 0 else minimum
+        self.record(door_retained_grasp_target_deg=float(np.degrees(result)),
+                    original_stroke_target_deg=float(np.degrees(minimum)))
+        return result
+
+    def push_open_door(self, target):
+        from cross_episode_sim.fixtures.door_push import push_open_door
+        return push_open_door(self, target)
 
     def release_handle(self):
         self.stage = 'release cabinet handle'
         self.open_handle_gripper()
-        self.tick(.7)
+        from cross_episode_sim.control.timing import wait_for_open_gripper
+        wait_for_open_gripper(self, .7)
         self.articulating = False
         self.rebuild_planner()
-        retreat = self.tcp().copy();retreat[:3, 3] -= self.handle_standoff*retreat[:3, 2]
+        retreat = self.tcp().copy()
+        distance = self.handle_standoff
+        retreat[:3, 3] -= distance*retreat[:3, 2]
+        straight_retreat = retreat.copy()
         # Same wrist-unwinding retreat used by the working fridge controller.
         retreat[:3, :3] = Rotation.from_rotvec(
             self.data.xaxis[self.door_joint]*(-self.handle_unwind_angle())).as_matrix() @ retreat[:3, :3]
-        self.plan_and_move('withdraw from cabinet handle', retreat)
-        self.tick(.5)
+        try:
+            self.plan_and_move('withdraw from cabinet handle', retreat)
+        except RuntimeError as exc:
+            # Only an IK rejection before execution permits this alternative.
+            # Unwinding is optional; clearance from the bar is mandatory.
+            if not str(exc).startswith('No nearby placement IK:'):
+                raise
+            self.record(handle_withdrawal_preserve_orientation=True,
+                        unwinding_plan_rejected=str(exc))
+            self.plan_and_move('withdraw from cabinet handle', straight_retreat)
+        from cross_episode_sim.control.timing import wait_for_stable_condition
+        wait_for_stable_condition(self, .5,
+            lambda: not self.handle_contacts() and abs(float(self.data.qvel[self.model.jnt_dofadr[self.door_joint]])) < .02,
+            label="fixture_release")
         self.record(door_released=True, door_angle_deg=float(np.degrees(self.angle())),
                     handle_contacts=self.handle_contacts())
 

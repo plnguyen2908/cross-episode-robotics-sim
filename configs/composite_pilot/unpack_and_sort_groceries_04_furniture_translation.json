@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "episode_id": "unpack_and_sort_groceries_04_furniture_translation",
+  "task": "unpack_and_sort_groceries",
+  "variant": "furniture_translation",
+  "instruction": "Put all packaged drinks in the blue basket and all packaged snacks in the yellow basket. Place both filled baskets on the dining table. Leave unrelated objects where they are.",
+  "procedure": "fill_then_move_baskets",
+  "scene": {
+    "seed": 7,
+    "kitchen_layout": 1,
+    "kitchen_style": 1,
+    "people": 3,
+    "object_counts": {
+      "drink_bottle": 2,
+      "snack_box": 2,
+      "basket": 2
+    },
+    "asset_instance_set": "baseline",
+    "furniture": {
+      "dining_set": {
+        "dx": 0.35,
+        "dy": 0.05,
+        "yaw_deg": 0
+      },
+      "sofa": {
+        "dx": 0.7,
+        "dy": 0.6,
+        "yaw_deg": 0
+      },
+      "coffee_table": {
+        "dx": 0.55,
+        "dy": 0.6,
+        "yaw_deg": 0
+      }
+    },
+    "forbidden_object_categories": [
+      "plate",
+      "flat_object"
+    ],
+    "minimum_heating_seconds": null
+  },
+  "goal_keys": [
+    "drinks_in_blue_basket",
+    "snacks_in_yellow_basket",
+    "both_baskets_on_table",
+    "unrelated_unchanged",
+    "empty_hand"
+  ],
+  "requirements": [
+    "multi_object_transfer",
+    "basket_containment",
+    "loaded_basket_transport"
+  ],
+  "catalog_version": "fixed-atomic-v1",
+  "video_speedup": 1.0,
+  "dataset_role": "pilot_unassigned",
+  "initial_state_policy": "deterministic_setup_from_scene_config",
+  "validation_status": "not_executed",
+  "scene_spec_sha256": "f326da46266309ca16f256fd8db92585ec6fad7eb583f76bb58a4af942b525cd"
+}

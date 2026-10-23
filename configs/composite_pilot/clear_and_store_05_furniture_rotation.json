@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "episode_id": "clear_and_store_05_furniture_rotation",
+  "task": "clear_and_store",
+  "variant": "furniture_rotation",
+  "instruction": "Clear the bowls and cups from the dining table. Put the bowls in the kitchen cabinet and the cups in the drawer. Leave both storage compartments closed.",
+  "procedure": "finish_one_storage_at_a_time",
+  "scene": {
+    "seed": 7,
+    "kitchen_layout": 1,
+    "kitchen_style": 1,
+    "people": 3,
+    "object_counts": {
+      "bowl": 3,
+      "cup": 3
+    },
+    "asset_instance_set": "baseline",
+    "furniture": {
+      "sofa": {
+        "dx": 0,
+        "dy": 0,
+        "yaw_deg": 8
+      },
+      "coffee_table": {
+        "dx": 0,
+        "dy": 0,
+        "yaw_deg": 8
+      }
+    },
+    "forbidden_object_categories": [
+      "plate",
+      "flat_object"
+    ],
+    "minimum_heating_seconds": null
+  },
+  "goal_keys": [
+    "bowls_in_cabinet",
+    "cups_in_drawer",
+    "cabinet_closed",
+    "drawer_closed",
+    "empty_hand"
+  ],
+  "requirements": [
+    "multi_object_transfer",
+    "cabinet_interior_placement",
+    "drawer_interior_placement",
+    "shared_fixture_manipulation"
+  ],
+  "catalog_version": "fixed-atomic-v1",
+  "video_speedup": 1.0,
+  "dataset_role": "pilot_unassigned",
+  "initial_state_policy": "deterministic_setup_from_scene_config",
+  "validation_status": "not_executed",
+  "scene_spec_sha256": "2516c9e057497d7edbc91a37fb69bc1c08e86d4385b266370eb8ba0b8e2cdc91"
+}

@@ -38,20 +38,27 @@ def clip_contact_surface(triangles, low, high):
 
 
 def object_mesh_triangles(model, data, bodies):
-    """World-space triangles of the actual object's collision meshes."""
+    """World-space surfaces of collision meshes and exact box primitives."""
     import mujoco
     pieces = []
     for gid in range(model.ngeom):
         if model.geom_bodyid[gid] not in bodies or not (
                 model.geom_contype[gid] or model.geom_conaffinity[gid]):
             continue
-        if model.geom_type[gid] != mujoco.mjtGeom.mjGEOM_MESH:
+        if model.geom_type[gid] == mujoco.mjtGeom.mjGEOM_BOX:
+            vertices = np.array([[x,y,z] for x in (-1,1) for y in (-1,1)
+                                 for z in (-1,1)]) * model.geom_size[gid]
+            faces = np.array([[0,1,3],[0,3,2],[4,6,7],[4,7,5],
+                              [0,4,5],[0,5,1],[2,3,7],[2,7,6],
+                              [0,2,6],[0,6,4],[1,5,7],[1,7,3]])
+        elif model.geom_type[gid] == mujoco.mjtGeom.mjGEOM_MESH:
+            mesh = model.geom_dataid[gid]
+            first, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+            vertices = model.mesh_vert[first:first + count]
+            first, count = model.mesh_faceadr[mesh], model.mesh_facenum[mesh]
+            faces = model.mesh_face[first:first + count]
+        else:
             continue
-        mesh = model.geom_dataid[gid]
-        first, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
-        vertices = model.mesh_vert[first:first + count]
-        first, count = model.mesh_faceadr[mesh], model.mesh_facenum[mesh]
-        faces = model.mesh_face[first:first + count]
         world = vertices @ data.geom_xmat[gid].reshape(3, 3).T + data.geom_xpos[gid]
         pieces.append(world[faces])
     return np.concatenate(pieces) if pieces else np.empty((0, 3, 3))

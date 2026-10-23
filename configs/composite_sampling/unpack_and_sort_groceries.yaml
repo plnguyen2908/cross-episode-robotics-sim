@@ -1,0 +1,45 @@
+# Select a subset of control groups per episode; zero selects the baseline.
+# count is the total number of attempts.
+task: unpack_and_sort_groceries
+seed: 42
+count: 7
+fixed:
+  scene.seed: 7
+  scene.kitchen_layout: 1
+  scene.basket_supports.purple_basket: kitchen_counter
+  scene.basket_supports.orange_basket: kitchen_counter
+controls:
+  execution_order:
+    procedure:
+      choices:
+      - drinks_first
+      - snacks_first
+  kitchen_layout:
+    scene.kitchen_layout:
+      choices:
+      - 1
+      - 3
+  object_instances:
+    scene.asset_instance_set:
+      choices:
+      - baseline
+      - same_category_alternatives
+  furniture_translation:
+    scene.furniture.dining_set.dx:
+      uniform:
+      - -0.15
+      - 0.35
+  furniture_rotation:
+    scene.furniture.sofa.yaw_deg:
+      uniform:
+      - -8
+      - 8
+  door_route:
+    room_route:
+      choices:
+      - default
+      - open_shortcut
+      - living_room_detour
+randomize_controls:
+  min_active: 0
+  max_active: 6

@@ -1,0 +1,46 @@
+task: prepare_and_serve_meal
+seed: 20100
+count: 1
+base_layout:
+  profile: two_rooms
+  rooms:
+  - 2
+  - 2
+  max_attempts: 100
+  loop_probability: 0.8
+fixed:
+  scene.people: 2
+  scene.kitchen_layout: 3
+  scene.asset_instance_set: same_category_alternatives
+controls:
+  execution_order:
+    procedure:
+      choices:
+      - heat_while_retrieving
+      - retrieve_before_heating
+  furniture_translation:
+    scene.furniture.dining_set.dx:
+      uniform:
+      - -0.3
+      - 0.3
+    scene.furniture.dining_set.dy:
+      uniform:
+      - -0.3
+      - 0.3
+  furniture_rotation:
+    scene.furniture.dining_set.yaw_deg:
+      uniform:
+      - -20
+      - 20
+  appearance_theme:
+    scene.appearance.preset:
+      choices:
+      - sage_neutral
+  door_route:
+    room_route:
+      choices:
+      - default
+      - closed_direct
+randomize_controls:
+  min_active: 5
+  max_active: 5

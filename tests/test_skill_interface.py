@@ -51,6 +51,25 @@ def test_precondition_failure_is_structured_and_does_not_execute(tmp_path):
     action.assert_not_called()
 
 
+@pytest.mark.parametrize('fail', [False, True])
+def test_door_reposition_permission_is_scoped_and_restored(tmp_path, fail):
+    from cross_episode_sim.skills.door_motion import local_reposition_allowed
+    c=controller(tmp_path)
+    c.base_pose=lambda:np.array([2.,-1.,0.])
+    def action(role):
+        assert c._public_skill_navigation is False
+        assert c._public_base_hold is None
+        assert local_reposition_allowed(c,[2.5,-1.],False)
+        if fail:
+            raise RuntimeError('blocked door dock')
+    api=SkillInterface(c,{'open_door':binding(c,action)})
+    result=api.execute_skill('open_door',{'role':'cup'})
+    assert result['success'] is not fail
+    assert c._public_door_reposition is None
+    assert c._public_base_hold is None
+    assert not local_reposition_allowed(c,[2.5,-1.],False)
+
+
 def test_failed_action_retains_earlier_accepted_physics_and_journal(tmp_path):
     c = controller(tmp_path)
     count = 0
@@ -207,7 +226,7 @@ def test_spout_pick_recovery_redocks_at_spout_not_original_kitchen_home():
     assert retry == [dict(operation='navigate', arguments=dict(role='coffee_mug', destination='spout', dock='1')), step]
 
 
-def test_spout_navigation_allows_empty_hand_for_retrieval_and_keeps_pick_dock():
+def test_spout_navigation_allows_empty_hand_and_pick_has_no_dock_gate():
     bindings = [dict(role='coffee_mug', body='cup1')]
     c = SimpleNamespace(manifest=dict(bindings=bindings, coffee=dict(coffee_mugs=['cup1'])),
                         coffee_mugs_roles=lambda: ['coffee_mug'], wait_machine_ready=Mock(), finish_brew=Mock(),
@@ -222,7 +241,7 @@ def test_spout_navigation_allows_empty_hand_for_retrieval_and_keeps_pick_dock():
     assert nav.preconditions('coffee_mug', 'spout', '1')['hand_state']
     nav.skill.execute_candidate(None, role='coffee_mug', destination='spout', dock='1')
     assert nav.skill.verify(role='coffee_mug', destination='spout', dock='1')
-    assert api.bindings['pick'].preconditions('coffee_mug', 'spout')['at_pickup_dock']
+    assert all(api.bindings['pick'].preconditions('coffee_mug', 'spout').values())
     assert c._public_dock_skip == 1
 
 
@@ -267,3 +286,49 @@ def test_spout_place_public_interface_forwards_distinct_candidates(monkeypatch):
         skill.execute_candidate(candidate, role='coffee_mug', destination='spout')
     assert calls == list(candidates)
     assert skill.candidates(role='coffee_mug', destination='home') == (None,)
+
+
+@pytest.mark.parametrize('occupied', [False, True])
+def test_physical_dependency_matrix(monkeypatch, occupied):
+    import cross_episode_sim.skills.breakfast_interface as module
+    detached_state = {'value': True}
+    monkeypatch.setattr(module, 'detached', lambda c, **kwargs: detached_state['value'])
+    bindings = [dict(role='coffee_mug', body='cup1'), dict(role='bowl_one', body='bowl1')]
+    c = SimpleNamespace(
+        manifest=dict(bindings=bindings, full_breakfast={}),
+        coffee_mugs_roles=lambda: ['coffee_mug'],
+        wait_machine_ready=Mock(), finish_brew=Mock(), fill_bowls=Mock(), bowls_filled=Mock(),
+        holding_loaf=occupied, attached=False, contacts=lambda: [1, 2] if occupied else [],
+        object_name='cup1', spec=dict(dosing_body='box'), fixture_phase='locked', info=lambda r: next(b for b in bindings if b['role']==r),
+        machine_cycle=SimpleNamespace(powered_at=0., started_at=1.),
+        bowls_in_kitchen=lambda: True)
+    api = breakfast_skill_interface(c)
+    pre = lambda name, **args: api.bindings[name].preconditions(**args)
+    assert all(pre('pick_dosing_box').values()) == (not occupied)
+    assert all(pre('attach_portafilter').values())  # no grounds-ready or empty-hand gate
+    detached_state['value'] = False
+    assert not all(pre('attach_portafilter').values())
+    for name in ('wait_until_ready', 'wait_until_brewed', 'wait_for_bowls'):
+        assert all(pre(name).values())
+    assert all(pre('pick', role='coffee_mug', source='surface').values()) == (not occupied)
+    assert all(pre('pick', role='coffee_mug', source='spout').values()) == (not occupied)
+    assert all(pre('place', role='coffee_mug', destination='spout').values()) == occupied
+    assert all(pre('navigate', role='coffee_mug', destination='source', dock='0').values())
+    assert all(pre('press_brew').values()) == (not occupied)
+    assert all(pre('press_power').values()) == (not occupied)
+    assert all(pre('detach_portafilter').values()) == (not occupied)
+    for name in ('pour_grounds', 'place_dosing_box'):
+        assert not all(pre(name).values())
+    c.object_name = 'box'
+    for name in ('pour_grounds', 'place_dosing_box'):
+        assert all(pre(name).values()) == occupied
+    assert not all(pre('pick', role='bowl_one', source='spout').values())
+    c.object_name = 'cup1'
+    c.fixture_phase = 'released'
+    assert not all(pre('detach_portafilter').values())
+
+    c.machine_cycle.powered_at = None
+    c.machine_cycle.started_at = None
+    c.bowls_in_kitchen = lambda: False
+    for name in ('wait_until_ready', 'wait_until_brewed', 'wait_for_bowls'):
+        assert not all(pre(name).values())

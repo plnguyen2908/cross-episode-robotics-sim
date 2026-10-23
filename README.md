@@ -449,3 +449,25 @@ the espresso machine from [MoonlakeAI sim-env-builder](https://github.com/Moonla
 ## License
 
 Apache-2.0, see [LICENSE](LICENSE).
+
+## Training/test duration pilot
+
+The [training/test driver](docs/train_test_dataset.md) targets **60 successful
+training minutes per task in two rooms**, plus **30 testing minutes per task** split between new
+variations in two rooms and 5–7-room houses. Training requires successful room-door
+opening and open-route examples, plus both supported procedures per task.
+Each split saves layout previews, actual object inventories, configs, prompts,
+executed sequences, videos, duration/coverage summaries and an asset-overlap audit.
+
+```bash
+bash scripts/generate_train_test.sh --output runs/train_test_v1 --prepare-only
+bash scripts/generate_train_test.sh --output runs/train_test_v1 --workers 8
+```
+
+The two-room profile has passed static furnished-scene validation, not full robot
+rollout qualification. Quotas count whole successful episodes; totals can exceed
+the targets. Replacement sampling has no round limit. See the guide for resume and remaining OOD limits.
+
+Per-task fine-tuning/test indices are saved under `tasks/TASK/SPLIT/manifest.json`,
+with a task-specific object inventory. For five tasks the targets total **5 hours
+training and 2.5 hours testing**; all tasks share the same GPU worker pool.

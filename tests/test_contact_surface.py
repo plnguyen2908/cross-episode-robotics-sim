@@ -1,9 +1,23 @@
 import unittest
+
 import numpy as np
-from cross_episode_sim.control.contact_surface import clip_contact_surface
+
+from cross_episode_sim.control.contact_surface import clip_contact_surface, object_mesh_triangles
 
 
 class ContactSurfaceTest(unittest.TestCase):
+    def test_box_face_contact_without_vertices_in_pad_window(self):
+        import mujoco
+        model = mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+            <body name="package" pos="0 0 .2"><geom type="box" size=".025 .035 .055"/>
+            <geom type="box" size=".1 .1 .1" contype="0" conaffinity="0"/>
+            </body></worldbody></mujoco>''')
+        data = mujoco.MjData(model); mujoco.mj_forward(model, data)
+        triangles = object_mesh_triangles(model, data, {model.body('package').id})
+        self.assertEqual(triangles.shape, (12, 3, 3))
+        points = clip_contact_surface(triangles, [-.01,-.1,.19], [.01,.1,.21])
+        self.assertAlmostEqual(np.ptp(points[:,1]), .07)
+
     def test_contact_inside_face_without_any_mesh_vertex(self):
         triangles = np.array([[[-1, y, -1], [1, y, -1], [0, y, 1]]
                               for y in (-.01, .01)])

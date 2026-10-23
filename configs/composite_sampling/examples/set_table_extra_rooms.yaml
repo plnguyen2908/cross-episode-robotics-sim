@@ -1,0 +1,21 @@
+# Example extension: five attempts with 4–6 rooms. Physical task qualification
+# remains required; this is not a prevalidated dataset.
+task: set_table
+seed: 42
+count: 5
+fixed:
+  scene.seed: 7
+  scene.people: 2
+randomize_controls:
+  min_active: 1
+  max_active: 1
+controls:
+  room_layout:
+    scene.room_count:
+      randint: [4, 6]
+    scene.room_arrangement:
+      choices: [chain, branch]
+    scene.extra_room_width:
+      uniform: [3.5, 4.5]
+    scene.extra_room_depth:
+      uniform: [3.5, 4.5]

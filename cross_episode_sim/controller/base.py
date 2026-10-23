@@ -267,6 +267,11 @@ class FridgeTransfer:
 
     def __init__(self, args):
         self.args = args
+        from cross_episode_sim.control.smooth_action import configure
+        configure(self)
+        if getattr(args, 'record_action_replay', False):
+            from cross_episode_sim.control.action_recording import ActionRecording
+            self._action_capture = ActionRecording(args.output)
         self.embodiment = embodiment_for(getattr(args, "robot", None) or RBY1M.name)
         self.profile = self.embodiment.profile
         self.object_name = getattr(args, "object_name", None) or BREAD
@@ -350,6 +355,11 @@ class FridgeTransfer:
         missing = validate(self.profile, self.model)
         if missing:
             raise ValueError(f"Robot profile {self.profile.name} does not match scene: {missing}")
+        if getattr(args, 'fixed_atomic_interface', False):
+            # Shared by fixed-skill scene reconstruction, oracle execution and
+            # policy rollouts: suppress soft-contact friction creep, not motion
+            # outside the Coulomb friction limits. No object attachments.
+            self.model.opt.noslip_iterations = 5
         if args.soft_finger:
             # Explicit simulation assumption: a finite contact patch resists
             # twisting/rolling, unlike a single three-dimensional point contact.
@@ -397,6 +407,7 @@ class FridgeTransfer:
             "grip_position_gain": args.grip_kp,
             "soft_finger_contact": args.soft_finger,
             "finger_friction_override": [1.0, 0.005, 0.002] if args.soft_finger else None,
+            "contact_solver": {"noslip_iterations": int(self.model.opt.noslip_iterations)},
             "motion_slowdown": args.motion_slowdown,
             "video_fps": args.video_fps,
             "video_speedup": args.video_speedup,
@@ -692,45 +703,8 @@ class FridgeTransfer:
                 "time": float(self.data.time), **metrics}
 
     def render_video_frame(self, stage, time):
-        if getattr(self, 'episode_label', None):
-            from cross_episode_sim.tasks.history_views import render_history_views
-            self.writer.append_data(render_history_views(self, record_raw=True))
-            return
-        self.update_recording_cameras()
-        frames = []
-        for camera in self.cameras:
-            self.renderer.update_scene(self.data, camera=camera,
-                                       scene_option=getattr(self, 'render_scene_option', None))
-            frames.append(self.renderer.render().copy())
-        self.record_camera_frames(frames)
-        frame = Image.fromarray(np.concatenate(frames, axis=1))
-        draw = ImageDraw.Draw(frame)
-        draw.rectangle((0, 0, frame.width, 48), fill="black")
-        draw.text((10, 8), f"{self.profile.name} / cuRobo | {self.describe_stage(stage)}", fill="white")
-        draw.text(
-            (10, 27),
-            f"Target: {self.interaction_label()} | payload: {self.object_label()} | simulation, "
-            f"{self.model.actuator_forcerange[self.model.actuator(NS + self.profile.gripper_actuator).id, 1]:g} N actuator limit, "
-            f"{'finite-pad' if self.args.soft_finger else 'point'} contact | t={time:.2f}s",
-            fill="white",
-        )
-        draw.text((650, 8), "Manipulation detail", fill="white")
-        if len(frames) > 2:
-            draw.text((1300, 8), "ROBOT CAMERA | raw view recorded separately", fill="white")
-        label = getattr(self, 'episode_label', None)
-        if label:
-            # Cross-episode runs mark which episode this is: a given history
-            # episode (blue) or the episode to be solved (orange).
-            try:
-                font = ImageFont.load_default(size=26)
-            except TypeError:
-                font = ImageFont.load_default()
-            box = draw.textbbox((0, 0), label, font=font)
-            width, height = box[2]-box[0]+28, box[3]-box[1]+18
-            color = (196, 92, 20) if label.lower().startswith('current') else (30, 90, 170)
-            draw.rectangle((frame.width-width-10, 56, frame.width-10, 56+height), fill=color)
-            draw.text((frame.width-width+4, 62), label, fill="white", font=font)
-        self.writer.append_data(np.asarray(frame))
+        from cross_episode_sim.tasks.history_views import render_history_views
+        self.writer.append_data(render_history_views(self, record_raw=True))
 
     def render_deferred_video(self):
         next_frame = 0.0
@@ -758,6 +732,9 @@ class FridgeTransfer:
     def tick(self, seconds):
         for _ in range(ceil(seconds / self.model.opt.timestep)):
             self.before_step()
+            capture=getattr(self, '_action_capture', None)
+            if capture is not None:
+                capture.sample(self)
             hold = getattr(self, '_public_base_hold', None)
             if hold is not None and not np.allclose(self.data.ctrl[hold[0]], hold[1], atol=1e-9, rtol=0):
                 raise RuntimeError('This atomic skill cannot command base motion; call navigate explicitly')
@@ -933,6 +910,20 @@ class FridgeTransfer:
             gtol=1e-10,
         )
         error = residual(result.x)
+        # Near a feasible target, posture regularization can itself leave more
+        # pose error than the acceptance tolerance. Refine that local candidate
+        # without changing joint bounds, collision padding, or pose tolerances.
+        position_error = np.linalg.norm(error[:3])
+        rotation_error = np.linalg.norm(error[3:6])
+        if (getattr(getattr(self, 'args', None), 'fixed_atomic_interface', False)
+                and (position_error > position_tolerance or rotation_error > rotation_tolerance)
+                and position_error <= .03
+                and rotation_error <= .03):
+            posture_weight = 0.
+            result = least_squares(
+                objective, result.x, jac=jacobian, bounds=(lower, upper),
+                max_nfev=150, ftol=1e-10, xtol=1e-10, gtol=1e-10)
+            error = residual(result.x)
         if preserve_self_clearance:
             gap = self.planner.self_clearance(result.x.tolist())
             if gap < .001:
@@ -1033,14 +1024,28 @@ class FridgeTransfer:
                         raise RuntimeError(
                             f'Planned robot self collision during placement: {depth:.6f} m')
                 previous = waypoint
+        if getattr(self, 'experimental_joint_speed', None) is not None:
+            from cross_episode_sim.control.smooth_waypoints import bounded_joint_dt
+            dt = bounded_joint_dt(positions, trajectory, dt, self)
+            dt = ceil(dt / self.model.opt.timestep) * self.model.opt.timestep
+        durations = np.full(len(trajectory), dt)
+        if getattr(self, 'local_joint_retiming_experiment', False):
+            from cross_episode_sim.control.smooth_waypoints import bounded_joint_durations
+            nominal_dt = self.model.opt.timestep
+            durations = bounded_joint_durations(positions, trajectory, nominal_dt, self)
+            self.record(local_joint_retiming=dict(previous_duration_s=len(trajectory)*dt,
+                                                 duration_s=float(durations.sum())))
+        from cross_episode_sim.control.smooth_action import joint_commands
+        trajectory, durations = joint_commands(self, trajectory, durations,
+                                               contact=contact_approach, start=positions)
         bias = np.zeros(len(self.arm_aids))
         if contact_approach:
             actual = np.array([float(self.data.joint(NS + n).qpos[0]) for n in self.planner.names])
             bias = np.clip(self.data.ctrl[self.arm_aids] - actual, -.08, .08)
             planner_method = 'actual_mesh_checked_contact_ik'
-        for q in trajectory:
+        for q, waypoint_dt in zip(trajectory, durations):
             self.data.ctrl[self.arm_aids] = self.bounded_arm_command(np.asarray(q) + bias)
-            self.tick(dt)
+            self.tick(float(waypoint_dt))
         settle_arm(self, .4, pose, tracking_tolerance)
         # Leaning the torso out over a counter puts ~140 N-m of gravity on each torso
         # joint. At the shipped servo stiffness (kp 4000) that is ~2 deg of droop per
@@ -1338,7 +1343,16 @@ class FridgeTransfer:
 
     def pick_payload(self):
         """One physical transfer in the live scene; caller owns recording lifecycle."""
-        self.tick(0.6)
+        # An empty hand may still be closed after a door push or button press.
+        # Candidate construction uses measured pad geometry. Command opening
+        # and wait for the real servo, including its deceleration (0.6 s is too
+        # short from fully closed on the native coupled gripper).
+        self.stage = 'prepare empty gripper for pickup'
+        self.embodiment.open_gripper(self)
+        from cross_episode_sim.control.timing import gripper_open_ready
+        wait_for_open_gripper(self, 1.2)
+        if not gripper_open_ready(self):
+            raise RuntimeError('Empty gripper did not reach its open pickup command')
         if not getattr(self, "drop_only_grasp", False) and self.report["max_unintended_robot_penetration_m"] > 0.003:
             raise RuntimeError("Initial layout has unintended robot penetration")
         if not (getattr(self, '_public_skill_navigation', None) is False
@@ -1473,11 +1487,12 @@ class FridgeTransfer:
             except RuntimeError as exc:
                 collision = "Actual-mesh collision in contact move" in str(exc)
                 lost_grasp = "Lost loaded bilateral" in str(exc)
-                if not (collision or lost_grasp):
+                unreachable_lift = "No nearby placement IK" in str(exc)
+                if not (collision or lost_grasp or unreachable_lift):
                     raise
                 # Retry only while the object remains supported. Never release
                 # an airborne payload merely to try another annotation.
-                if lost_grasp and not self.support_contacts(table=True):
+                if (lost_grasp or unreachable_lift) and not self.support_contacts(table=True):
                     raise
                 variant = getattr(self, "selected_annotation_variant", None)
                 self.physical_grasp_attempts = getattr(self, "physical_grasp_attempts", 0) + 1
@@ -1489,7 +1504,9 @@ class FridgeTransfer:
                     self.physically_rejected_annotation_variants.add(variant)
                 self.record(physical_grasp_rejected=variant, reason=str(exc),
                             physical_grasp_attempt=self.physical_grasp_attempts,
-                            rejection_phase="vertical_lift_contact_loss" if lost_grasp else "vertical_lift_preflight")
+                            rejection_phase=("vertical_lift_contact_loss" if lost_grasp else
+                                             "vertical_lift_ik" if unreachable_lift else
+                                             "vertical_lift_preflight"))
                 self.holding_loaf = False
                 self.embodiment.open_gripper(self)
                 wait_for_open_gripper(self, .5)
@@ -1503,6 +1520,12 @@ class FridgeTransfer:
             )
             if clearance_lift < 0.015 or self.support_contacts(table=True):
                 raise RuntimeError(self.describe_stage("Loaf did not clear the counter during vertical lift"))
+        withdrawal = np.asarray(getattr(self, 'pickup_withdrawal_vector', (0., 0., 0.)), dtype=float)
+        if np.any(withdrawal):
+            outside = self.tcp().copy()
+            outside[:3, 3] += withdrawal
+            self.move("withdraw held object from compartment", outside)
+            lift[:3, 3] += withdrawal
         lift[2, 3] += getattr(self.args, "lift_height", 0.15)
         # Straight up does not work on a counter this high: the grasp already sits
         # near the top of the arm's range, so a 15 cm lift asks for a pose 10 cm

@@ -61,12 +61,16 @@ def forward_route(start, goal, on_floor, pose_clear, reverse=.2, step=.1, max_at
             delta = np.asarray(point)-poses[-1][:2]
             if np.linalg.norm(delta) < .001:
                 continue
-            heading = float(np.clip(np.arctan2(delta[1], delta[0]), -np.pi+.005, np.pi-.005))
+            heading = poses[-1][2] + float(np.arctan2(
+                np.sin(np.arctan2(delta[1], delta[0])-poses[-1][2]),
+                np.cos(np.arctan2(delta[1], delta[0])-poses[-1][2])))
             if abs(heading-poses[-1][2]) > 1e-6:
                 poses.append(np.array([*poses[-1][:2], heading]))
             poses.append(np.array([*point, heading]))
-        if abs(goal[2]-poses[-1][2]) > 1e-6:
-            poses.append(np.array([*goal[:2], goal[2]]))
+        final_yaw = poses[-1][2] + float(np.arctan2(
+            np.sin(goal[2]-poses[-1][2]), np.cos(goal[2]-poses[-1][2])))
+        if abs(final_yaw-poses[-1][2]) > 1e-6:
+            poses.append(np.array([*goal[:2], final_yaw]))
         return poses
 
     for attempt in range(max_attempts):

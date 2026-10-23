@@ -6,6 +6,7 @@ or arbitrary controller callbacks can be submitted through the public API.
 """
 
 import json
+import math
 from copy import deepcopy
 from dataclasses import dataclass
 from time import perf_counter
@@ -55,10 +56,19 @@ class SkillInterface:
             raise ValueError("Missing required skill argument")
         for key, value in arguments.items():
             spec = properties[key]
-            # This domain exposes strings/enums only; do not silently accept a
-            # more permissive schema when another parameter type is added.
-            if spec.get("type") != "string" or not isinstance(value, str):
-                raise ValueError(f"{key} must be a string")
+            kind = spec.get('type')
+            if kind == 'string':
+                if not isinstance(value, str):
+                    raise ValueError(f'{key} must be a string')
+            elif kind == 'number':
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValueError(f'{key} must be a finite number')
+                if 'exclusiveMinimum' in spec and value <= spec['exclusiveMinimum']:
+                    raise ValueError(f'{key} must exceed {spec["exclusiveMinimum"]}')
+                if 'maximum' in spec and value > spec['maximum']:
+                    raise ValueError(f'{key} must not exceed {spec["maximum"]}')
+            else:
+                raise ValueError(f'Unsupported argument type: {kind}')
             if "enum" in spec and value not in spec["enum"]:
                 raise ValueError(f"Invalid {key}: {value}")
         b.skill.validate_arguments(**arguments)
@@ -78,7 +88,10 @@ class SkillInterface:
         self._save()
         start = perf_counter()
         previous = getattr(c, "_public_skill_navigation", None)
+        previous_motion_start = getattr(c, '_atomic_motion_start', None)
+        c._atomic_motion_start = float(c.data.time)
         previous_hold = getattr(c, '_public_base_hold', None)
+        previous_door_reposition = getattr(c, '_public_door_reposition', None)
         kind = "invalid_arguments"
         self._executing = True
         try:
@@ -91,7 +104,9 @@ class SkillInterface:
                 raise RuntimeError("Measured skill preconditions are not satisfied")
             kind = "execution_failed"
             c._public_skill_navigation = binding.navigation
-            if not binding.navigation and hasattr(c, 'base_pose'):
+            c._public_door_reposition = (c.base_pose().copy()
+                if name in ('open_door', 'close_door', 'open_drawer', 'close_drawer') and hasattr(c, 'base_pose') else None)
+            if not binding.navigation and c._public_door_reposition is None and hasattr(c, 'base_pose'):
                 ids = [c.model.actuator(c.profile.namespace + f'base_{axis}_act').id for axis in ('x', 'y', 'theta')]
                 c._public_base_hold = (ids, c.data.ctrl[ids].copy())
             else:
@@ -116,9 +131,18 @@ class SkillInterface:
                     event['rebuild_error'] = str(rebuild_error)
         finally:
             c._public_skill_navigation = previous
+            c._atomic_motion_start = previous_motion_start
             c._public_base_hold = previous_hold
+            c._public_door_reposition = previous_door_reposition
             self._executing = False
             event.update(end_time=float(c.data.time), wall_seconds=perf_counter() - start)
+            duration = event['end_time'] - event['start_time']
+            event['motion_timing'] = dict(simulated_seconds=duration, target_seconds=[5.,15.],
+                status=('explicit_wait' if name=='wait' else 'faster_than_target' if duration<5
+                        else 'within_target' if duration<=15 else 'over_target'))
+            capture=getattr(c, '_action_capture', None)
+            if capture is not None:
+                capture.boundary(c,event)
             self._save()
         return deepcopy(event)
 
@@ -157,6 +181,13 @@ def run_skill_episode(controller, interface, steps, verify_goal, task_id, *, set
 
     c = controller
     c.skill_interface = interface
+    args = getattr(c, 'args', None)
+    c.report['motion_configuration'] = {
+        name: getattr(args, name, None) for name in (
+            'optimize_motion_components', 'smooth_action', 'smooth_action_profile',
+            'smooth_action_time_scale', 'nav_speed', 'turn_speed', 'motion_slowdown', 'base_motion')}
+    (c.output / 'motion_configuration.json').write_text(
+        json.dumps(c.report['motion_configuration'], indent=2))
     steps = deepcopy(steps)
     (c.output / 'requested_skill_plan.json').write_text(json.dumps(steps, indent=2))
     (c.output / 'skill_catalog.json').write_text(json.dumps(interface.list_skills(), indent=2))
@@ -185,7 +216,11 @@ def run_skill_episode(controller, interface, steps, verify_goal, task_id, *, set
         (c.output / 'successful_skill_plan.json').write_text(json.dumps(witness, indent=2))
         return {**evidence, 'all_actions_through_skill_interface': bool(calls_match)}
 
-    return CompositeEpisode(c, operations, goal, setup=setup, recover=recover).run(task_id, steps)
+    try:
+        return CompositeEpisode(c, operations, goal, setup=setup, recover=recover).run(task_id, steps)
+    finally:
+        capture=getattr(c, '_action_capture', None)
+        if capture is not None:capture.save(c)
 
 
 def dock_parameters(schema):

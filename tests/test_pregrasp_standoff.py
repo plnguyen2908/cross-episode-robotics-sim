@@ -71,6 +71,23 @@ class PregraspStandoffTest(unittest.TestCase):
             AnnotatedGraspMixin.select_annotated_grasp(c)
         self.assertEqual(len(goals), 1)
 
+    def test_palm_clearance_ranking_is_not_cancelled_by_depth_centering(self):
+        c, _, probes, lifts = self.selector()
+        low, high = c.local_annotations[0].copy(), c.local_annotations[0].copy()
+        high[2, 3] = .06
+        c.local_annotations = np.array([low, high])
+        c.profile.grasp_width_mode = 'contact_region'
+        c.annotation_center_weight = 1.
+        c.annotation_palm_clearance = .03
+        c.bread_vertices = lambda: np.array([
+            [x, y, z] for x in (-.01, .01) for y in (-.015, .015)
+            for z in (0., .06, .08)])
+        c.planner.plan = lambda *args: np.zeros((3, 1))
+        AnnotatedGraspMixin.select_annotated_grasp(c)
+        self.assertEqual(c.report['annotation_selection']['selected_index'], 1)
+        self.assertTrue(probes)
+        self.assertEqual(lifts, [True])
+
     def test_reach_ranking_uses_near_contact_without_bypassing_checks(self):
         c, goals, probes, lifts = self.selector()
         far, near = c.local_annotations[0].copy(), c.local_annotations[0].copy()

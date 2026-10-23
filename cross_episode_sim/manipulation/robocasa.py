@@ -22,7 +22,7 @@ from cross_episode_sim.manipulation.molmo_objects import assets_root, OUTPUT
 from cross_episode_sim.paths import grasp_registry_path, model_digest
 
 
-def export_initial_scene(recording, output):
+def export_initial_scene(recording, output, *, furniture_transforms=None):
     """Preserve fixtures and initial object poses; remove the old robot only."""
     path = recording / 'scene.xml'
     model = mujoco.MjModel.from_xml_path(str(path))
@@ -85,6 +85,10 @@ def export_initial_scene(recording, output):
         name = check.body(bid).name
         if not np.allclose(state.xpos[bid], data.body(name).xpos, atol=1e-7):
             raise RuntimeError(f'Scene export moved body: {name}')
+    from cross_episode_sim.tasks.three_room_layout import connect_living_room
+    if connect_living_room(target):
+        from cross_episode_sim.tasks.living_furniture import furnish_living_room
+        furnish_living_room(target, furniture_transforms)
     return target, obj, table, data.body(obj).xpos.copy()
 
 
@@ -109,6 +113,8 @@ class RoboCasaManipulation(TableReorder):
     prepare_pickup = TableTransfer.prepare_pickup
 
     def annotation_approach_allowed(self, pose):
+        if getattr(self.args, 'fixed_atomic_interface', False):
+            return pose[2, 2] <= -np.cos(np.deg2rad(30.))
         policy = getattr(self.args, 'approach_policy', 'top-down')
         if policy == 'side':
             return -.35 <= pose[2, 2] <= .15
@@ -189,6 +195,8 @@ def main():
     p.add_argument('--approach-policy', choices=('top-down', 'side', 'any-above-table'),
                    default='top-down', help='Filter existing grasp annotations; does not change gripper limits')
     p.add_argument('--prepare-only', action='store_true')
+    from cross_episode_sim.control.smooth_action import add_arguments
+    add_arguments(p)
     p.add_argument('--skill-interface', action='store_true', help='Execute the fixture demo through public atomic skill calls')
     p.add_argument('--grasp-family', choices=('auto', 'top', 'oblique', 'side'), default='auto', help='Force a qualification approach family without fallback')
     p.add_argument('--shared-locomanip', action='store_true', help='Use the MolmoSpaces TableReorder navigation/manipulation flow')
@@ -271,6 +279,15 @@ def main():
             xyz = install_plate(scene, obj)
     if cli.blender_lid:
         from cross_episode_sim.fixtures.blender_lid import install_blender
+        if cli.skill_interface and not cli.blender_load:
+            # A low native support keeps the lid handle reachable from above.
+            # Preserve the blender/lid dimensions and their physical geometry.
+            table = 'coffee_table_living_room_main'
+            support_model = mujoco.MjModel.from_xml_path(str(scene))
+            support_data = mujoco.MjData(support_model)
+            mujoco.mj_forward(support_model, support_data)
+            xyz = support_data.body(table).xpos.copy() + [.2, .18, 0.]
+            cli.stand_off = .65
         if cli.blender_load:
             from cross_episode_sim.fixtures.blender_load import install_loading_scene
             obj, xyz, food_info = install_loading_scene(scene, obj, table, xyz)
@@ -303,6 +320,10 @@ def main():
     if cli.drawer:
         from cross_episode_sim.fixtures.cabinet_door import restore_native_door
         from cross_episode_sim.fixtures.drawer import DRAWER
+        if cli.skill_interface and not cli.drawer_pick_place:
+            # The top bar sits under the countertop overhang. Use the native
+            # middle drawer for the required top-down handle grasp demo.
+            DRAWER = DRAWER.replace('_4_', '_3_')
         restore_native_door(cli.recording, scene, DRAWER)
     # The object is on the north-facing table edge in the recorded RoboCasa test.
     spawn = [float(xyz[0]), float(xyz[1] + (.80 if cli.cross_room else cli.stand_off)), -np.pi / 2]
@@ -380,9 +401,11 @@ def main():
     args = parse_args(['--assets', str(assets_root()), '--output', str(cli.output),
         '--robot', 'franka_tidybot', '--kitchen', '--native-object', '--soft-finger',
         '--object-name', obj, '--clearance', '0', '--motion-slowdown', '1',
-        '--move-retries', '2', '--video-fps', '25', '--video-speedup', '3',
+        '--move-retries', '2', '--video-fps', '25', '--video-speedup', '1',
         '--defer-video', '--grip-open', '.05', '--grip-force', str(cli.grasp_force_limit),
         '--lift-height', '.12', '--base-servo-scale', '2'])
+    from cross_episode_sim.control.smooth_action import copy_arguments
+    copy_arguments(cli, args)
     args.annotation_asset = cli.asset
     args.blender_power_only = cli.blender_power_only
     args.annotation_path = annotation
@@ -430,6 +453,7 @@ def main():
         args.dynamic_objects.append(DOOR)
     if cli.drawer:
         args.dynamic_objects.append(DRAWER)
+        args.drawer_fixture_body = DRAWER
     args.place_offset = cli.place_offset
     args.recording = str(cli.recording)
     args.transfer_phase = cli.transfer_phase
@@ -477,6 +501,7 @@ def main():
     args.flat_pick_policy = cli.flat_pick_policy
     args.thin_edge_fallback = cli.thin_edge_pick or cli.thin_edge_fallback or cli.flat_pick_only
     if cli.skill_interface:
+        args.fixed_atomic_interface = True
         from importlib import import_module
         from cross_episode_sim.skills.fixture_interface import run_fixture_demo
         demos = {
@@ -487,15 +512,37 @@ def main():
             'stove-knob': ('fixtures.stove_knob', 'StoveKnobTest'),
             'faucet': ('fixtures.faucet', 'FaucetTest'),
             'microwave-button': ('fixtures.microwave_button', 'MicrowaveButtonTest'),
+            'toaster-lever': ('fixtures.toaster_lever', 'ToasterLeverTest'),
             'toaster-insertion': ('fixtures.toaster_insertion', 'ToasterInsertionTest'),
             'oven-rack': ('fixtures.oven_rack', 'OvenRackTest'),
             'blender-lid': ('fixtures.blender_lid', 'BlenderLidTest'),
         }
         name = next((name for name in demos if getattr(cli, name.replace('-', '_'))), None)
         if name is None:
-            p.error('--skill-interface requires one of the ten documented family demos')
+            p.error('--skill-interface requires a supported fixed-interface fixture demo')
         module, cls = demos[name]
         controller = getattr(import_module('cross_episode_sim.'+module), cls)(args, selection)
+        if name == 'cross-room':
+            controller.annotation_standoffs = (.04, .07)
+            controller.annotation_palm_clearance = .035
+            controller.diverse_planning_candidates = True
+            controller.preserve_planner_self_clearance = True
+            controller.args.lift_retreat = .10
+            controller.placement_release_clearance = .008
+            controller.placement_staging_clearance = .012
+            # Keep a top-down pinch vertical in transit. The empty travel
+            # posture tilts the wrist and can squeeze a tapered object out.
+            # Every candidate still needs the loaded self/world/mesh checks.
+            controller.loaded_travel_postures = [
+                (0., 0., 0., -fold, 0., fold, 0.) for fold in (.60, .80, 1.)]
+            controller.report['arguments']['lift_retreat'] = controller.args.lift_retreat
+            controller.report['atomic_motion_config'] = dict(
+                pregrasp_standoffs_m=list(controller.annotation_standoffs),
+                palm_clearance_m=controller.annotation_palm_clearance,
+                placement_staging_clearance_m=controller.placement_staging_clearance,
+                placement_release_clearance_m=controller.placement_release_clearance,
+                loaded_travel_postures=controller.loaded_travel_postures,
+                preserve_planner_self_clearance=True)
         return run_fixture_demo(controller, name)
     if cli.flat_pick_only or (cli.thin_edge_pick and not cli.cross_room):
         from cross_episode_sim.manipulation.thin_edge_pick import ThinEdgePickTest

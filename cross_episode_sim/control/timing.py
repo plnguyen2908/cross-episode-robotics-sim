@@ -73,7 +73,7 @@ def settle_arm(controller, budget, pose=None, position_tolerance=.005):
         lambda: arm_ready(controller, pose, position_tolerance), label="arm")
 
 
-def gripper_open_ready(controller):
+def gripper_command_ready(controller):
     aid = controller.model.actuator(
         controller.profile.namespace + controller.profile.gripper_actuator).id
     kp = float(controller.model.actuator_gainprm[aid, 0])
@@ -87,6 +87,17 @@ def gripper_open_ready(controller):
                          - scale * float(controller.data.actuator_length[aid]))
     speed = abs(scale * float(controller.data.actuator_velocity[aid]))
     return position_error <= .02 * span and speed <= .02 * span
+
+
+def gripper_open_ready(controller):
+    """Compatibility name for readiness after an open command."""
+    return gripper_command_ready(controller)
+
+
+def wait_for_gripper_command(controller, budget):
+    """Wait for an unloaded gripper command; not a substitute for grasp contact."""
+    return wait_until_ready(controller, budget,
+        lambda: gripper_command_ready(controller), label="gripper_command")
 
 
 def wait_for_open_gripper(controller, budget):
@@ -114,7 +125,23 @@ def settle_released_object(controller, budget):
 
 def base_ready(controller, target):
     delta = controller.base_pose() - target
+    delta[2] = np.arctan2(np.sin(delta[2]), np.cos(delta[2]))
     velocity = [float(controller.data.joint(controller.profile.namespace + n).qvel[0])
                 for n in controller.profile.base_joints]
     return (np.linalg.norm(delta[:2]) <= .002 and abs(delta[2]) <= np.radians(.2)
             and np.linalg.norm(velocity[:2]) <= .005 and abs(velocity[2]) <= .01)
+
+
+def wait_for_stable_condition(controller, budget, ready, *, label, stable_seconds=.06):
+    """Require sustained physical evidence before ending a contact hold early."""
+    since = None
+    def stable():
+        nonlocal since
+        now = float(controller.data.time)
+        if not ready():
+            since = None
+            return False
+        if since is None:
+            since = now
+        return now - since >= stable_seconds - 1e-9
+    return wait_until_ready(controller, budget, stable, label=label)

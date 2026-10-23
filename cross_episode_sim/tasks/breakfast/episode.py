@@ -6,13 +6,13 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from cross_episode_sim.tasks.breakfast.scene import OUTWARD, SUPPORTS, bounds, support_bounds
-from cross_episode_sim.skills.composite import CompositeEpisode, Operation
-from cross_episode_sim.skills.transfer import TransferOperation
+from cross_episode_sim.controller.manipulation import TableReorder
+from cross_episode_sim.controller.navigation import parse_args
 from cross_episode_sim.manipulation.cross_room import CrossRoomManipulation
 from cross_episode_sim.manipulation.molmo_objects import assets_root
-from cross_episode_sim.controller.navigation import parse_args
-from cross_episode_sim.controller.manipulation import TableReorder
+from cross_episode_sim.skills.composite import CompositeEpisode, Operation
+from cross_episode_sim.skills.transfer import TransferOperation
+from cross_episode_sim.tasks.breakfast.scene import OUTWARD, SUPPORTS, bounds, support_bounds
 
 
 class BreakfastEpisode(CrossRoomManipulation):
@@ -128,6 +128,8 @@ class BreakfastEpisode(CrossRoomManipulation):
             # above an object, both for pickup and loaded release. Full-body
             # A* checks these closer docks (including the payload) as usual.
             offsets = ((.30, 0), (.26, 0), (.30, .08), (.30, -.08)) + offsets
+        offsets = (*offsets, *((distance, lateral) for distance in (.26, .38, .50)
+                              for lateral in (-.20, .20, -.35, .35)))
         for offset, lateral in offsets:
             xy = np.asarray(point[:2]).copy()
             xy[axis] = edge + outward[axis]*offset
@@ -142,17 +144,41 @@ class BreakfastEpisode(CrossRoomManipulation):
             skip = max(skip, getattr(self, '_public_dock_skip', 0))
         errors = []
         candidates = list(self.dock_candidates(room, point, pickup=not carrying))
+        recovery = (skip > 0 and getattr(self, '_public_skill_navigation', None) is True)
+        history=getattr(self,'_public_attempted_docks',{})
+        key=(room,self.object_name,bool(carrying))
+        if not recovery:history[key]=[]
+        self._public_attempted_docks=history
         if not carrying and getattr(self, '_trial_pick_active', False):
             candidates = [self._trial_pick_dock]
         for dock in candidates[skip:]:
+            local_recovery = recovery and not carrying
+            if recovery:
+                base = self.base_pose()
+                yaw_error = abs(float(np.arctan2(np.sin(base[2]-dock[2]), np.cos(base[2]-dock[2]))))
+                if np.linalg.norm(base[:2]-dock[:2]) < .02 and yaw_error < .04:
+                    continue
+                tried=list(history.get(key,()))
+                if carrying:tried.extend(getattr(self,'_placement_docks_tried',()))
+                if any(
+                        np.linalg.norm(old[:2]-dock[:2]) < .025 and
+                        abs(np.arctan2(np.sin(old[2]-dock[2]),np.cos(old[2]-dock[2]))) < .05
+                        for old in tried):
+                    continue
             try:
-                path = self.plan_route(dock[:2], carrying, face=dock[2])
+                from cross_episode_sim.navigation.checked_route import checked_route
+                path = checked_route(self, dock[:2], carrying, dock[2])
             except RuntimeError as exc:
                 errors.append(str(exc)); continue
             self._accepted_route = path
             if carrying and getattr(self, '_trial_delivery', False):
                 self._trial_rejected_docks.add(self.trial_dock_key(room, dock))
-            self.task_navigate(dock[:2], carrying, face=dock[2])
+            if local_recovery and np.linalg.norm(self.base_pose()[:2]-dock[:2]) <= 1.5:
+                from cross_episode_sim.skills.door_motion import dock_if_needed
+                dock_if_needed(self, dock[:2], dock[2])
+            else:
+                self.task_navigate(dock[:2], carrying, face=dock[2])
+            history.setdefault(key,[]).append(dock.copy())
             if carrying:
                 self._placement_docks_tried.append(dock.copy())
             if room in getattr(self, 'filling_surface_info', {}) and room != 'kitchen':
@@ -176,15 +202,18 @@ class BreakfastEpisode(CrossRoomManipulation):
             room = self.room_id(self.base_pose()[:2])
             if not room or room != self.room_id(goal):
                 raise
-            self._pickup_pre_nav_undock = .15
-            try:
-                path = TableReorder.plan_route(self, goal, carrying, face)
-            except RuntimeError:
-                self._pickup_pre_nav_undock = 0.
-                raise direct_error
-            self.record(dock_recovery='reverse before turning beside support',
-                        reverse_undock_m=.15)
-            return path
+            previous = getattr(self, '_pickup_pre_nav_undock', 0.)
+            for distance in (.15, .25, .35, .50):
+                self._pickup_pre_nav_undock = distance
+                try:
+                    path = TableReorder.plan_route(self, goal, carrying, face)
+                except RuntimeError:
+                    continue
+                self.record(dock_recovery='reverse before turning beside support',
+                            reverse_undock_m=distance)
+                return path
+            self._pickup_pre_nav_undock = previous
+            raise direct_error
 
     def pickup_support_top(self):
         # Use the same authored physical support as population and docking.
@@ -201,6 +230,16 @@ class BreakfastEpisode(CrossRoomManipulation):
         info = self.object_info[self.object_name]
         self.review_phase = f'PICK {info["role"]} IN {info["source"].upper()}'
         self.record(pickup_grasp_policy='top-down within 30 degrees across docks before qualified diagonal fallback; flat edge side-pick retained')
+        self.configure_pickup_approach()
+        self.navigate_to_site(info['source'], self.bread_pose()[:3, 3], False)
+        self._public_pickup_ready = self.object_name
+        # Edge pushing remains available through the existing mixin if needed.
+        if self.edge_fallback_eligible():
+            return super(CrossRoomManipulation, self).prepare_pickup()
+
+    def configure_pickup_approach(self):
+        """Configure support-dependent grasp search without moving the robot."""
+        info = self.object_info[self.object_name]
         top = support_bounds(self.model, self.data, self.task_supports[info['source']])[1][2]
         if top >= .88 and not self.edge_fallback_eligible():
             self.annotation_reach_weight = .5
@@ -226,11 +265,6 @@ class BreakfastEpisode(CrossRoomManipulation):
                         full_lift_height_m=self.args.lift_height,
                         minimum_measured_lift_m=self.minimum_pickup_lift_m,
                         full_lift_retreat_m=self.args.lift_retreat)
-        self.navigate_to_site(info['source'], self.bread_pose()[:3, 3], False)
-        self._public_pickup_ready = self.object_name
-        # Edge pushing remains available through the existing mixin if needed.
-        if self.edge_fallback_eligible():
-            return super(CrossRoomManipulation, self).prepare_pickup()
 
     def annotation_approach_allowed(self, pose):
         # Apply this after every library/family fallback too: resetting
@@ -306,7 +340,8 @@ class BreakfastEpisode(CrossRoomManipulation):
         except RuntimeError as exc:
             if str(exc) not in ('No annotated grasp passed robot reachability and collision checks',
                                'Saved grasp plans exhausted after stance recovery',
-                               'No saved grasp plan after bounded alternate navigation stances'):
+                               'No saved grasp plan after bounded alternate navigation stances',
+                               'Grasp unreachable at current dock; call navigate with another dock before retrying pick'):
                 raise
             if saved[2] != 'qualified_registry':
                 raise
@@ -445,13 +480,23 @@ class BreakfastEpisode(CrossRoomManipulation):
         for retract in (.24, .18, .12, .06, 0.):
             goal = start.copy()
             goal[:2, 3] += min(retract, max(0., distance-.30)) * direction
+            stationary=np.allclose(goal,start,atol=1e-10,rtol=0.)
             try:
-                path = self.plan_contact_path('retract filled vessel without tipping', goal)
+                if stationary:
+                    # Keeping the measured, stable lift pose needs no IK solve.
+                    # A loaded servo may sit just outside the IK optimizer's
+                    # bounds; asking it to rediscover this pose can fail even
+                    # though there is no requested movement.
+                    path=[[float(self.data.joint(self.profile.namespace+n).qpos[0])
+                           for n in self.planner.names]]
+                else:
+                    path = self.plan_contact_path('retract filled vessel without tipping', goal)
                 self.check_loaded_tuck_path(path)
             except RuntimeError as exc:
                 errors.append(str(exc));continue
             # Do not catch execution failures and continue with a lost payload.
-            self.mesh_contact_move('retract filled vessel without tipping', goal, path=path)
+            if not stationary:
+                self.mesh_contact_move('retract filled vessel without tipping', goal, path=path)
             home = [float(self.data.joint(self.profile.namespace+n).qpos[0])
                     for n in self.profile.arm_joints]
             self.embodiment.set_loaded_travel_posture(home)
@@ -463,14 +508,17 @@ class BreakfastEpisode(CrossRoomManipulation):
             return
         raise RuntimeError(f'No checked orientation-preserving filled carry pose: {errors}')
 
+    def prepare_carry_transition(self):
+        self.retreat_before_loaded_tuck()
+        self.tuck_loaded_for_navigation()
+
     def transport_payload(self):
         info = self.object_info[self.object_name]
         # Capture the actual successful pickup dock, including any grasp retry
         # repositioning. Keep it unchanged across destination redocking attempts.
         self._placement_pick_yaw = float(self.base_pose()[2])
         self.review_phase = f'CARRY {info["role"]} TO {info["destination"].upper()}'
-        self.retreat_before_loaded_tuck()
-        self.tuck_loaded_for_navigation()
+        self.prepare_carry_transition()
         try:
             self.navigate_to_site(info['destination'],info['destination_position'],True)
             self.prepare_destination()
@@ -664,6 +712,9 @@ class BreakfastEpisode(CrossRoomManipulation):
         # entire loaded motion directly to the supported +4 cm release pose.
         # The shared move still validates robot self geometry and tracking;
         # the shared release still requires measured support after opening.
+        clearance = getattr(self, '_retry_release_clearance', .04)
+        candidate = candidate.copy()
+        candidate[2, 3] -= .04-clearance
         retreat = self.tcp().copy()
         policy = 'direct cuRobo to low release'
         try:
@@ -676,7 +727,7 @@ class BreakfastEpisode(CrossRoomManipulation):
                 # arm workspace. Try lower supported releases, keeping the
                 # same upright footprint and all actual-mesh contact checks.
                 for clearance in (.02, .005):
-                    low = candidate.copy();low[2, 3] -= .04-clearance
+                    low = candidate.copy();low[2, 3] -= getattr(self, '_retry_release_clearance', .04)-clearance
                     try:
                         self.move('approach destination table', low)
                     except RuntimeError as lower_error:
@@ -707,7 +758,7 @@ class BreakfastEpisode(CrossRoomManipulation):
             self.move('approach destination table', candidate)
             policy = 'cuRobo via low staging outside support'
         self.record(placement_approach_policy=policy,
-                    release_clearance_m=.04,
+                    release_clearance_m=clearance,
                     placement_retreat_policy='return to pre-approach pose')
         return retreat
 
@@ -801,6 +852,7 @@ def build_controller(output, manifest, episode_class=BreakfastEpisode, overrides
     `overrides` sets controller arguments (see controller.navigation.parse_args).
     """
     import random
+
     import torch
     random.seed(manifest['seed']);np.random.seed(manifest['seed']);torch.manual_seed(manifest['seed'])
     supports=manifest.get('supports', SUPPORTS)
@@ -829,7 +881,7 @@ def build_controller(output, manifest, episode_class=BreakfastEpisode, overrides
     tables=[dict(body=body,objects=[i for i in manifest['bindings'] if i['source']==room])
             for room,body in supports.items()]
     selection=dict(selected_objects=manifest['bindings'],tables=tables,
-                   empty_robot_stances={body:[spawn] for body in SUPPORTS.values()},scene_xml=scene)
+                   empty_robot_stances={body:[spawn] for body in supports.values()},scene_xml=scene)
     (output/'adapter.json').write_text(json.dumps(selection,indent=2))
     for key,value in (overrides or {}).items():setattr(args,key,value)
     return episode_class(args,selection,manifest)

@@ -54,7 +54,7 @@ def install_blender(scene, old_object, table, xyz):
     tops = [float(data.geom_xpos[g,2]+model.geom_aabb[g,5])
             for g in range(model.ngeom) if model.geom_bodyid[g] in bids
             and (model.geom_contype[g] or model.geom_conaffinity[g])
-            and .5 < data.geom_xpos[g,2] < 1.2]
+            and .05 < data.geom_xpos[g,2] < 1.2]
     top = max(tops)
     position = np.array([xyz[0], xyz[1], top-metadata['blender_bottom_offset'][2]])
     blender = copy.deepcopy(native.find(f"worldbody/body[@name='{BLENDER}']"))
@@ -78,6 +78,13 @@ def handle_annotations(output):
     handle=native.find(".//geom[@name='skill_blender_lid_handle_main']")
     center=np.fromstring(handle.get('pos'),sep=' ')
     poses=[]
+    # Vertical descent onto the lid handle; qualified by physical grasp checks.
+    for height in (0., .008):
+        for yaw in np.linspace(0., 2*np.pi, 8, endpoint=False):
+            pose = np.eye(4)
+            pose[:3, :3] = Rotation.from_euler('z', yaw).as_matrix() @ np.diag([1., -1., -1.])
+            pose[:3, 3] = center + [0., 0., height]
+            poses.append(pose)
     for height in (0., .008):
         for yaw in np.linspace(0.,2*np.pi,8,endpoint=False):
             for tilt in (30.,15.,0.,45.):
@@ -115,7 +122,7 @@ class BlenderLidTest(CrossRoomManipulation):
             model_xml=str(GENERATED.resolve()),object_scale=[1.,1.,1.])
         metadata=json.loads(GENERATED.with_suffix('.json').read_text())
         self.anchor=self.data.body(BLENDER).xpos.copy()+metadata['anchor_offset']
-        self.dock=self.anchor[:2]+[0.,.44]
+        self.dock=self.anchor[:2]+[0.,.65 if getattr(args, 'fixed_atomic_interface', False) else .44]
         self.report.update(task='native blender lid open and close',fixture_asset='Blender008 + Blender008_Lid; registry dimensions',
             tracked_objects=[LID],atomic_results=[],native_closed_position_tolerance_m=.04,
             native_closed_upright_tolerance_deg=7.,native_gripper_clearance_m=.15,
@@ -126,6 +133,8 @@ class BlenderLidTest(CrossRoomManipulation):
     def annotation_approach_allowed(self,pose):
         if not super().annotation_approach_allowed(pose):
             return False
+        if getattr(self.args, 'fixed_atomic_interface', False):
+            return pose[2, 2] <= -np.cos(np.deg2rad(30.))
         # Keep the asymmetric Franka wrist above the worktop during a side
         # grasp, rather than using the jaw-equivalent wrist-below roll.
         return pose[2,0] > .5
@@ -174,7 +183,9 @@ class BlenderLidTest(CrossRoomManipulation):
         dock=self.dock.copy()
         if self.source==self.counter:dock[0]=self.bread_pose()[0,3]
         self.task_navigate(dock,False,face=-np.pi/2)
-        self.embodiment.open_gripper(self);self.tick(.5)
+        self.embodiment.open_gripper(self)
+        from cross_episode_sim.control.timing import wait_for_open_gripper
+        wait_for_open_gripper(self, .5)
         self.untuck_for_manipulation()
         self.initial_lift_height=.025
         self.physically_rejected_annotation_variants=set()
@@ -244,16 +255,19 @@ class BlenderLidTest(CrossRoomManipulation):
             # A round removable lid has no required yaw. Face the held grasp
             # toward the destination instead of preserving an awkward pickup
             # azimuth that can fold the elbow against the worktop.
-            delta=object_pose[:2,3]-self.base_pose()[:2]
-            yaw=np.arctan2(delta[1],delta[0])-np.arctan2(target[1,2],target[0,2])
-            object_pose[:3,:3]=Rotation.from_euler('z',yaw).as_matrix()@object_pose[:3,:3]
+            top_down = target[2,2] <= -np.cos(np.radians(30.))
+            if not top_down:
+                delta=object_pose[:2,3]-self.base_pose()[:2]
+                yaw=np.arctan2(delta[1],delta[0])-np.arctan2(target[1,2],target[0,2])
+                object_pose[:3,:3]=Rotation.from_euler('z',yaw).as_matrix()@object_pose[:3,:3]
             if self.destination==self.counter:
                 target=object_pose@np.linalg.inv(self.grasp_relative)
                 # Set the disk down on its edge first. This permits the wrist
                 # to stay above the counter; the released free lid settles
                 # flat under gravity rather than forcing a horizontal wrist.
-                tilt=Rotation.from_rotvec(-np.radians(25.)*target[:3,1]).as_matrix()
-                object_pose[:3,:3]=tilt@object_pose[:3,:3]
+                if not top_down:
+                    tilt=Rotation.from_rotvec(-np.radians(25.)*target[:3,1]).as_matrix()
+                    object_pose[:3,:3]=tilt@object_pose[:3,:3]
                 local=(self.bread_vertices()-self.bread_pose()[:3,3])@self.bread_pose()[:3,:3]
                 bottom=float((local@object_pose[:3,:3].T)[:,2].min())
                 xy=object_pose[:2,3]
@@ -263,7 +277,7 @@ class BlenderLidTest(CrossRoomManipulation):
             elif hasattr(self,'align_lid_center'):
                 object_pose=self.align_lid_center(object_pose)
             target=object_pose@np.linalg.inv(self.grasp_relative)
-            target[2,3]+=.02 if self.destination==self.counter else getattr(self,'lid_release_clearance',.004)
+            target[2,3]+=.02 if self.destination==self.counter else getattr(self,'lid_release_clearance',.008)
             above=target.copy();above[2,3]+=.08 if self.destination==self.counter else .04
             try:
                 goal=list(above[:3,3]-[0,0,self.embodiment.planner_tool_offset()])+list(
@@ -291,7 +305,9 @@ class BlenderLidTest(CrossRoomManipulation):
         self.move('above lid destination',above)
         self.mesh_contact_move('seat blender lid',target)
         self.holding_loaf=False
-        self.embodiment.open_gripper(self);self.tick(1.)
+        self.embodiment.open_gripper(self)
+        from cross_episode_sim.control.timing import settle_released_object
+        settle_released_object(self, 1.)
         self.planner.detach_block();self.attached=False
         support=self.assignment()[self.object_name]
         if support!=self.destination:raise RuntimeError(f'Lid release support {support} != {self.destination}')
@@ -310,7 +326,9 @@ class BlenderLidTest(CrossRoomManipulation):
         else:raise RuntimeError(f'No clear released-lid withdrawal: {errors}')
         self.record(lid_withdrawal_offset=np.asarray(offset).tolist(),rejected_withdrawals=errors)
         self.mesh_contact_move('withdraw from released blender lid',retreat,path=path)
-        self.tuck_for_navigation();self.tick(.5)
+        self.tuck_for_navigation()
+        from cross_episode_sim.control.timing import settle_arm
+        settle_arm(self, .5)
         state=self.state()
         valid=(state['gripper_distance_m']>.15 and self.assignment()[self.object_name]==self.destination)
         valid=valid and (not state['lid_on_blender'] if self.destination==self.counter else state['lid_on_blender'])

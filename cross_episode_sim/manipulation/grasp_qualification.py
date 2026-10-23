@@ -108,7 +108,10 @@ class GraspQualification(RoboCasaManipulation):
         self.report['actual_gripper_force_limit'] = self.model.actuator_forcerange[aid].tolist()
         self._force_trace_time = -1.
         self.data.ctrl[aid] = self.model.actuator_ctrlrange[aid, 1]
-        self.tick(1.0)
+        from cross_episode_sim.control.timing import wait_for_stable_condition, payload_ready
+        wait_for_stable_condition(self, 1.0,
+            lambda: len(self.finger_object_contact()['fingers']) >= 2
+                    and payload_ready(self), label='pickup_closure', stable_seconds=.10)
         self.holding_loaf = True
         self._drop_reference = (np.linalg.inv(self.tcp()) @ self.bread_pose())[:3, 3].copy()
         self._drop_seconds = 0.0
@@ -154,7 +157,13 @@ class GraspQualification(RoboCasaManipulation):
 
     def pick_payload(self):
         super().pick_payload()
-        self.stage = 'qualify physical grasp: two-second hold'
+        operational = (getattr(self.args, 'fixed_atomic_interface', False)
+                       and getattr(self, 'adaptive_motion_settling', False))
+        self.stage = ('verify stable lifted grasp' if operational
+                      else 'qualify physical grasp: two-second hold')
+        hold_start = float(self.data.time)
+        stable_since = None
+        stable = False
         initial_relative = np.linalg.inv(self.tcp()) @ self.bread_pose()
         min_lift, min_force = float('inf'), float('inf')
         max_slip = max_rotation = max_penetration = 0.
@@ -173,17 +182,35 @@ class GraspQualification(RoboCasaManipulation):
             if lift < getattr(self, 'minimum_pickup_lift_m', .10) or self.support_contacts(table=True):
                 raise RuntimeError(f'Grasp qualification failed: lift={lift:.4f}, force={force:.3f}, '
                                    f'slip={slip:.4f}, rotation={rotation:.2f}, depth={contact["depth_m"]:.5f}')
+            if operational:
+                from cross_episode_sim.control.timing import payload_ready, arm_ready
+                stable = (len(contact['fingers']) == 2 and force > 0.
+                          and payload_ready(self) and arm_ready(self))
+                if not stable:
+                    stable_since = None
+                elif stable_since is None:
+                    stable_since = float(self.data.time)
+                elif self.data.time - stable_since >= .20 - 1e-9:
+                    break
+        hold_seconds = float(self.data.time) - hold_start
+        if operational and (not stable or stable_since is None
+                            or self.data.time-stable_since < .20-1e-9):
+            raise RuntimeError('Lifted grasp did not reach sustained stability within hold budget')
+        self.record(grasp_hold_seconds=hold_seconds,
+                    grasp_hold_policy='adaptive_operational' if operational else 'qualification_2s')
         actual = np.linalg.inv(self.bread_pose()) @ self.tcp()
         asset = self.asset_metadata
         model_path = Path(asset['model_xml'])
-        record = dict(validation_policy='physical_lift_and_retention_v2', schema_version=1, asset=asset['asset'], source=asset['source'],
+        record = dict(validation_policy=('operational_stable_lift_v1' if operational
+                                        else 'physical_lift_and_retention_v2'), schema_version=1, asset=asset['asset'], source=asset['source'],
             robot=self.profile.name, gripper='Robotiq2f85_v4', object_scale=asset['object_scale'],
             model_xml=str(model_path), model_sha256=model_digest(model_path),
             frame='object root body; metres; object_T_tcp maps TCP coordinates to object coordinates',
             object_T_tcp=actual.tolist(),
             planned_object_T_tcp=self.report['annotation_selection']['local_transform'],
             selected_annotation=self.report['annotation_selection']['selected_index'],
-            candidate_source=self.args.annotation_source, hold_seconds=2.,
+            candidate_source=self.args.annotation_source, hold_seconds=hold_seconds,
+            hold_policy='adaptive_operational' if operational else 'qualification_2s',
             required_hold_lift_m=getattr(self, 'minimum_pickup_lift_m', .10),
             minimum_hold_lift_m=min_lift, minimum_hold_force_per_finger_n=min_force,
             maximum_hold_translation_slip_m=max_slip, maximum_hold_rotation_slip_deg=max_rotation,
@@ -195,6 +222,12 @@ class GraspQualification(RoboCasaManipulation):
             video=str((self.output/self.video_filename).resolve()),
             scope='validated for this object scale, robot, scene pose and contact model; replan before reuse')
         (self.output/'qualified_grasp.json').write_text(json.dumps(record, indent=2))
+        if operational:
+            self.report['operational_grasp_hold'] = dict(seconds=hold_seconds,
+                stable_seconds=.20, maximum_seconds=2., qualification_protocol=False)
+            self.report.setdefault('qualification_protocol', {}).update(
+                hold_seconds=hold_seconds, hold_policy='adaptive_operational',
+                maximum_hold_seconds=2., required_stable_seconds=.20)
         self.report['grasp_qualified'] = True
         self.record(qualified_grasp=True, min_hold_lift_m=min_lift,
                     minimum_hold_force_per_finger_n=min_force, maximum_hold_slip_m=max_slip)

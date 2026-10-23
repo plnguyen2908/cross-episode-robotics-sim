@@ -132,3 +132,67 @@ target is the portafilter. There is no registered `CoffeeMachine` type in the
 current object catalog. Mug delivery to the machine uses the separate argument
 combination `asset_type="Mug", destination="spout"`. See the
 [skill reference](breakfast_skill_api.md#coffee-machine-navigation-terminology).
+
+## New batch comparison: no improvement in task completion
+
+Source: [new batch summary](../runs/qwen_oracle_evaluation_ygz3w4de/summary.json).
+Recorded on 2026-10-13. The four episodes with skill journals all exhausted their
+40-call budgets and failed the task. Example 0004 has no rollout journal because
+it failed during evaluation setup, as detailed below.
+
+| Example | Recorded skill calls | Successful calls | Task outcome |
+| --- | --- | --- | --- |
+| 0001 | 32 navigate; 1 detach_portafilter; 7 pick_dosing_box | 34/40 | Failed: tool budget |
+| 0002 | 2 detach_portafilter; 36 pick_dosing_box; 1 place_dosing_box; 1 attach_portafilter | 4/40 | Failed: tool budget |
+| 0003 | 40 navigate | 40/40 | Failed: tool budget; no manipulation attempted |
+| 0004 | No episode skill journal | N/A | Setup error: missing Franka mesh |
+| 0005 | 31 navigate; 1 detach_portafilter; 8 pick_dosing_box | 33/40 | Failed: tool budget |
+
+All recorded navigation calls requested
+`asset_type="MoonlakePortafilter", destination="source"`. Repeated successful
+arrival checks do not represent additional task progress. The other recurring
+pattern is repeated grounds-box pickup. No episode called `pour_grounds`.
+
+The earlier status report described example 0004 as missing. Inspecting the batch
+summary identifies its actual error:
+
+```text
+ValueError: Error: Error opening file '/home/leos/.cache/molmo-spaces-resources/robots/franka_droid/20260127/assets/link6_2.obj'
+```
+
+This is an infrastructure/setup failure, not evidence of a planner error. The
+summary records `termination="evaluation_error"`; worker exit 0 does not mean the
+episode succeeded.
+
+**Comparison:** the previous batch completed 0/5 tasks. The new batch completed
+0/4 executed rollouts, plus one setup failure (0/5 across the attempted batch).
+There is no observed improvement in task completion. Broader target support and
+more successful navigation calls have not resolved the planner's repeated-call
+loops. These small, evolving batches are diagnostic observations, not a controlled
+estimate of the interface change's effect. EQA results above are from their
+separate recorded run; no new EQA score is inferred from this action batch.
+
+### New batch rollout links
+
+- [Example 0001 rollout](../runs/qwen_oracle_evaluation_ygz3w4de/000_example_0001/episode_000/rollout.mp4)
+- [Example 0002 rollout](../runs/qwen_oracle_evaluation_ygz3w4de/001_example_0002/episode_000/rollout.mp4)
+- [Example 0003 rollout](../runs/qwen_oracle_evaluation_ygz3w4de/002_example_0003/episode_000/rollout.mp4)
+- [Example 0005 rollout](../runs/qwen_oracle_evaluation_ygz3w4de/004_example_0005/episode_000/rollout.mp4)
+
+Example 0004 has no rollout video because setup failed.
+
+### Example 0004 setup recovery
+
+The reported `link6_2.obj` file was present and readable when investigated. The
+original read failure could not be reproduced; an intermittent cache/filesystem
+read is suspected, not established. Scene construction now retries MuJoCo's
+specific `Error opening file` error at most three times, rebuilding the scene
+specification each time. Persistent missing files and unrelated model errors
+still fail; no skill execution or completed episode is replayed by this retry.
+
+Three focused tests passed (transient recovery, bounded persistent failure, and
+no retry for unrelated errors). A fresh initialization of example 0004 succeeded,
+rendered its wrist observation, and exposed 13 skills:
+[setup verification](../runs/example4_setup_check_3b89ob5s/result.json).
+This verifies setup, not completion of a Qwen episode, and does not revise the
+historical batch score.

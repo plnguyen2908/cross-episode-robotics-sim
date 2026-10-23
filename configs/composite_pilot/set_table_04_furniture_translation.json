@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "episode_id": "set_table_04_furniture_translation",
+  "task": "set_table",
+  "variant": "furniture_translation",
+  "instruction": "Set the dining table for 3 people. Give each place setting one bowl and one cup. Leave extra items where they are.",
+  "procedure": "by_place_setting",
+  "scene": {
+    "seed": 7,
+    "kitchen_layout": 1,
+    "kitchen_style": 1,
+    "people": 3,
+    "object_counts": {
+      "bowl": 3,
+      "cup": 3
+    },
+    "asset_instance_set": "baseline",
+    "furniture": {
+      "dining_set": {
+        "dx": 0.35,
+        "dy": 0.05,
+        "yaw_deg": 0
+      },
+      "sofa": {
+        "dx": 0.7,
+        "dy": 0.6,
+        "yaw_deg": 0
+      },
+      "coffee_table": {
+        "dx": 0.55,
+        "dy": 0.6,
+        "yaw_deg": 0
+      }
+    },
+    "forbidden_object_categories": [
+      "plate",
+      "flat_object"
+    ],
+    "minimum_heating_seconds": null
+  },
+  "goal_keys": [
+    "three_complete_settings",
+    "extras_unchanged",
+    "empty_hand"
+  ],
+  "requirements": [
+    "multi_object_transfer",
+    "setting_regions"
+  ],
+  "catalog_version": "fixed-atomic-v1",
+  "video_speedup": 1.0,
+  "dataset_role": "pilot_unassigned",
+  "initial_state_policy": "deterministic_setup_from_scene_config",
+  "validation_status": "not_executed",
+  "scene_spec_sha256": "ea9691f82953bc8e80b534b78a31c02e9450ebc409166ff5a1d683ecc152bbd3"
+}

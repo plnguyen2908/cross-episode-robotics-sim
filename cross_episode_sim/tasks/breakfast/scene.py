@@ -258,7 +258,10 @@ def allocate_sites(model, data, requests, reserved=None):
                 if bid in support_ids or not (model.geom_contype[gid] or model.geom_conaffinity[gid]):continue
                 owner=bid;movable=False
                 while owner:
-                    if model.body_jntnum[owner]:movable=True;break
+                    joints = range(int(model.body_jntadr[owner]),
+                                   int(model.body_jntadr[owner]+model.body_jntnum[owner]))
+                    if any(model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE for j in joints):
+                        movable=True;break
                     owner=int(model.body_parentid[owner])
                 if movable:continue
                 points=data.geom_xpos[gid]+(model.geom_aabb[gid,:3]+corners*model.geom_aabb[gid,3:])@data.geom_xmat[gid].reshape(3,3).T
@@ -271,14 +274,20 @@ def allocate_sites(model, data, requests, reserved=None):
                     model.geom_group[g]=4
             candidates=request.get('candidates')
             if candidates is None:
-                candidates=[(f,request.get('inset',.025)) for f in
+                # A rotated tabletop's world AABB edge is not its physical
+                # edge. Search inward too; the same footprint rays still
+                # require the entire object to rest on the real surface.
+                insets=[request['inset']] if 'inset' in request else [.025,.075,.125,.20,.30]
+                candidates=[(f,inset) for inset in insets for f in
                             sorted(np.linspace(.05,.95,61),key=lambda f:abs(f-request['preferred']))]
             for fraction,inset in candidates:
                 position=np.asarray(site_pose(model,data,obj,room,float(fraction),float(inset)))
                 lo,hi=low+position-origin,high+position-origin
                 slo,shi=support_bounds(model,data,SUPPORTS[room])
                 if np.any(lo[:2]<slo[:2]+.005) or np.any(hi[:2]>shi[:2]-.005):continue
-                if any(np.all(lo-.003<ohi) and np.all(hi+.003>olo) for olo,ohi in static):continue
+                clearance_hi = hi.copy()
+                clearance_hi[2] += float(request.get('pickup_clearance', 0.))
+                if any(np.all(lo-.003<ohi) and np.all(clearance_hi+.003>olo) for olo,ohi in static):continue
                 if any(np.all(lo[:2]-.035<ohi[:2]) and np.all(hi[:2]+.035>olo[:2])
                        for olo,ohi in reserved[room]):continue
                 supported=True

@@ -96,7 +96,7 @@ def test_cross_room_escape_checks_sideways_prefix_before_planning(monkeypatch):
     # Turning or reversing at the dock is blocked; the left side is also blocked.
     # The holonomic right-side escape remains clear without changing heading.
     def clear(p):
-        return p[1] <= .001 and abs(p[2]) < .001
+        return p[1] <= .001 and abs(p[0]) < .001 and abs(p[2]) < .001
     path, metrics = planners.plan_cross_room_escape(None, None, [0, 0, 0], [2, -1, 0], clear, lambda p: True)
     np.testing.assert_allclose(path[0], [0, 0, 0])
     np.testing.assert_allclose(path[1], [0, -.2, 0])
@@ -110,6 +110,61 @@ def test_cross_room_escape_rejects_blocked_middle_even_with_clear_endpoints(monk
     def forbidden(*args):
         raise AssertionError('A blocked prefix must not be submitted as an escape')
     monkeypatch.setattr(planners, 'plan_cross_room_route', forbidden)
-    with pytest.raises(RuntimeError, match='No swept-clear sideways departure'):
+    with pytest.raises(RuntimeError, match='No swept-clear local departure'):
         planners.plan_cross_room_escape(None, None, [0, 0, 0], [2, 0, 0],
-                                        lambda p: not .04 < abs(p[1]) < .16, lambda p: True)
+                                        lambda p: not .04 < np.linalg.norm(p[:2]) < .16, lambda p: True)
+
+
+def test_forward_only_escape_preserves_reverse_prefix(monkeypatch):
+    import cross_episode_sim.navigation.planners as planners
+    def plan(scene, reach, start, final, clear):
+        return [start.copy(), np.asarray(final)], {}
+    monkeypatch.setattr(planners, 'plan_cross_room_route', plan)
+    checked = []
+    def clear(p):
+        checked.append(p.copy())
+        return p[0] <= 0 and abs(p[1]) < 1e-8 and abs(p[2]) < 1e-8
+    path, metrics = planners.plan_cross_room_escape(None, None, [0, 0, 0], [-2, 0, 0],
+        clear, lambda p: False, allow_lateral=False)
+    np.testing.assert_allclose(path[:2], [[0, 0, 0], [-.2, 0, 0]])
+    assert metrics['reverse_undock_m'] == .2
+    assert len(checked) >= 9
+
+
+def test_forward_only_escape_does_not_substitute_sideways_motion(monkeypatch):
+    import pytest
+    import cross_episode_sim.navigation.planners as planners
+    def forbidden(*args):
+        raise AssertionError('No straight departure is clear')
+    monkeypatch.setattr(planners, 'plan_cross_room_route', forbidden)
+    with pytest.raises(RuntimeError, match='No swept-clear local departure'):
+        planners.plan_cross_room_escape(None, None, [0, 0, 0], [0, -2, 0],
+            lambda p: abs(p[0]) < 1e-8, lambda p: True, allow_lateral=False)
+
+
+def test_same_room_turn_failure_tries_checked_reverse(monkeypatch):
+    import cross_episode_sim.navigation.planners as planners
+    attempts = []
+    def route(start, final, floor, clear, reverse):
+        attempts.append(reverse)
+        if reverse == 0:
+            raise RuntimeError('Start turn blocked')
+        return [np.array(start), np.array(final)], {}
+    monkeypatch.setattr(planners, 'forward_route', route)
+    _, metrics = planners.plan_same_room_route([0, 0, 0], [1, 0, 0],
+                                               lambda p: True, lambda p: True)
+    assert attempts == [0., .15]
+    assert metrics['reverse_undock_m'] == .15
+
+
+def test_same_room_aligns_before_entering_tight_dock():
+    start=np.array([0.,0.,0.]);goal=np.array([1.,1.,0.])
+    def clear(p):
+        # Near the goal only the final heading fits; outside there is turn room.
+        return np.linalg.norm(np.asarray(p[:2])-goal[:2])>.18 or abs(np.arctan2(np.sin(p[2]),np.cos(p[2])))<.06
+    path,metrics=plan_same_room_route(start,goal,lambda p:-1<p[0]<2 and -1<p[1]<2,clear)
+    assert metrics['straight_docking_approach_m']>=.25
+    assert np.allclose(path[-1],goal)
+    assert abs(path[-2][1]-goal[1])<1e-9
+    assert abs(path[-2][2])<1e-9
+    assert all(clear(a+u*(b-a)) for a,b in zip(path,path[1:]) for u in np.linspace(0,1,30))

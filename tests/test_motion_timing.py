@@ -144,6 +144,7 @@ def test_base_must_reach_endpoint_and_stop_before_continuing():
         data=SimpleNamespace(joint=lambda n: SimpleNamespace(
             qvel=[velocity[['x','y','yaw'].index(n)]])))
     assert base_ready(c, np.zeros(3))
+    assert base_ready(c, np.array([0., 0., 2*np.pi]))
     assert not base_ready(c, np.array([.01, 0., 0.]))
     velocity[2] = .1
     assert not base_ready(c, np.zeros(3))
@@ -152,3 +153,21 @@ def test_base_must_reach_endpoint_and_stop_before_continuing():
 def test_breakfast_enables_adaptive_settling_by_default():
     from cross_episode_sim.tasks.breakfast.gather import GatherBreakfast
     assert GatherBreakfast.adaptive_motion_settling
+
+
+def test_contact_hold_requires_continuous_evidence():
+    from cross_episode_sim.control.timing import wait_for_stable_condition
+    c = servo()
+    # A brief initial touch must not count as a stable grasp.
+    wait_for_stable_condition(c, .5, lambda: c.data.time < .03 or c.data.time >= .10,
+                              label="contact", stable_seconds=.06)
+    assert .16 <= c.data.time < .20
+    assert c.report['motion_settling']['contact']['budget_exhausted'] == 0
+
+
+def test_missing_contact_exhausts_original_budget():
+    from cross_episode_sim.control.timing import wait_for_stable_condition
+    c = servo()
+    wait_for_stable_condition(c, .2, lambda: False, label="contact")
+    assert c.data.time == pytest.approx(.2)
+    assert c.report['motion_settling']['contact']['budget_exhausted'] == 1

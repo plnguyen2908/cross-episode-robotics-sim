@@ -115,3 +115,60 @@ class SharedManipulationTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_compartment_extraction_preflight_withdraws_before_full_lift():
+    model=mujoco.MjModel.from_xml_string('''<mujoco><worldbody>
+      <body><joint name="robot_0/hinge"/><geom size=".01"/></body>
+      <body><joint name="robot_0/base_theta"/><geom size=".01"/></body>
+      <body name="payload"><freejoint name="payload_joint"/><geom size=".01"/></body>
+    </worldbody></mujoco>''')
+    live=mujoco.MjData(model);mujoco.mj_forward(model,live)
+    before=live.qpos.copy();goals=[]
+    check=SimpleNamespace(model=model,data=live,holding_loaf=False,
+        planner=SimpleNamespace(names=['hinge']),initial_lift_height=.025,
+        args=SimpleNamespace(lift_height=.15,lift_retreat=0.),
+        profile=SimpleNamespace(base_joints=['base_x','base_y','base_theta']),
+        object_joint='payload_joint',pickup_withdrawal_vector=np.array([0.,-.1,0.]),
+        tcp=lambda:np.eye(4),embodiment=SimpleNamespace(probe_aperture=lambda *args:None))
+    def payload():
+        pose=np.eye(4);pose[:3,3]=check.data.body('payload').xpos;return pose
+    check.bread_pose=payload
+    def plan(stage,pose):
+        goals.append(pose[:3,3].copy())
+        return np.array([[.5]])
+    check.plan_contact_path=plan
+    AnnotatedGraspMixin.validate_grasp_lift(check,[.5],.04)
+    np.testing.assert_allclose(goals,[[0,0,.025],[0,-.1,.025],[0,-.1,.15]])
+    np.testing.assert_array_equal(live.qpos,before)
+    assert check.data is live and not check.holding_loaf
+
+
+def test_compartment_withdrawal_executes_contact_path():
+    from cross_episode_sim.controller.transfer import TableTransfer
+    executed=[]
+    check=SimpleNamespace(mesh_contact_move=lambda stage,pose:executed.append((stage,pose)))
+    goal=np.eye(4)
+    TableTransfer.move(check,'withdraw held object from compartment',goal)
+    assert len(executed)==1
+    assert executed[0][0]=='withdraw held object from compartment'
+    assert executed[0][1] is goal
+
+
+def test_pick_opens_empty_jaws_before_constructing_grasp_candidates(monkeypatch):
+    from cross_episode_sim.controller.base import FridgeTransfer
+    from cross_episode_sim.control import timing
+    import pytest
+    events = []
+    c = SimpleNamespace(
+        args=SimpleNamespace(),
+        embodiment=SimpleNamespace(open_gripper=lambda c: events.append('open')),
+        drop_only_grasp=True, prepare_pickup=lambda: events.append('prepare'),
+        bread_pose=lambda: np.eye(4), bread_vertices=lambda: np.zeros((2,3)),
+        record=lambda **kw: None, support_contacts=lambda **kw: [],
+        describe_stage=lambda text: text)
+    monkeypatch.setattr('cross_episode_sim.controller.base.wait_for_open_gripper', lambda c,b: events.append(('ready', b)))
+    monkeypatch.setattr(timing, 'gripper_open_ready', lambda c: True)
+    with pytest.raises(RuntimeError, match='initially supported'):
+        FridgeTransfer.pick_payload(c)
+    assert events == ['open', ('ready', 1.2), 'prepare']

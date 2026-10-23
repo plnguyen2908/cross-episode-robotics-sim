@@ -17,7 +17,7 @@ def worker_task(entry):
 
 
 def from_example(*, example, output_root, seed=None, episode='current',
-                 cameras=('robot_0/wrist_cam',), image_size=(224, 224), visual_grounding=False, any_vessel=True):
+                 cameras=('robot_0/navigation_cam', 'robot_0/wrist_cam'), image_size=(224, 224), visual_grounding=False, any_vessel=True):
     """The model never receives run_manifest, the witness plan, or current video.
 
     The example fixes the scene seed; the evaluator seed controls the model trial.

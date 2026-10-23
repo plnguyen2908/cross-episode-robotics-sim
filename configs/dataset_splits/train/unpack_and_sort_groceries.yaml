@@ -1,0 +1,47 @@
+task: unpack_and_sort_groceries
+seed: 10300
+count: 1
+base_layout:
+  profile: two_rooms
+  rooms:
+  - 2
+  - 2
+  max_attempts: 100
+  loop_probability: 0.8
+fixed:
+  scene.people: 2
+  scene.kitchen_layout: 1
+  scene.asset_instance_set: baseline
+controls:
+  execution_order:
+    procedure:
+      choices:
+      - drinks_first
+      - snacks_first
+  furniture_translation:
+    scene.furniture.dining_set.dx:
+      uniform:
+      - -0.1
+      - 0.1
+    scene.furniture.dining_set.dy:
+      uniform:
+      - -0.1
+      - 0.1
+  furniture_rotation:
+    scene.furniture.dining_set.yaw_deg:
+      uniform:
+      - -5
+      - 5
+  appearance_theme:
+    scene.appearance.preset:
+      choices:
+      - warm_home
+      - cool_daylight
+  door_route:
+    room_route:
+      choices:
+      - default
+      - closed_direct
+randomize_controls:
+  min_active: 5
+  max_active: 5

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900"><rect width="1600" height="900" fill="#F6F7FB"/>
+<text x="75.0" y="64.46" font-family="Arial,sans-serif" font-size="19.459999999999997" fill="#315DE0" font-weight="700">PROPOSED ARCHITECTURE</text>
+<text x="75.0" y="144.48" font-family="Arial,sans-serif" font-size="44.48" fill="#17243B" font-weight="700">Recall experience. Plan hierarchically. Execute skills.</text>
+<rect x="515.0" y="200.0" width="565.0" height="105.0" rx="18" fill="#E9E5FA" stroke="#E9E5FA"/>
+<text x="545.0" y="240.63" font-family="Arial,sans-serif" font-size="23.63" fill="#6A48A7" font-weight="700">MEMORY OF PAST EPISODES</text>
+<text x="545.0" y="280.23999999999995" font-family="Arial,sans-serif" font-size="22.24" fill="#66738A" font-weight="400">Relevant procedures, objects, and locations</text>
+<text x="635.0" y="333.85" font-family="Arial,sans-serif" font-size="20.849999999999998" fill="#6A48A7" font-weight="400">↑ Query       ↓ Retrieved experience</text>
+<rect x="65.0" y="405.0" width="260.0" height="175.0" rx="18" fill="#FFFFFF" stroke="#DCE2EE"/>
+<text x="95.0" y="453.02000000000004" font-family="Arial,sans-serif" font-size="25.02" fill="#315DE0" font-weight="700">TASK + VIEW</text>
+<text x="95.0" y="507.24" font-family="Arial,sans-serif" font-size="22.24" fill="#17243B" font-weight="400">Instruction</text>
+<text x="95.0" y="533.64" font-family="Arial,sans-serif" font-size="22.24" fill="#17243B" font-weight="400">Current observation</text>
+<path d="M338.0,498.00000000000006 h53.0 m-8,-8 l8,8 -8,8" fill="none" stroke="#315DE0" stroke-width="3"/>
+<rect x="415.00000000000006" y="365.0" width="690.0" height="275.0" rx="18" fill="#FFFFFF" stroke="#B7C8F6"/>
+<text x="450.00000000000006" y="420.19" font-family="Arial,sans-serif" font-size="29.189999999999998" fill="#315DE0" font-weight="700">ONE PLANNER MODEL</text>
+<rect x="440.00000000000006" y="465.00000000000006" width="275.0" height="132.0" rx="18" fill="#EEF2FF" stroke="#EEF2FF"/>
+<text x="465.0" y="507.0199999999999" font-family="Arial,sans-serif" font-size="25.02" fill="#17243B" font-weight="700">Subtask sequence</text>
+<text x="465.0" y="551.46" font-family="Arial,sans-serif" font-size="19.459999999999997" fill="#66738A" font-weight="400">What needs to be done?</text>
+<path d="M725.0,527.0 h43.00000000000001 m-8,-8 l8,8 -8,8" fill="none" stroke="#315DE0" stroke-width="3"/>
+<rect x="790.0" y="465.00000000000006" width="290.0" height="132.0" rx="18" fill="#EEF2FF" stroke="#EEF2FF"/>
+<text x="812.9999999999999" y="505.62999999999994" font-family="Arial,sans-serif" font-size="23.63" fill="#17243B" font-weight="700">Atomic skill sequence</text>
+<text x="812.9999999999999" y="551.46" font-family="Arial,sans-serif" font-size="19.459999999999997" fill="#66738A" font-weight="400">Ordered skills + arguments</text>
+<path d="M1120.0,498.00000000000006 h53.0 m-8,-8 l8,8 -8,8" fill="none" stroke="#315DE0" stroke-width="3"/>
+<rect x="1200.0" y="405.0" width="330.0" height="175.0" rx="18" fill="#E3F3F0" stroke="#E3F3F0"/>
+<text x="1230.0" y="455.80000000000007" font-family="Arial,sans-serif" font-size="27.799999999999997" fill="#087F80" font-weight="700">VLA EXECUTOR</text>
+<text x="1230.0" y="509.24" font-family="Arial,sans-serif" font-size="22.24" fill="#17243B" font-weight="400">Skill + target + observation</text>
+<text x="1230.0" y="535.64" font-family="Arial,sans-serif" font-size="22.24" fill="#17243B" font-weight="400">→ Robot actions</text>
+<text x="510.0" y="693.63" font-family="Arial,sans-serif" font-size="23.63" fill="#087F80" font-weight="400">←  Updated observation + execution outcome: replan as needed</text>
+<rect x="65.0" y="742.0" width="1465.0" height="92.0" rx="18" fill="#E9EDF5" stroke="#E9EDF5"/>
+<text x="95.0" y="785.63" font-family="Arial,sans-serif" font-size="23.63" fill="#17243B" font-weight="400">Example: Prepare a meal  →  Heat food / retrieve drink / serve  →  Navigate / open / pick / place / …</text>
+<text x="85.0" y="873.07" font-family="Arial,sans-serif" font-size="18.07" fill="#66738A" font-weight="400">Fixed atomic vocabulary • One skill-conditioned VLA can execute multiple skills • Memory mechanism to be developed</text>
+</svg>

@@ -611,10 +611,12 @@ python -m scripts.evaluate_dataset --dataset datasets/test_set_v1 \
 The public catalog uses `asset_type` instead of `role`. Vessel transport accepts
 `Mug` and `Bowl`; navigation and pickup also attempt other scene types such as
 `Plate`, `Apple`, `Vase`, and `SaltShaker`. Omit navigation destination to approach
-the object. A different pick type after navigation returns `target_type_mismatch`.
+the object. Pickup may select any currently visible matching object, independently
+of previous navigation. Off-camera types return `target_not_visible`.
 Source navigation chooses an unserved, non-retired instance by proximity, using
-private current scene geometry (not the oracle witness plan). Following calls
-remain bound to that same instance, with the actual held object taking precedence.
+private current scene geometry (not the oracle witness plan). Pickup refreshes
+visibility from the configured input cameras; transport and placement preserve
+the actual held object's identity.
 After successful serving, another source-navigation call selects a new instance.
 Destination, source, and place-setting arguments retain their original semantics.
 Fixed-object skills such as `pick_dosing_box` are unchanged.

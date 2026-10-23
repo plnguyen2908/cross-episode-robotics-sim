@@ -38,7 +38,9 @@ def make_interface(tmp_path):
             if name == 'place': c.holding_loaf=False
             return dict(success=True)
     base = Base()
-    return AnyVesselInterface(c,base), base, c
+    api = AnyVesselInterface(c,base)
+    api.visible_bodies = lambda: {'near', 'far', 'bowl'}
+    return api, base, c
 
 
 def test_type_catalog_selection_and_sticky_instance(tmp_path):
@@ -47,7 +49,6 @@ def test_type_catalog_selection_and_sticky_instance(tmp_path):
     assert 'enum' not in catalog[0]['parameters']['properties']['asset_type']
     assert 'role' not in catalog[0]['parameters']['properties']
     assert 'role' in base.list_skills()[0]['parameters']['properties']
-    assert api.execute_skill('pick',dict(asset_type='Mug',source='surface'))['error']['kind']=='source_navigation_required'
     for name,args in [('navigate',dict(destination='source')),('pick',dict(source='surface')),
                       ('navigate',dict(destination='spout')),('place',dict(destination='spout')),
                       ('navigate',dict(destination='spout')),('pick',dict(source='spout')),
@@ -63,13 +64,14 @@ def test_failed_candidate_fallback_and_exhaustion(tmp_path):
     base.failures[('navigate','cup_05')]='execution_failed'
     assert api.execute_skill('navigate',dict(asset_type='Mug',destination='source'))['success']
     assert api.selected['Mug']=='cup_01'
+    api.visible_bodies = lambda: {'far'}
     base.failures[('pick','cup_01')]='execution_failed'
     assert not api.execute_skill('pick',dict(asset_type='Mug',source='surface'))['success']
     assert api.execute_skill('navigate',dict(asset_type='Mug',destination='source'))['error']['kind']=='no_feasible_target'
     assert len(base.calls)==3
 
 
-def test_ordering_failure_does_not_retire_candidates(tmp_path):
+def test_ordering_failure_does_not_retire_candidates(tmp_path, monkeypatch):
     api,base,c=make_interface(tmp_path)
     base.failures[('navigate','cup_05')]='precondition_failed'
     assert not api.execute_skill('navigate',dict(asset_type='Mug',destination='source'))['success']
@@ -78,7 +80,8 @@ def test_ordering_failure_does_not_retire_candidates(tmp_path):
     api.validate('pick',dict(asset_type='Plate',source='surface'))
     assert api.execute_skill('navigate',dict(asset_type='Plate'))['error']['kind']=='target_not_found'
     c.holding_loaf=True; c.object_name='bowl'
-    assert api.execute_skill('navigate',dict(asset_type='Mug',destination='source'))['error']['kind']=='different_object_held'
+    monkeypatch.setattr(api.objects, 'execute', lambda *a: dict(success=True))
+    assert api.execute_skill('navigate',dict(asset_type='Mug',destination='source'))['success']
 
 
 def test_navigation_without_destination_approaches_source(tmp_path):
@@ -93,14 +96,15 @@ def test_navigation_without_destination_approaches_source(tmp_path):
     assert base.calls[-1][1]['role'] == 'cup_05'
 
 
-def test_pick_cannot_switch_type_after_navigation(tmp_path):
+def test_pick_can_switch_to_visible_type_after_navigation(tmp_path):
     api, base, c = make_interface(tmp_path)
     assert api.execute_skill('navigate', dict(asset_type='Bowl'))['success']
     assert api.execute_skill('navigate', dict(asset_type='Mug'))['success']
     before = len(base.calls)
     result = api.execute_skill('pick', dict(asset_type='Bowl', source='surface'))
-    assert result['error']['kind'] == 'target_type_mismatch'
-    assert len(base.calls) == before
+    assert result['success']
+    assert len(base.calls) == before + 1
+    assert c.object_name == 'bowl'
 
 
 def test_generic_dispatch_and_wrong_type(tmp_path, monkeypatch):
@@ -111,7 +115,37 @@ def test_generic_dispatch_and_wrong_type(tmp_path, monkeypatch):
         return dict(success=name == 'navigate', error=None if name == 'navigate' else dict(kind='execution_failed'))
     monkeypatch.setattr(api.objects, 'execute', execute)
     assert api.execute_skill('navigate', dict(asset_type='Plate'))['success']
-    assert api.execute_skill('pick', dict(asset_type='Mug', source='surface'))['error']['kind'] == 'target_type_mismatch'
+    api.visible_bodies = lambda: set()
+    assert api.execute_skill('pick', dict(asset_type='Mug', source='surface'))['error']['kind'] == 'target_not_visible'
     assert not api.execute_skill('pick', dict(asset_type='Plate', source='surface'))['success']
     assert [n for n, _ in calls] == ['navigate', 'pick']
     assert not base.calls
+
+def test_pick_visible_without_navigation_and_reject_occupied_hand(tmp_path):
+    api, base, c = make_interface(tmp_path)
+    assert api.execute_skill('pick', dict(asset_type='Bowl', source='surface'))['success']
+    assert base.calls[0][0] == 'pick'
+    assert api.execute_skill('pick', dict(asset_type='Mug', source='surface'))['error']['kind'] == 'hand_not_empty'
+
+
+def test_visibility_is_refreshed_even_after_successful_navigation(tmp_path):
+    api, base, c = make_interface(tmp_path)
+    assert api.execute_skill('navigate', dict(asset_type='Mug'))['success']
+    api.visible_bodies = lambda: set()
+    assert api.execute_skill('pick', dict(asset_type='Mug', source='surface'))['error']['kind'] == 'target_not_visible'
+    assert len(base.calls) == 1
+
+
+def test_dosing_box_visibility_without_navigation_or_detachment(tmp_path, monkeypatch):
+    api, base, c = make_interface(tmp_path)
+    c.spec = dict(dosing_body='box')
+    c.fixture_phase = 'locked'
+    monkeypatch.setattr(api, 'validate', lambda *a: None)
+    calls = []
+    monkeypatch.setattr(base, 'execute_skill', lambda name, args: calls.append(name) or dict(success=True))
+    api.visible_bodies = lambda: {'box'}
+    assert api.execute_skill('pick_dosing_box', {})['success']
+    assert calls == ['pick_dosing_box']
+    api.visible_bodies = lambda: set()
+    assert api.execute_skill('pick_dosing_box', {})['error']['kind'] == 'target_not_visible'
+    assert calls == ['pick_dosing_box']

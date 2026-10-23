@@ -165,7 +165,9 @@ class ToasterLeverTest(MicrowaveButtonTest):
 
     def press_lever(self):
         self.review_phase='PHYSICALLY PRESS TOASTER LEVER'
-        self.embodiment.command_gripper(self.data,self.profile.gripper_close);self.tick(.6)
+        self.embodiment.command_gripper(self.data,self.profile.gripper_close)
+        from cross_episode_sim.control.timing import wait_for_gripper_command
+        wait_for_gripper_command(self, .6)
         self.rebuild_planner()
         pose=self.press_pose();pre=pose.copy();pre[2,3]+=.045
         self.move_button('approach toaster lever',pre,seed=np.array([0.,.25,0.,-1.5,0.,3.35,0.]))
@@ -182,12 +184,20 @@ class ToasterLeverTest(MicrowaveButtonTest):
         self.review_phase='RELEASE TOASTER LEVER'
         retreat=self.tcp().copy();retreat[2,3]+=.04;retreat[1,3]+=.025
         self.move_button('withdraw from toaster lever',retreat)
-        self.tick(.5)
+        from cross_episode_sim.control.timing import wait_for_stable_condition
+        wait_for_stable_condition(self, .5, lambda: not self.lever_contact()[0]
+            and self.latch.turned_on, label='lever_release')
         if self.lever_contact()[0] or not self.latch.turned_on:
             raise RuntimeError('Toaster did not remain active after release')
         self.release_time=float(self.data.time)
         self.report['release_state']=dict(turned_on=True,lever_fraction=self.lever_fraction(),gripper_contact=False)
-        self.tuck_for_navigation();self.tick(.5)
+        from cross_episode_sim.control.smooth_action import components_enabled
+        if not (getattr(self.args, 'fixed_atomic_interface', False) and components_enabled(self)):
+            self.tuck_for_navigation()
+            from cross_episode_sim.control.timing import settle_arm
+            settle_arm(self, .5)
+        else:
+            self.record(posture_transition_skipped='lever released; next navigation owns travel posture')
 
     def update_recording_cameras(self):
         CabinetDoorTest.update_recording_cameras(self)

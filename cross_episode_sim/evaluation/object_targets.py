@@ -24,8 +24,8 @@ class ObjectTargets:
         for record in controller.manifest.get('scattered_objects', []):
             self.records[record['body']] = dict(record, asset_type=object_type(record))
         for record in controller.manifest['bindings']:
-            if record['role'].split('_')[0] not in ('cup', 'bowl'):
-                self.records[record['body']] = dict(record, asset_type=object_type(record))
+            self.records[record['body']] = dict(record, asset_type=object_type(record))
+        self.visible_bodies = lambda: set()
         self.history = []
         self.target = None
         self.dock = None
@@ -67,6 +67,7 @@ class ObjectTargets:
         c = self.c
         r = self.records[body]
         point = c.data.body(body).xpos.copy()
+        carrying = bool(c.holding_loaf or c.attached)
         c.tuck_for_navigation()
         c._public_dock_skip = int(dock)
         if r.get('kind') == 'floor_object':
@@ -76,13 +77,13 @@ class ObjectTargets:
             xy = point[:2] + .55 * np.array([np.cos(angle), np.sin(angle)])
             yaw = float(np.arctan2(point[1] - xy[1], point[0] - xy[0]))
             c._public_navigation_goal = (xy.copy(), yaw)
-            c.task_navigate(xy, False, face=yaw)
+            c.task_navigate(xy, carrying, face=yaw)
         else:
             support = self._support(body)
             site = next((k for k, v in c.task_supports.items() if v == support), 'generic_' + body)
             c.task_supports[site] = support
             c.task_outward.setdefault(site, [0., -1.])
-            c.navigate_to_site(site, point, False)
+            c.navigate_to_site(site, point, carrying)
 
     def _nav_ok(self, body, dock='0'):
         c = self.c
@@ -106,8 +107,8 @@ class ObjectTargets:
                         and (c.model.geom_contype[g] or c.model.geom_conaffinity[g])}
         c.initial_object_pose = c.bread_pose().copy()
         c.transfer_start = c.data.joint(c.object_joint).qpos.copy()
-        # The separate navigate call already approached this exact body. Suppress
-        # pickup's legacy preparation navigation, preserving the fixed base.
+        # Suppress pickup's legacy preparation navigation: visibility, rather
+        # than a recorded navigate call, selects the target at the current base.
         c._public_pickup_ready = c._fixture_pick_prepared = body
         from cross_episode_sim.skills.vessels import pick_vessel
         previous = getattr(c, '_trial_storage_dock', None)
@@ -138,13 +139,13 @@ class ObjectTargets:
             skill = BoundSkill(c, name, self._navigate, self._nav_ok)
             args = dict(body=body, dock=arguments.get('dock', '0'))
         elif name == 'pick':
-            if self.target not in candidates:
-                return fail('target_type_mismatch' if self.target else 'source_navigation_required')
+            visible = self.visible_bodies()
+            candidates = [b for b in candidates if b in visible]
+            if not candidates:
+                return fail('target_not_visible')
             if arguments.get('source') != 'surface':
                 return fail('unsupported_source')
-            body = self.target
-            if self.dock is None or np.linalg.norm(c.base_pose() - self.dock) > .03:
-                return fail('not_at_pickup_dock')
+            body = candidates[0]
             def attempt_pick(body):
                 try:
                     return self._pick(body)
@@ -157,7 +158,7 @@ class ObjectTargets:
         else:
             return fail('unsupported_skill_for_target')
         def pre(**kwargs):
-            return dict(empty_hand=bool(not c.holding_loaf and not c.attached and not c.contacts()))
+            return dict(ready=True) if name == 'navigate' else dict(empty_hand=bool(not c.holding_loaf and not c.attached and not c.contacts()))
         schema = parameters(body=list(self.records))
         if name == 'navigate':
             schema['properties']['dock'] = dict(type='string', enum=['0', '1', '2', '3', '4'])

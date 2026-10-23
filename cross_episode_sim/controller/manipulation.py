@@ -44,9 +44,21 @@ class TableReorder(TableTransfer):
     render_deferred_video = PhysicalReorderCheck.render_deferred_video
 
     def task_navigate(self, goal, carrying=False, face=None):
+        self._refresh_room_door_maps()
         actions = getattr(self, 'robot_actions', None)
         return (actions.navigate(goal, carrying=carrying, face=face)
                 if actions is not None else self.navigate(goal, carrying, face=face))
+
+    def _refresh_room_door_maps(self):
+        signature = tuple((self.model.joint(i).name, round(float(self.data.qpos[self.model.jnt_qposadr[i]]), 3))
+                          for i in range(self.model.njnt)
+                          if (self.model.joint(i).name or '').startswith('room_door_'))
+        if signature != getattr(self, '_room_door_signature', None):
+            for name in ('_semantic_layers', '_physics_safe_occupancy', '_physics_safe_map',
+                         '_physics_nav_tree', '_local_nav_tree'):
+                self.__dict__.pop(name, None)
+            self._room_door_signature = signature
+        return signature
 
     def __init__(self, args, selection):
         self.selection = selection
@@ -168,8 +180,13 @@ class TableReorder(TableTransfer):
         return self._semantic_layers
 
     def build_physics_reach_map(self):
+        import hashlib
+        doors = self._refresh_room_door_maps()
         path = Path(self.args.scene_xml)
         cache = path.with_name(path.stem + ('_rby1_physics_reach_map_v3.png' if self.profile.name == 'rby1m' else f'_{self.profile.name}_physics_reach_map_v3.png'))
+        if doors:
+            digest = hashlib.sha256(repr(doors).encode()).hexdigest()[:12]
+            cache = cache.with_stem(cache.stem + '_room_doors_v1_' + digest)
         if cache.is_file():
             return ProcTHORMap.load(str(cache), agent_radius=None)
         from types import SimpleNamespace
@@ -197,7 +214,7 @@ class TableReorder(TableTransfer):
         reach = compute_physics_reachable_map(
             env, robot_view, self._base_nav_map(), grid_size=.10, base_z=0.0,
             robot_base_body=base_body, require_all_headings=False,
-            keep_largest_component=True)
+            keep_largest_component=not bool(doors))
         reach.save(str(cache))
         self.record(physics_reachability_map=str(cache),
                     reachability_policy=f'A* live door-open map plus exact {self.profile.name} footprint')
@@ -366,9 +383,11 @@ class TableReorder(TableTransfer):
             return
         dt = (np.ceil(self.planner.dt * max(self.args.motion_slowdown, 8.)
                       / self.model.opt.timestep) * self.model.opt.timestep)
-        for q in trajectory:
+        from cross_episode_sim.control.smooth_action import joint_commands
+        trajectory, durations = joint_commands(self, trajectory, dt, contact=bool(getattr(self, 'holding_loaf', False)), start=current)
+        for q, sample_dt in zip(trajectory, durations):
             self.data.ctrl[self.arm_aids] = self.bounded_arm_command(q)
-            self.tick(dt)
+            self.tick(float(sample_dt))
         settle_arm(self, .4)
         elbow = float(self.data.joint(NS + elbow_joint).qpos[0])
         record = dict(untuck_elbow_rad=elbow, untuck_waypoints=len(trajectory))
@@ -386,7 +405,11 @@ class TableReorder(TableTransfer):
 
     def navigate(self, goal, carrying=False, face=None):
         if not self.in_default_travel_posture(loaded=carrying):
-            raise RuntimeError('Navigation requires explicit default tuck first')
+            from cross_episode_sim.skills.door_motion import local_reposition_allowed
+            if not (getattr(self, '_checked_door_arm_navigation', False)
+                    and getattr(self, '_accepted_route', None) is not None
+                    and local_reposition_allowed(self, goal, carrying)):
+                raise RuntimeError('Navigation requires explicit default tuck first')
         return super().navigate(goal, carrying, face=face)
 
     def plan_route(self, goal, carrying, face=None):
@@ -425,6 +448,8 @@ class TableReorder(TableTransfer):
             mapped = self.nav_map_filter(goal)
             path, metrics = plan_same_room_route(
                 start, final, mapped, clear, reverse=self.navigation_undock())
+            if 'reverse_undock_m' in metrics:
+                self._pickup_pre_nav_undock = metrics['reverse_undock_m']
             self.record(**metrics)
             return path
 
@@ -447,13 +472,13 @@ class TableReorder(TableTransfer):
                 path_clear=(blended_clear if getattr(self.args, 'base_motion', 'blended') == 'blended'
                             else None))
         except RuntimeError:
-            if getattr(self.args, 'base_motion', 'blended') != 'blended':
-                raise
             from cross_episode_sim.navigation.planners import plan_cross_room_escape
+            forward_only = getattr(self.args, 'base_motion', 'blended') != 'blended'
             path, metrics = plan_cross_room_escape(
-                self.args.scene_xml, reach_map, start, final, clear, self.nav_map_filter(goal))
-            self._cross_room_requires_blended = True
-        self._pickup_pre_nav_undock = 0.
+                self.args.scene_xml, reach_map, start, final, clear, self.nav_map_filter(goal),
+                allow_lateral=not forward_only)
+            self._cross_room_requires_blended = not forward_only
+        self._pickup_pre_nav_undock = metrics.get('reverse_undock_m', 0.)
         self.record(**metrics)
         return path
 
@@ -882,7 +907,10 @@ class TableReorder(TableTransfer):
         rejected = []
         joints = [self.model.joint(NS+n).id for n in names]
         limits = self.model.jnt_range[joints]
-        for arm_home in self.embodiment.loaded_travel_candidates():
+        candidates = getattr(self, 'loaded_travel_postures', None)
+        if candidates is None:
+            candidates = self.embodiment.loaded_travel_candidates()
+        for arm_home in candidates:
             targets = {n: 0. for n in self.profile.torso_joints}
             targets.update(zip(self.profile.arm_joints, arm_home))
             target = np.array([targets.get(name, current[i]) for i, name in enumerate(names)])
@@ -894,10 +922,9 @@ class TableReorder(TableTransfer):
                 continue
             try:
                 trajectory = self.planner.plan_joints(current.tolist(), target.tolist())
-                if tuple(arm_home) != tuple(self.profile.travel_posture):
-                    # Preserve the established default path. Newly introduced
-                    # carry postures additionally need a complete mesh preflight.
-                    self.check_loaded_tuck_path(trajectory)
+                # Default poses are not exempt: a new grasp or camera mast can
+                # make the same nominal tuck intersect the actual geometry.
+                self.check_loaded_tuck_path(trajectory)
             except RuntimeError as exc:
                 rejected.append(dict(posture=list(arm_home), error=str(exc)))
                 continue
@@ -984,9 +1011,11 @@ class TableReorder(TableTransfer):
         # enforced by measured bilateral force and penetration, not asset names.
         tuck_slowdown = max(self.args.motion_slowdown, 8.0)
         dt = np.ceil(self.planner.dt * tuck_slowdown / self.model.opt.timestep) * self.model.opt.timestep
-        for q in trajectory:
+        from cross_episode_sim.control.smooth_action import joint_commands
+        trajectory, durations = joint_commands(self, trajectory, dt, contact=bool(getattr(self, 'holding_loaf', False)), start=current)
+        for q, sample_dt in zip(trajectory, durations):
             self.data.ctrl[self.arm_aids] = self.bounded_arm_command(q)
-            self.tick(dt)
+            self.tick(float(sample_dt))
         settle_arm(self, .4)
         slip = float(np.linalg.norm((np.linalg.inv(self.tcp()) @ self.bread_pose())[:3, 3] - reference[:3, 3]))
         torso_norm = float(np.linalg.norm([self.data.joint(NS + n).qpos[0] for n in self.profile.torso_joints]))
@@ -1163,7 +1192,9 @@ class TableReorder(TableTransfer):
         distance = None
         for candidate in (.06, .12, .18, .24):
             shift = candidate * direction
-            if self.planner.world_clearance(q, boxes, shift) < .005:
+            # Leave tracking/attachment-refresh margin above the acceptance
+            # threshold; a predicted 5 mm gap can become 4.96 mm in physics.
+            if self.planner.world_clearance(q, boxes, shift) < .010:
                 continue
             clear = True
             for fraction in np.linspace(0., 1., 25):
@@ -1320,9 +1351,10 @@ class TableReorder(TableTransfer):
         # Plan all but the last four centimetres with the loaded collision
         # model. A failed approach must not become a blind local descent.
         approach = candidate.copy()
-        approach[2, 3] += .04
+        approach[2, 3] += min(.04, max(0., staging[2, 3]-candidate[2, 3]))
         try:
-            self.move('approach destination table', approach)
+            if not np.allclose(approach, staging):
+                self.move('approach destination table', approach)
         except RuntimeError as planning:
             if not self.retryable_placement(planning):
                 raise
@@ -1361,8 +1393,9 @@ class TableReorder(TableTransfer):
                     candidate = placement @ np.linalg.inv(self.grasp_relative)
                     # Release just above every support and let the object settle under
                     # gravity without driving the fingers into the support mesh.
-                    candidate[2, 3] += .04
-                    staging = candidate.copy(); staging[2, 3] += .12
+                    candidate[2, 3] += getattr(self, 'placement_release_clearance', .04)
+                    staging = candidate.copy()
+                    staging[2, 3] += getattr(self, 'placement_staging_clearance', .12)
                     checkpoint = None
                     if getattr(self, '_trial_delivery', False):
                         from cross_episode_sim.skills.checkpoint import ExecutionCheckpoint
@@ -1402,7 +1435,10 @@ class TableReorder(TableTransfer):
         self.holding_loaf = False
         self.stage = 'release object onto destination table'
         self.embodiment.open_gripper(self)
-        settle_released_object(self, 1.)
+        # Rocking vessels may need slightly longer after release. Adaptive
+        # readiness exits immediately for already-settled objects; this is a
+        # maximum feedback budget, not an added fixed pause.
+        settle_released_object(self, 2. if getattr(self, 'adaptive_motion_settling', False) else 1.)
         self.planner.detach_block(); self.attached = False
         # Commit placement from physical evidence before moving the empty hand.
         # Later retreat details must not turn a supported placement into a false
@@ -1430,8 +1466,20 @@ class TableReorder(TableTransfer):
             # its standard collision-aware tuck instead of failing the transfer
             # because one optional retreat waypoint was unavailable.
             self.record(post_placement_withdrawal_fallback=str(exc))
-            self.tuck_after_placement()
-        settle_released_object(self, 1.)
+            if self.object_info[self.object_name].get('destination','').endswith('_basket'):
+                # A hand trapped between contents cannot safely start the next
+                # navigation. Let the atomic checkpoint retry the placement.
+                raise RuntimeError('Basket withdrawal failed: '+str(exc)) from exc
+            if getattr(self, '_public_skill_navigation', None) is False:
+                # Some tuck fallbacks retreat the base. Preserve the physical
+                # placement and let the next explicit navigate own that motion.
+                self._public_post_place_tuck = True
+            else:
+                self.tuck_after_placement()
+        # Rocking vessels may need slightly longer after release. Adaptive
+        # readiness exits immediately for already-settled objects; this is a
+        # maximum feedback budget, not an added fixed pause.
+        settle_released_object(self, 2. if getattr(self, 'adaptive_motion_settling', False) else 1.)
         if self.assignment()[self.object_name] != self.destination:
             raise RuntimeError('Placed object left the destination during withdrawal')
         if not self.in_default_travel_posture(loaded=False):

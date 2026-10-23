@@ -6,6 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
+from cross_episode_sim.skills.catalog import require_fixed_catalog
+
 from .grounding import TargetRegistry, grounded_observation
 from .kinematics import RobotKinematics, camera_calibration
 
@@ -24,7 +26,7 @@ class TaskSession:
     supports_actions = True
 
     def __init__(self, task='breakfast', *, output_root='runs/evaluation_scenes', seed=17,
-                 options=None, cameras=('robot_0/wrist_cam',), image_size=(224, 224), max_steps=25000, visual_grounding=False):
+                 options=None, cameras=('robot_0/navigation_cam', 'robot_0/wrist_cam'), image_size=(224, 224), max_steps=25000, visual_grounding=False):
         from cross_episode_sim.env.task_env import TaskEnv
         if task not in ('breakfast', 'tidy_up'):
             raise ValueError('TaskSession supports breakfast and tidy_up; coffee needs an independent policy task adapter')
@@ -41,8 +43,9 @@ class TaskSession:
         self.instruction = self.env.controller.manifest['instruction']
 
     def catalog(self):
-        return [] if self.interface is None else (self.grounding.catalog(self.interface.list_skills())
-            if hasattr(self, 'grounding') else self.interface.list_skills())
+        entries = [] if self.interface is None else self.interface.list_skills()
+        require_fixed_catalog(entries)
+        return self.grounding.catalog(entries) if hasattr(self, 'grounding') else entries
 
     def _resolve_skill(self, name, arguments):
         if hasattr(self, 'grounding'):
@@ -104,7 +107,7 @@ class ControllerSession:
     Low-level execution is enabled only when an independent action adapter is
     explicitly provided. A demonstrator's phase flags are not a valid VLA scorer.
     """
-    def __init__(self, controller, interface, verify_goal, *, cameras=('robot_0/wrist_cam',),
+    def __init__(self, controller, interface, verify_goal, *, cameras=('robot_0/navigation_cam', 'robot_0/wrist_cam'),
                  image_size=(224, 224), action_adapter=None, visual_grounding=False, any_vessel=False):
         import mujoco
         if any_vessel:
@@ -116,6 +119,8 @@ class ControllerSession:
         self._c, self.interface, self._goals = controller, interface, verify_goal
         self._actions = action_adapter
         self.supports_actions = action_adapter is not None
+        from cross_episode_sim.robot.cameras import validate_onboard_cameras
+        validate_onboard_cameras(cameras)
         self._cameras = cameras
         self._image_size = image_size
         self.kinematics = RobotKinematics(controller.model, controller.data, controller.profile)
@@ -123,9 +128,18 @@ class ControllerSession:
         if visual_grounding:
             self.grounding = TargetRegistry(controller.model, controller.manifest['bindings'])
         self.instruction = controller.manifest.get('instruction', '')
+        if any_vessel:
+            self.interface.visible_bodies = self._visible_pick_bodies
+
+    def _visible_pick_bodies(self):
+        from .visibility import visible_bodies
+        bodies = set(self.interface.objects.records)
+        return visible_bodies(self._c.model, self._renderer, self._c.data, self._cameras,
+                              bodies, getattr(self._c, 'render_scene_option', None))
 
     def catalog(self):
-        return self.grounding.catalog(self.interface.list_skills()) if hasattr(self, 'grounding') else self.interface.list_skills()
+        entries = require_fixed_catalog(self.interface.list_skills())
+        return self.grounding.catalog(entries) if hasattr(self, 'grounding') else entries
 
     def _resolve_skill(self, name, arguments):
         if hasattr(self, 'grounding'):

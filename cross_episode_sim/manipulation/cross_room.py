@@ -23,7 +23,9 @@ class CrossRoomManipulation(RecoveringManipulation):
         return sorted(set(super().kitchen_world_geoms()) | set(self.table_gids))
 
     def plan_route(self, goal, carrying, face=None):
-        self._pickup_pre_nav_undock = 0.
+        # A short fixture undock can reverse along a checked sweep instead of
+        # turning 180 degrees twice just to move 25 cm away from the counter.
+        self._pickup_pre_nav_undock = .25 if getattr(self, '_smooth_fixture_retreat', False) else 0.
         start_room, goal_room = self.room_id(self.base_pose()[:2]), self.room_id(goal)
         self.record(navigation_start_room=start_room, navigation_goal_room=goal_room,
                     navigation_map_mode='physics_reachability_cross_room'
@@ -70,10 +72,15 @@ class CrossRoomManipulation(RecoveringManipulation):
             robot_at=self.source, holding=self.object_name,
             objects={}, fixtures={}, time=float(self.data.time))]
         self.review_phase = 'TUCK AND CARRY DINING ROOM TO KITCHEN'
-        self.tuck_loaded_for_navigation()
+        from cross_episode_sim.control.smooth_action import components_enabled
+        self._retained_carry_posture = False
+        if not components_enabled(self):
+            self.tuck_loaded_for_navigation()
         boxes = self.surface_boxes(self.destination)
         # Select the clear front section beside the sink, on the real countertop.
-        targets = [np.array([x, -.49]) for x in (2.35, 2.48, 2.22, 2.58, 2.10)]
+        fixed = getattr(self.args, 'fixed_atomic_interface', False)
+        target_y = -.57 if fixed else -.49
+        targets = [np.array([x, target_y]) for x in (2.35, 2.48, 2.22, 2.58, 2.10)]
         candidates = []
         for xy in targets:
             for gid, low, high in boxes:
@@ -88,8 +95,48 @@ class CrossRoomManipulation(RecoveringManipulation):
         if self.report['source_room'] == destination_room:
             raise RuntimeError('Cross-room test requires distinct source and destination rooms')
         rejected = []
+        if components_enabled(self):
+            # As in the faster composite experiment, keep the grasp posture if
+            # its complete loaded route is clear. Center the wrist after a
+            # checked retreat; never certify it using an old tucked route.
+            from cross_episode_sim.control.carry_posture import center_loaded_payload
+            centered = center_loaded_payload(self, allow_preflight_fallback=True)
+            self._accepted_route = None
+            direct = False
+            if centered:
+                for xy, _ in candidates:
+                    dock = xy + [0., -.34 if fixed else -.48]
+                    try:
+                        self.plan_route(dock, True, face=np.pi/2)
+                    except RuntimeError:
+                        continue
+                    direct = True
+                    break
+            if not direct:
+                self.retreat_before_loaded_tuck()
+                center_loaded_payload(self)
+            else:
+                self.record(posture_transition_skipped='full centered carry route clear without retreat')
+            self._accepted_route = None
+            for xy, _ in candidates:
+                dock = xy + [0., -.34 if fixed else -.48]
+                try:
+                    self.plan_route(dock, True, face=np.pi/2)
+                except RuntimeError as exc:
+                    rejected.append(str(exc))
+                    continue
+                home=[float(self.data.joint(self.profile.namespace+n).qpos[0])
+                      for n in self.profile.arm_joints]
+                self.embodiment.set_loaded_travel_posture(home)
+                self._retained_carry_posture = True
+                break
+            self.record(carry_posture_choice=dict(retained=self._retained_carry_posture,
+                                                 rejected_routes=rejected))
+            if not self._retained_carry_posture:
+                self.tuck_loaded_for_navigation()
         for xy, _ in candidates:
-            dock = xy + [0., -.48]
+            stand_off = .34 if fixed else .48
+            dock = xy + [0., -stand_off]
             if self.room_id(dock) != destination_room:
                 continue
             try:
@@ -123,6 +170,12 @@ class CrossRoomManipulation(RecoveringManipulation):
         self.review_phase = 'PLACE ON KITCHEN COUNTER'
         self.record(placement_candidates=len(placements), destination_room=destination_room,
                     destination_dock=self.base_pose().tolist())
+
+    def untuck_for_manipulation(self):
+        if getattr(self, '_retained_carry_posture', False) and self.holding_loaf:
+            self.record(untuck_skipped='retained collision-checked carry posture')
+            return
+        return super().untuck_for_manipulation()
 
     def run_test(self):
         completed = False

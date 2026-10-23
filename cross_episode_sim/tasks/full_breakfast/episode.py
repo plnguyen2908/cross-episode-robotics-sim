@@ -34,7 +34,7 @@ class FullBreakfastWorkflow(CoffeeWorkflow):
             self.model.geom_rgba[self.food_geoms(role), 3] = 1. if filled else 0.
 
     def fill_bowls(self):
-        """A person puts food in every requested bowl while the robot waits empty-handed."""
+        """A person puts food in every requested bowl while the robot waits (holding an object is allowed)."""
         if not self.bowls_in_kitchen():
             raise RuntimeError('Food preparation requires every bowl on a kitchen support')
         # The coffee part is held to the coffee task's 1 mm contact limit; serving

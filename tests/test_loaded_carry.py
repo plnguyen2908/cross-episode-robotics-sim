@@ -65,6 +65,18 @@ class LoadedCarryTest(unittest.TestCase):
         self.assertEqual(home, c.profile.travel_posture)
         self.assertEqual(c.checked, [])
 
+    def test_task_carry_candidates_are_mesh_checked_without_empty_pose_fallback(self):
+        c, names = self.runner()
+        c.planner.self_clearance = lambda q: .02
+        upright = (0., 0., 0., -.6, 0., .6, 0.)
+        c.loaded_travel_postures = [upright]
+        _, home = c.plan_loaded_tuck(np.array(c.profile.travel_posture), names)
+        self.assertEqual(home, upright)
+        self.assertEqual(len(c.checked), 1)
+        c.check_loaded_tuck_path = lambda path: (_ for _ in ()).throw(RuntimeError('blocked'))
+        with self.assertRaisesRegex(RuntimeError, 'No collision-clear loaded carry plan'):
+            c.plan_loaded_tuck(np.array(c.profile.travel_posture), names)
+
     def test_loaded_choice_resets_and_does_not_leak_between_robots(self):
         a, b = embodiment_for('franka_tidybot'), embodiment_for('franka_tidybot')
         changed = list(a.profile.travel_posture)

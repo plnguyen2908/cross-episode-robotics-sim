@@ -342,6 +342,9 @@ class BrewActions:
         if self.machine_action=='power':
             self.machine_cycle.power_on(self.data.time);self.event('machine_powered_on')
         elif self.machine_action=='brew':
+            if not self.machine_button_prerequisites() or self.machine_cycle.started_at is not None:
+                self.event('brew_start_rejected')
+                return
             self.machine_cycle.start(self.data.time,self.installed(),self.grounds_ready(),self.mug_ready())
             self.event('brew_started',duration_s=self.machine_cycle.brew_seconds,mug=self.mug)
 

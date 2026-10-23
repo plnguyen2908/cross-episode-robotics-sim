@@ -9,17 +9,19 @@ from cross_episode_sim.skills.atomic import BoundSkill
 from cross_episode_sim.skills.interface import SkillBinding, SkillInterface, parameters, run_skill_episode
 
 DEMOS = ('cross-room', 'drawer-pick-place', 'cabinet-door', 'drawer', 'stove-knob',
-         'faucet', 'microwave-button', 'toaster-insertion', 'oven-rack', 'blender-lid')
+         'faucet', 'microwave-button', 'toaster-lever', 'toaster-insertion', 'oven-rack', 'blender-lid')
 
 
 def call(name, **arguments):
     return dict(operation=name, arguments=arguments)
 
 
-def fixture_domain(c, demo):
+def _legacy_fixture_domain(c, demo):
     """Return the live interface, witness plan, setup and physical final goal."""
     if demo not in DEMOS:
         raise ValueError(f'Unsupported fixture demo: {demo}')
+    if demo == 'toaster-lever':
+        return lever_domain(c)
     if demo in ('cross-room', 'drawer-pick-place', 'toaster-insertion', 'blender-lid'):
         return object_domain(c, demo)
     bindings = {}
@@ -30,15 +32,19 @@ def fixture_domain(c, demo):
             execute.__doc__ or name.replace('_', ' '), schema, precondition, navigation)
     def at_goal():
         return bool(hasattr(c, '_fixture_dock') and np.linalg.norm(c.base_pose()[:2]-c._fixture_dock[:2]) < .025)
-    def at_fixture():
-        return at_goal() and getattr(c, '_fixture_dock_target', None)=='fixture'
     def dock():
         if demo == 'cabinet-door':return np.array([2.10,-1.20])
-        if demo == 'drawer':return np.array([.50,-1.35])
+        if demo == 'drawer':
+            return drawer_pose()[:2]
         if demo == 'microwave-button':return np.array([3.41420304,-1.0])
         if demo == 'oven-rack':return np.array([3.7823,-1.10])
         xy = c.data.geom_xpos[c.handle_geom,:2].copy()+[0., -.82 if demo=='faucet' else -.48]
         return np.array([round(xy[0],2),round(xy[1]/.05)*.05])
+    def drawer_pose():
+        from cross_episode_sim.skills.fixture_limits import drawer_dock, opening_target
+        return drawer_dock(c.data.geom_xpos[c.handle_geom],c.data.xaxis[c.door_joint],
+                           c.angle(),opening_target(c.model.joint(c.fixture_joint),sliding=True),
+                           base_assisted=getattr(c, 'base_assisted_articulation', True))
     def navigate(target):
         """Tuck and navigate to the grounded fixture dock or retreat position."""
         c.tuck_for_navigation()
@@ -46,54 +52,53 @@ def fixture_domain(c, demo):
         start = c.base_pose().copy()
         goal = dock() if target=='fixture' else start[:2]-.25*np.array([np.cos(start[2]),np.sin(start[2])])
         c._fixture_dock = np.array([*goal,np.pi/2 if target=='fixture' else start[2]])
+        if target=='fixture' and demo=='drawer':
+            c._fixture_dock[2]=drawer_pose()[2]
         c._fixture_dock_target = target
         c._faucet_retreat = target=='retreat' and demo in ('faucet','microwave-button')
         c._oven_retreat = target=='retreat' and demo=='oven-rack'
+        from cross_episode_sim.control.smooth_action import components_enabled
+        c._smooth_fixture_retreat = target=='retreat' and components_enabled(c)
         try:c.task_navigate(goal,False,face=float(c._fixture_dock[2]))
         finally:
             c._faucet_retreat=False;c._oven_retreat=False;c._pickup_pre_nav_undock=0.
+            c._smooth_fixture_retreat=False
     bind('navigate',navigate,lambda target: at_goal() and bool(c.in_default_travel_posture(False)),
          parameters(target=('fixture','retreat')),lambda target:dict(empty_hand=empty()),True)
     plan=[call('navigate',target='fixture')]
     if demo in ('cabinet-door','drawer','stove-knob','faucet'):
-        from cross_episode_sim.fixtures.faucet import water_on
-        from cross_episode_sim.fixtures.stove_knob import burner_on
         name, states = {
             'cabinet-door':('set_door',('open','closed')),
             'drawer':('set_drawer',('open','closed')),
             'stove-knob':('twist_knob',('on','off')),
             'faucet':('turn_lever',('on','off'))}[demo]
+        from cross_episode_sim.skills.household_fixtures import articulate_fixture, fixture_satisfied
         def satisfied(state):
-            active = state==states[0]
-            if demo=='cabinet-door':return bool(c.angle()>np.radians(50) if active else abs(c.angle())<np.radians(3))
-            if demo=='drawer':return bool(c.angle()<-.17 if active else abs(c.angle())<.01)
-            predicate=burner_on if demo=='stove-knob' else water_on
-            return bool(predicate(c.angle()) if active else not predicate(c.angle()) and abs(c.angle())<.05)
+            return fixture_satisfied(c, demo, state)
         def articulate(state):
             """Grasp the fixture handle, change its passive joint, release and withdraw."""
-            target = {'cabinet-door':np.pi/3,'drawer':-.20,'stove-knob':np.pi/3,'faucet':.48}[demo] if state==states[0] else 0.
-            c.grasp_handle()
-            (c.follow_slide if demo=='drawer' else c.follow_hinge)(target)
-            c.release_handle()
+            articulate_fixture(c, demo, state)
         bind(name,articulate,lambda state:satisfied(state) and empty() and not bool(c.handle_contacts()),
-             parameters(state=states),lambda state:dict(at_fixture=at_fixture(),empty_hand=empty()))
+             parameters(state=states),lambda state:dict(empty_hand=empty()))
         plan += [call(name,state=s) for s in states]
         final=lambda:dict(fixture_restored=satisfied(states[1]),released=empty(),tucked=bool(c.in_default_travel_posture(False)))
     elif demo=='microwave-button':
         def press(button):
             """Press the named button with force-bearing contact, then withdraw."""
-            c.embodiment.command_gripper(c.data,c.profile.gripper_close);c.tick(1.)
-            c.rebuild_planner();c.press(button)
+            from cross_episode_sim.skills.household_fixtures import press_fixture_button
+            press_fixture_button(c, button)
         bind('press_button',press,lambda button:bool(c.turned_on==(button=='start') and not c.contacts(button)[0]),
-             parameters(button=('start','stop')),lambda button:dict(at_fixture=at_fixture(),empty_hand=empty()))
+             parameters(button=('start','stop')),lambda button:dict(empty_hand=empty()))
         plan += [call('press_button',button=b) for b in ('start','stop')]
         final=lambda:dict(microwave_off=not bool(c.turned_on),tucked=bool(c.in_default_travel_posture(False)))
     else:
         def joint(component):
             return float(c.data.qpos[c.model.jnt_qposadr[c.door_id if component=='door' else c.rack_id]])
         def move_component(component,state):
+            from cross_episode_sim.skills.fixture_limits import opening_target
             c.select_component(component);c.grasp()
-            c.follow((1.10 if component=='door' else .15) if state=='open' else 0.)
+            opened = opening_target(c.model.joint(c.door_id)) if component=='door' else .15
+            c.follow(opened if state=='open' else 0.)
             c.release()
         def door(state):
             """Open or close the oven door, releasing its handle afterwards."""
@@ -101,10 +106,14 @@ def fixture_domain(c, demo):
         def rack(state):
             """Slide the upper rack out or in, releasing it afterwards."""
             move_component('rack',state)
-        bind('set_door',door,lambda state:bool((joint('door')>1.05 if state=='open' else abs(joint('door'))<.05) and empty()),
-             parameters(state=('open','closed')),lambda state:dict(at_fixture=at_fixture(),empty_hand=empty(),rack_in=abs(joint('rack'))<.01))
+        def door_satisfied(state):
+            from cross_episode_sim.skills.fixture_limits import opening_target, opening_tolerance
+            target = opening_target(c.model.joint(c.door_id)) if state=='open' else 0.
+            return bool(abs(joint('door')-target)<opening_tolerance() and empty())
+        bind('set_door',door,door_satisfied,
+             parameters(state=('open','closed')),lambda state:dict(empty_hand=empty(),rack_in=abs(joint('rack'))<.01))
         bind('slide_rack',rack,lambda state:bool((joint('rack')>.13 if state=='open' else abs(joint('rack'))<.01) and empty()),
-             parameters(state=('open','closed')),lambda state:dict(at_fixture=at_fixture(),empty_hand=empty(),door_open=joint('door')>1.05))
+             parameters(state=('open','closed')),lambda state:dict(empty_hand=empty(),door_open=joint('door')>1.05))
         plan += [call('set_door',state='open'),call('slide_rack',state='open'),call('slide_rack',state='closed'),call('set_door',state='closed')]
         final=lambda:dict(door_closed=abs(joint('door'))<.05,rack_in=abs(joint('rack'))<.01,released=empty(),tucked=bool(c.in_default_travel_posture(False)))
     plan.append(call('navigate',target='retreat'))
@@ -153,19 +162,27 @@ def object_domain(c,demo):
     nav_schema['properties']['dock']=dict(type='string',enum=[str(i) for i in range(1 if demo=='drawer-pick-place' else 14)],default='0')
     bind('navigate',navigate,lambda target,dock='0':at_dock() and (target!='retreat' or bool(c.in_default_travel_posture(False))),nav_schema,
          lambda target,dock='0':dict(hand_state=held() if target=='destination' else empty(),dock_valid=dock=='0' or target=='source'),True)
+    def visible_object():
+        from cross_episode_sim.evaluation.visibility import visible_bodies
+        if hasattr(c, 'visible_skill_targets'):
+            return c.object_name in c.visible_skill_targets()
+        return c.object_name in visible_bodies(c.model, c.renderer, c.data, c.cameras, {c.object_name},
+                                               getattr(c, 'render_scene_option', None))
+
     def pick(object):
         """Grasp and lift the named object at the prepared dock; verify its hold."""
         c._recovery_exhausted=True  # Alternative base docks require a public navigation call.
+        c._fixture_pick_prepared = object
         c.pick_payload();c.attach_payload_to_planner();c._fixture_pick_prepared=None
     bind('pick',pick,lambda object:held(),parameters(object=(c.object_name,)),
-         lambda object:dict(empty_hand=empty(),at_source=at_dock(),prepared=getattr(c,'_fixture_pick_prepared',None)==object))
+         lambda object:dict(empty_hand=empty(),target_visible=bool(visible_object())))
     def place(object,destination):
         """Place, release and withdraw the named object on its grounded support."""
         if demo!='cross-room':c.transport_payload()
         c.place_payload()
     if demo!='toaster-insertion':
         bind('place',place,lambda object,destination:bool(empty() and c.assignment()[object]==c.destination),
-             parameters(object=(c.object_name,),destination=('support',)),lambda object,destination:dict(held=held(),at_dock=at_dock()))
+             parameters(object=(c.object_name,),destination=('support',)),lambda object,destination:dict(held=held()))
     plan=[call('navigate',target='source'),call('pick',object=c.object_name)]
     if demo=='cross-room':plan.append(call('navigate',target='destination'))
     if demo=='toaster-insertion':
@@ -175,7 +192,7 @@ def object_domain(c,demo):
         def inserted():
             s=c.insertion_state()
             return bool(empty() and s['slot_floor_contact'] and s['footprint_inside'] and s['insertion_depth_m']>.04 and s['gripper_distance_m']>.15)
-        bind('insert',insert,lambda object,fixture:inserted(),parameters(object=(c.object_name,),fixture=('toaster_slot',)),lambda object,fixture:dict(held=held(),at_dock=at_dock()))
+        bind('insert',insert,lambda object,fixture:inserted(),parameters(object=(c.object_name,),fixture=('toaster_slot',)),lambda object,fixture:dict(held=held()))
         plan.append(call('insert',object=c.object_name,fixture='toaster_slot'))
         final=lambda:dict(inserted=inserted(),tucked=bool(c.in_default_travel_posture(False)))
     elif demo=='blender-lid':
@@ -186,11 +203,11 @@ def object_domain(c,demo):
             """Reseat the held lid, release it and withdraw from the fixture."""
             c.transport_payload();c.place_payload()
         bind('open_lid',open_lid,lambda fixture:held() and not bool(c.state()['lid_on_blender']),parameters(fixture=('blender',)),
-             lambda fixture:dict(empty_hand=empty(),at_dock=at_dock(),lid_seated=bool(c.state()['lid_on_blender']),prepared=getattr(c,'_fixture_pick_prepared',None)==c.object_name))
+             lambda fixture:dict(empty_hand=empty(),lid_seated=bool(c.state()['lid_on_blender']),target_visible=bool(visible_object())))
         bind('close_lid',close_lid,lambda fixture:bool(empty() and c.state()['lid_on_blender'] and c.assignment()[c.object_name]==BLENDER),parameters(fixture=('blender',)),
-             lambda fixture:dict(held=held(),at_dock=at_dock()))
+             lambda fixture:dict(held=held()))
         plan=[call('navigate',target='source',dock='1'),call('open_lid',fixture='blender'),call('place',object=c.object_name,destination='support'),
-              call('navigate',target='source'),call('pick',object=c.object_name),call('close_lid',fixture='blender')]
+              call('navigate',target='source',dock='1'),call('pick',object=c.object_name),call('close_lid',fixture='blender')]
         final=lambda:dict(lid_seated=bool(c.state()['lid_on_blender']),released=empty(),tucked=bool(c.in_default_travel_posture(False)))
     else:
         plan.append(call('place',object=c.object_name,destination='support'))
@@ -213,8 +230,48 @@ def object_domain(c,demo):
     return SkillInterface(c,bindings),plan,setup,final
 
 
+def lever_domain(c):
+    """Contact-driven push lever, with approach isolated in navigate."""
+    def empty():
+        return not bool(getattr(c, 'holding_loaf', False) or getattr(c, 'attached', False))
+    def navigate(target):
+        c.tuck_for_navigation()
+        point = c.data.geom_xpos[c.handle_geom].copy()
+        goal = point[:2] + [0., .38]
+        c.task_navigate(goal, False, face=-np.pi/2)
+        c._lever_dock = np.array([*goal, -np.pi/2])
+        c.untuck_for_manipulation()
+    def at_goal():
+        return bool(hasattr(c, '_lever_dock') and np.linalg.norm(c.base_pose()[:2]-c._lever_dock[:2]) < .025)
+    def pushed():
+        return bool(c.physical_trigger and c.latch.turned_on and not c.lever_contact()[0])
+    bindings = {
+        'navigate': SkillBinding(BoundSkill(c, 'navigate', navigate, lambda target: at_goal()),
+            'Approach the toaster lever.', parameters(target=('fixture',)),
+            lambda target: dict(empty_hand=empty()), True),
+        'push_lever': SkillBinding(BoundSkill(c, 'push_lever', lambda: c.press_lever(), pushed),
+            'Push and release the toaster lever.', parameters(),
+            lambda: dict(empty_hand=empty())),
+    }
+    def setup():
+        c.tick(1.)
+        c.report.update(scope='Fixed atomic interface: push_lever', fixture_demo='toaster-lever')
+    return SkillInterface(c, bindings), [call('navigate', target='fixture'), call('push_lever')], setup, lambda: dict(physically_pushed=pushed())
+
+
+def fixture_domain(c, demo):
+    from cross_episode_sim.skills.fixed_interface import canonical_fixture_domain
+    native, plan, setup, goal = _legacy_fixture_domain(c, demo)
+    api, plan = canonical_fixture_domain(c, demo, native, plan)
+    return api, plan, setup, goal
+
+
 def run_fixture_demo(controller,demo):
     api,plan,setup,goal=fixture_domain(controller,demo)
+    if getattr(controller.args, 'smooth_action', False) and demo=='microwave-button':
+        # Exercise unchanged wait semantics while the microwave is on.
+        first=next(i for i,step in enumerate(plan) if step['operation']=='push_button')
+        plan.insert(first+1,call('wait',duration_seconds=1.))
     recovery=FixtureDockRecovery() if demo in ('cross-room','blender-lid','toaster-insertion') else None
     return 0 if run_skill_episode(controller,api,plan,goal,demo,setup=setup,recover=recovery) else 1
 
@@ -229,14 +286,14 @@ class FixtureDockRecovery:
         name=step['operation']
         if 'precondition_failed' in str(error):return None
         if name not in ('pick','open_lid','navigate'):return None
-        if name=='navigate' and step['arguments']['target']!='source':return None
+        if name=='navigate' and ('destination' in step['arguments'] or step['arguments']['target']=='retreat'):return None
         if name!='navigate':
             key=(name,tuple(sorted(step['arguments'].items())))
             if self.action!=key:self.next_dock=0
             self.action=key
         self.next_dock+=1
         if self.next_dock>13:return None
-        retry=[call('navigate',target='source',dock=str(self.next_dock))]
+        retry=[call('navigate',target=step['arguments']['target'],dock=str(self.next_dock))]
         # A failed navigation already has its pickup next in the plan.
         if name!='navigate':retry.append(dict(operation=name,arguments=dict(step['arguments'])))
         return retry

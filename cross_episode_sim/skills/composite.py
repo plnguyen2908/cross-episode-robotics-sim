@@ -55,6 +55,7 @@ class CompositeEpisode:
                 self.setup()
             for index, step in enumerate(steps):
                 op = self.operations[step['operation']]
+                c.review_phase = step['operation'].replace('_', ' ').upper()
                 event = dict(index=index, **step, success=False, start_time=float(c.data.time))
                 history.append(event)
                 self.save(history)

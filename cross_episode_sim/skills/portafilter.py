@@ -65,7 +65,7 @@ def twist_to(c, stage, target):
     return c.held_pose(stage, target, path=path)
 
 
-def detached(controller):
+def detached(controller, *, require_empty_hand=True):
     c = controller
     pose = body_pose(c.data, PORTAFILTER)
     own = object_bodies(c.model, PORTAFILTER)
@@ -82,9 +82,7 @@ def detached(controller):
         and np.linalg.norm(pose[:3, 3] - c.loading[:3, 3]) < 0.015
         and Rotation.from_matrix(pose[:3, :3] @ c.loading[:3, :3].T).magnitude() < np.deg2rad(5)
         and np.linalg.norm(c.data.joint(PORTAFILTER + "_free").qvel) < 0.01
-        and not c.holding_loaf
-        and not c.attached
-        and not c.contacts()
+        and (not require_empty_hand or (not c.holding_loaf and not c.attached and not c.contacts()))
     )
 
 

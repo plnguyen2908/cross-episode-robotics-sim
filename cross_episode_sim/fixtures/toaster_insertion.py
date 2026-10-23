@@ -104,7 +104,9 @@ class ToasterInsertionTest(CrossRoomManipulation):
         self.tuck_for_navigation()
         dock=self.data.body(TOASTER).xpos[:2]+[.10,.45]
         self.task_navigate(dock,False,face=-np.pi/2)
-        self.embodiment.open_gripper(self);self.tick(.5)
+        self.embodiment.open_gripper(self)
+        from cross_episode_sim.control.timing import wait_for_open_gripper
+        wait_for_open_gripper(self, .5)
         self.untuck_for_manipulation()
         self.active_family='any'
 
@@ -152,7 +154,12 @@ class ToasterInsertionTest(CrossRoomManipulation):
         before=self.insertion_state();self.record(insertion_before_release=before)
         if not before['footprint_inside'] or before['insertion_depth_m']<.04:
             raise RuntimeError('Bread did not enter the slot before release')
-        self.holding_loaf=False;self.embodiment.open_gripper(self);self.tick(1.)
+        self.holding_loaf=False
+        self.embodiment.open_gripper(self)
+        from cross_episode_sim.control.timing import wait_for_stable_condition, gripper_open_ready
+        wait_for_stable_condition(self, 1.,
+            lambda: gripper_open_ready(self) and self.insertion_state()['slot_floor_contact']
+                    and self.insertion_state()['footprint_inside'], label="insertion_release")
         self.planner.detach_block();self.attached=False
         state=self.insertion_state();self.record(insertion_after_release=state)
         if not state['slot_floor_contact'] or not state['footprint_inside']:
@@ -163,7 +170,9 @@ class ToasterInsertionTest(CrossRoomManipulation):
     def withdraw_after_insertion(self):
         retreat=self.tcp().copy();retreat[2,3]+=.10
         self.mesh_contact_move('withdraw above inserted bread',retreat)
-        self.tuck_for_navigation();self.tick(.5)
+        self.tuck_for_navigation()
+        from cross_episode_sim.control.timing import settle_arm
+        settle_arm(self, .5)
 
     def run_test(self):
         success=False

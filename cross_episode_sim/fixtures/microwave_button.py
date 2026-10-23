@@ -86,9 +86,9 @@ class MicrowaveButtonTest(CabinetDoorTest):
             self.record(microwave_state_transition=event)
         self.turned_on = state
 
-    def button_pose(self, name):
+    def button_pose(self, name, tilt_degrees=35):
         from cross_episode_sim.controller.base import geom_box
-        R = Rotation.from_euler('x', 35, degrees=True).as_matrix() @ np.array([[0,1,0],[0,0,1],[1,0,0]])
+        R = Rotation.from_euler('x', tilt_degrees, degrees=True).as_matrix() @ np.array([[0,1,0],[0,0,1],[1,0,0]])
         corners = np.array([[x,y,z] for x in (-1,1) for y in (-1,1) for z in (-1,1)])
         vertices = []
         pad = self.model.body('robot_0/gripper/left_pad').id
@@ -110,28 +110,60 @@ class MicrowaveButtonTest(CabinetDoorTest):
 
     def move_button(self, stage, pose, seed=None):
         current = np.array([float(self.data.joint('robot_0/'+n).qpos[0]) for n in self.planner.names])
-        q = self.nearby_ik(pose, current if seed is None else seed,
-                           trust_radius=6. if seed is not None else .5,
-                           preserve_self_clearance=True)
+        planned = None
+        try:
+            q = self.nearby_ik(pose, current if seed is None else seed,
+                               trust_radius=6. if seed is not None else .5,
+                               preserve_self_clearance=True)
+        except RuntimeError:
+            if seed is None:
+                raise  # Contact strokes must stay on the local IK branch.
+            goal=list(pose[:3,3]-[0,0,self.embodiment.planner_tool_offset()])+list(
+                Rotation.from_matrix(pose[:3,:3]).as_quat(scalar_first=True))
+            planned=self.planner.plan(current.tolist(),goal)
+            q=np.asarray(planned[-1])
+            self.record(button_approach_method='global collision-checked pose plan')
         self.validate_door_path([q], q)
         self.load_world()
         blockers = [b.name for b in self.planner_world_boxes if self.planner.world_clearance(q, [b]) < 0]
         if blockers:
             self._precise_contact_boxes = getattr(self, '_precise_contact_boxes', set()) | set(blockers)
             self.load_world()
-        path = self.planner.plan_joints(current, q)
+        path = planned if planned is not None else (self.local_contact_path(current, q)
+                if seed is None and getattr(self.args, 'fixed_atomic_interface', False)
+                and np.max(np.abs(np.asarray(q)-current)) < .25
+                else self.planner.plan_joints(current, q))
         self._door_plans = {stage: path}
         super().plan_and_move(stage, pose)
         return q
 
     def press(self, name):
         self.review_phase = 'PRESS MICROWAVE '+name.upper()
-        pose = self.button_pose(name)
-        pre = pose.copy(); pre[1,3] -= .06
-        pre_q = self.move_button('approach '+name+' button', pre,
-                         np.array([0., -.07, .02, -1.17, .08, 3.28, -.085]))
+        offsets=(-.02, -.006, -.002, -.0005, .0002, .0006)
+        errors=[]
+        seed=np.array([0., -.07, .02, -1.17, .08, 3.28, -.085])
+        # Choose a branch that reaches the contact endpoint, then back out to
+        # the prepress pose. Reaching only the approach pose is insufficient.
+        for tilt in (35,20,50,0):
+            pose=self.button_pose(name,tilt)
+            pre=pose.copy();pre[1,3]-=.06
+            contact=pose.copy();contact[1,3]+=offsets[-1]
+            try:
+                q=self.nearby_ik(contact,seed,trust_radius=6.,preserve_self_clearance=True)
+                pre_seed=self.nearby_ik(pre,q,trust_radius=1.,preserve_self_clearance=True)
+                q=pre_seed
+                for offset in offsets:
+                    target=pose.copy();target[1,3]+=offset
+                    q=self.nearby_ik(target,q,trust_radius=.5,preserve_self_clearance=True)
+            except RuntimeError as exc:
+                errors.append(str(exc));continue
+            self.record(button_contact_tilt_deg=tilt,button_rejected_approaches=len(errors))
+            break
+        else:
+            raise RuntimeError('No complete button approach/contact IK: '+str(errors))
+        pre_q = self.move_button('approach '+name+' button', pre, np.asarray(pre_seed))
         maximum_force = 0.
-        for offset in (-.02, -.006, -.002, -.0005, .0002, .0006):
+        for offset in offsets:
             target = pose.copy(); target[1,3] += offset
             self.move_button('press '+name+' button', target)
             self.tick(.15)
@@ -144,7 +176,9 @@ class MicrowaveButtonTest(CabinetDoorTest):
         else:
             raise RuntimeError('No force-bearing fingertip press on '+name)
         self.move_button('withdraw from '+name+' button', pre, seed=pre_q)
-        self.tick(.5)
+        from cross_episode_sim.control.timing import wait_for_stable_condition
+        wait_for_stable_condition(self, .5, lambda: not self.contacts(name)[0]
+            and self.turned_on == (name == 'start'), label='button_release')
         if self.contacts(name)[0] or self.turned_on != (name == 'start'):
             raise RuntimeError('Microwave release state failed after '+name)
         self.report[name] = dict(pad_force_n=maximum_force, state_after_release=self.turned_on)

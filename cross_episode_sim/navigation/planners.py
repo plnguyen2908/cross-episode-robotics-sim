@@ -17,8 +17,39 @@ def plan_same_room_route(start, final, on_floor, pose_clear, reverse=0.0):
         return (np.linalg.norm(xy-start[:2]) <= .30 or
                 np.linalg.norm(xy-final[:2]) <= .30 or on_floor(pose))
 
-    path, metrics = forward_route(start, final, local_floor, pose_clear,
-                                  reverse=reverse)
+    departures=(reverse,) if reverse else (0.,.15,.25,.35)
+    original=None
+    for distance in departures:
+        try:
+            path,metrics=forward_route(start,final,local_floor,pose_clear,reverse=distance)
+            if distance:metrics['reverse_undock_m']=distance
+            break
+        except RuntimeError as exc:
+            if original is None:original=exc
+    else:
+        # A valid dock may have no space to turn there. Turn in open space,
+        # then enter along the final heading; never slide sideways into it.
+        accepted=None
+        for approach in (.25,.40,.60):
+            staging=final.copy()
+            staging[:2]-=approach*np.array([np.cos(final[2]),np.sin(final[2])])
+            samples=np.linspace(0.,1.,int(np.ceil(approach/.025))+1)
+            if not all(local_floor(staging+u*(final-staging)) and
+                       pose_clear(staging+u*(final-staging)) for u in samples):
+                continue
+            for distance in departures:
+                try:
+                    path,metrics=forward_route(start,staging,local_floor,pose_clear,reverse=distance)
+                except RuntimeError:
+                    continue
+                endpoint=final.copy();endpoint[2]=path[-1][2]
+                path.append(endpoint)
+                metrics.update(reverse_undock_m=distance,straight_docking_approach_m=approach)
+                accepted=(path,metrics)
+                break
+            if accepted is not None:break
+        if accepted is None:raise original
+        path,metrics=accepted
     for index in range(1, len(path)):
         if np.linalg.norm(path[index][:2]-path[index-1][:2]) < .001:
             path[index] = np.asarray(path[index], dtype=float).copy()
@@ -103,8 +134,9 @@ def plan_cross_room_route(scene_xml, reach_map, start, final, pose_clear,
     raise RuntimeError('A* found no full-body swept-clear route')
 
 
-def plan_cross_room_escape(scene_xml, reach_map, start, final, pose_clear, on_floor):
-    """Leave a tight dock sideways before asking A* to turn toward the goal.
+def plan_cross_room_escape(scene_xml, reach_map, start, final, pose_clear, on_floor,
+                           *, allow_lateral=True):
+    """Leave a tight dock with a checked straight segment before turning.
 
     Keep the departure orientation and check the whole robot/payload every
     25 mm. This only plans a prefix; no base movement occurs until a complete
@@ -113,13 +145,18 @@ def plan_cross_room_escape(scene_xml, reach_map, start, final, pose_clear, on_fl
     start = np.asarray(start, dtype=float)
     forward = np.array([np.cos(start[2]), np.sin(start[2])])
     sideways = np.array([-forward[1], forward[0]])
+    directions = (-forward, forward, sideways, -sideways) if allow_lateral else (-forward, forward)
     checked = 0
     for distance in (.20, .35, .50, .65):
-        for direction in (sideways, -sideways):
+        for direction in directions:
             escaped = start.copy()
             escaped[:2] += distance * direction
             samples = np.linspace(0., 1., int(np.ceil(distance / .025)) + 1)
-            if not all(on_floor(start + u * (escaped-start)) and
+            # Manipulation docks can lie outside the eroded reach map. As in
+            # local routing, permit a short connector from the measured start;
+            # the full robot must still clear every physical swept sample.
+            if not all((np.linalg.norm(u * (escaped-start)[:2]) <= .30 or
+                        on_floor(start + u * (escaped-start))) and
                        pose_clear(start + u * (escaped-start)) for u in samples):
                 continue
             checked += 1
@@ -128,6 +165,8 @@ def plan_cross_room_escape(scene_xml, reach_map, start, final, pose_clear, on_fl
             except RuntimeError:
                 continue
             metrics.update(departure_escape_m=distance, departure_escape_candidates=checked,
-                           route_method='checked sideways departure then cross-room A*')
+                           route_method='checked local departure then cross-room A*',
+                           departure_direction=direction.tolist(),
+                           reverse_undock_m=distance if np.dot(direction, forward) < -.99 else 0.)
             return [start.copy(), *path], metrics
-    raise RuntimeError('No swept-clear sideways departure with a complete cross-room route')
+    raise RuntimeError('No swept-clear local departure with a complete cross-room route')

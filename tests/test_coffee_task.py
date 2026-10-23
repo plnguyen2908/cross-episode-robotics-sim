@@ -326,3 +326,19 @@ def test_return_to_machine_reuses_successful_preplanned_route():
     BrewActions.return_to_machine(c)
     c.plan_route.assert_called_once()
     c.task_navigate.assert_called_once()
+
+
+@pytest.mark.parametrize('ready,already_started,starts', [(False, False, False), (True, False, True), (True, True, False)])
+def test_brew_button_contact_is_distinct_from_machine_acceptance(ready, already_started, starts):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from cross_episode_sim.tasks.coffee.brew import BrewActions
+    cycle = SimpleNamespace(started_at=1. if already_started else None, start=Mock(), brew_seconds=10)
+    c = SimpleNamespace(machine_action='brew', machine_cycle=cycle,
+                        machine_button_prerequisites=lambda: ready, installed=lambda: True,
+                        grounds_ready=lambda: True, mug_ready=lambda: True,
+                        data=SimpleNamespace(time=2.), mug='cup', event=Mock())
+    BrewActions.machine_event(c, 'button_pressed')
+    assert cycle.start.called == starts
+    assert c.event.call_args.args[0] == ('brew_started' if starts else 'brew_start_rejected')

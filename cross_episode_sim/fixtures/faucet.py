@@ -71,7 +71,7 @@ class FaucetTest(CabinetDoorTest):
         mujoco.mj_forward(self.model, probe)
         bad = self.door_collision(probe)
         if bad:
-            raise RuntimeError(f'Faucet grasp endpoint has native collision: {bad}')
+            raise RuntimeError(f'Fixture grasp endpoint has native collision: {bad}')
         self._precise_contact_boxes = set()
         self.load_world()
         blockers = [box.name for box in self.planner_world_boxes
@@ -81,7 +81,7 @@ class FaucetTest(CabinetDoorTest):
             # These geoms remain present in every swept native-mesh preflight,
             # every executed-step collision check, and physical simulation.
             self._precise_contact_boxes = set(blockers)
-            self.record(faucet_native_mesh_refinement=blockers,
+            self.record(fixture_native_mesh_refinement=blockers,
                         native_endpoint_clear=True)
             self.load_world()
         return self.planner.plan_joints(current, q)
@@ -104,7 +104,8 @@ class FaucetTest(CabinetDoorTest):
             self._faucet_return = None
             self.articulating = False
             self.open_handle_gripper()
-            self.tick(.5)
+            from cross_episode_sim.control.timing import wait_for_open_gripper
+            wait_for_open_gripper(self, .5)
             self.rebuild_planner()
             current = np.array([float(self.data.joint('robot_0/'+n).qpos[0]) for n in self.planner.names])
             path = list(reversed(cached['path']))
@@ -116,7 +117,9 @@ class FaucetTest(CabinetDoorTest):
             self.plan_and_move('approach cabinet handle', cached['tcp'])
             self.stage = 'close gripper on cabinet handle'
             self.embodiment.command_gripper(self.data, self.profile.gripper_close)
-            self.tick(1.)
+            from cross_episode_sim.control.timing import wait_for_stable_condition
+            wait_for_stable_condition(self, 1., lambda: len(self.handle_contacts()) >= 2,
+                                      label="fixture_grasp")
             if len(self.handle_contacts()) < 2:
                 raise RuntimeError('Faucet regrasp lacks bilateral physical finger contact')
             self.articulating = True

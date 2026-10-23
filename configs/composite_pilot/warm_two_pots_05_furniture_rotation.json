@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "episode_id": "warm_two_pots_05_furniture_rotation",
+  "task": "warm_two_pots",
+  "variant": "furniture_rotation",
+  "instruction": "Keep each pot on its assigned switched-on burner for at least 30 seconds. Finish with both burners off and both pots remaining on the stove.",
+  "procedure": "start_first_before_placing_second",
+  "scene": {
+    "seed": 7,
+    "kitchen_layout": 1,
+    "kitchen_style": 1,
+    "people": 3,
+    "object_counts": {
+      "pot": 2
+    },
+    "asset_instance_set": "baseline",
+    "furniture": {
+      "sofa": {
+        "dx": 0,
+        "dy": 0,
+        "yaw_deg": 8
+      },
+      "coffee_table": {
+        "dx": 0,
+        "dy": 0,
+        "yaw_deg": 8
+      }
+    },
+    "forbidden_object_categories": [
+      "plate",
+      "flat_object"
+    ],
+    "minimum_heating_seconds": 30.0
+  },
+  "goal_keys": [
+    "both_pots_heated_long_enough",
+    "both_burners_off",
+    "pots_on_separate_burners",
+    "empty_hand"
+  ],
+  "requirements": [
+    "multi_object_transfer",
+    "pot_grasps",
+    "independent_burner_controls",
+    "private_duration_tracking"
+  ],
+  "catalog_version": "fixed-atomic-v1",
+  "video_speedup": 1.0,
+  "dataset_role": "pilot_unassigned",
+  "initial_state_policy": "deterministic_setup_from_scene_config",
+  "validation_status": "not_executed",
+  "scene_spec_sha256": "a3cf377e09a8b5c9c20d2f07e0aa490f9b8334575dd43039268744f9593c24de"
+}

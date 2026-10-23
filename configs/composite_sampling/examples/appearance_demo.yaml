@@ -1,0 +1,16 @@
+task: set_table
+seed: 52
+count: 7
+fixed:
+  scene.seed: 7
+  scene.people: 1
+controls:
+  appearance_theme:
+    scene.appearance.preset:
+      choices: [warm_home, cool_daylight, sage_neutral]
+  execution_order:
+    procedure:
+      choices: [by_place_setting, by_object_category]
+randomize_controls:
+  min_active: 1
+  max_active: 2

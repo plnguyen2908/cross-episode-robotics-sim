@@ -12,7 +12,7 @@ from cross_episode_sim.paths import FIXTURE_ASSETS_DIR, read_localized
 KNOB = 'stove_main_group_knob_front_left'
 
 
-def install_front_control_stove(scene):
+def install_front_control_stove(scene, knob_locations=('front_left',)):
     """Initial scene fixture selection; retain authored geometry and knob physics."""
     tree = ET.parse(scene)
     root = tree.getroot()
@@ -21,12 +21,18 @@ def install_front_control_stove(scene):
     old = next(b for b in world if b.get('name') == 'stove_main_group_main')
     body = copy.deepcopy(native.find('worldbody/body'))
     body.set('pos', old.get('pos'))
-    if old.get('quat'):
-        body.set('quat', old.get('quat'))
+    # RoboCasa exports rotated wall groups using Euler angles in some layouts.
+    # Preserve every supported orientation encoding, not only quaternion exports.
+    orientations = ('quat', 'euler', 'axisangle', 'xyaxes', 'zaxis')
+    for field in orientations:
+        body.attrib.pop(field, None)
+    for field in orientations:
+        if old.get(field) is not None:
+            body.set(field, old.get(field))
     # Match the existing export policy: only the task articulation is passive.
     for parent in body.iter('body'):
         for joint in list(parent.findall('joint')):
-            if joint.get('name') != KNOB+'_joint':
+            if joint.get('name') not in {f'stove_main_group_knob_{location}_joint' for location in knob_locations}:
                 parent.remove(joint)
     world.remove(old)
     world.append(body)

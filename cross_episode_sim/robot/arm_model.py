@@ -69,6 +69,20 @@ def export_arm_model(model, data, profile, directory, collision_resolution=None)
                          int(model.body_geomadr[bid]+model.body_geomnum[bid])):
             if not (model.geom_contype[gid] or model.geom_conaffinity[gid]):
                 continue
+            if model.geom_type[gid] == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                # A long, thin capsule must not inherit the AABB grid's eight
+                # cells-per-axis cap: that inflates a 12 mm mast to 89 mm
+                # spheres and rejects motions through physically empty space.
+                # Cover the cylinder and end caps by overlapping spheres. sqrt(r^2 + (step/2)^2) encloses each cylinder slice.
+                radius, half_length = model.geom_size[gid, :2]
+                count = max(1, int(np.ceil(2 * half_length / radius)))
+                step = 2 * half_length / count
+                rotation = Rotation.from_quat(model.geom_quat[gid], scalar_first=True).as_matrix()
+                for z in np.linspace(-half_length, half_length, count + 1):
+                    point = model.geom_pos[gid] + rotation @ np.array([0., 0., z])
+                    link_spheres.append(dict(center=point.tolist(),
+                        radius=float(np.hypot(radius, step / 2))))
+                continue
             center, half = model.geom_aabb[gid, :3], model.geom_aabb[gid, 3:]
             if not np.all(np.isfinite(half)) or max(half) <= 0:
                 continue

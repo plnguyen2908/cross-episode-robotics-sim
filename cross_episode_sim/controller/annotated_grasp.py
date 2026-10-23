@@ -121,7 +121,8 @@ class AnnotatedGraspMixin:
             args = getattr(self, 'args', None)
             full_height = getattr(args, 'lift_height', lift[2, 3]-start[2, 3])
             retreat = getattr(args, 'lift_retreat', 0.)
-            if full_height > lift[2, 3]-start[2, 3]+1e-6 or retreat:
+            withdrawal = np.asarray(getattr(self, 'pickup_withdrawal_vector', (0., 0., 0.)), dtype=float)
+            if full_height > lift[2, 3]-start[2, 3]+1e-6 or retreat or np.any(withdrawal):
                 payload = lift@np.linalg.inv(start)@self.bread_pose()
                 probe.qpos[addresses] = first[-1]
                 probe.joint(self.object_joint).qpos[:3] = payload[:3, 3]
@@ -130,7 +131,19 @@ class AnnotatedGraspMixin:
                 forward_collision(self.model, probe)
                 if hasattr(self, 'project_payload_contents'):
                     self.project_payload_contents(probe, reference=live)
+                if np.any(withdrawal):
+                    outside = lift.copy(); outside[:3, 3] += withdrawal
+                    path = self.plan_contact_path('annotated compartment withdrawal preflight', outside)
+                    payload = outside@np.linalg.inv(lift)@self.bread_pose()
+                    probe.qpos[addresses] = path[-1]
+                    probe.joint(self.object_joint).qpos[:3] = payload[:3, 3]
+                    probe.joint(self.object_joint).qpos[3:7] = Rotation.from_matrix(
+                        payload[:3, :3]).as_quat(scalar_first=True)
+                    forward_collision(self.model, probe)
+                    if hasattr(self, 'project_payload_contents'):
+                        self.project_payload_contents(probe, reference=live)
                 final = start.copy(); final[2, 3] += full_height
+                final[:3, 3] += withdrawal
                 yaw = float(probe.joint(NS+self.profile.base_joints[2]).qpos[0])
                 final[:3, 3] -= retreat*np.array([np.cos(yaw), np.sin(yaw), 0.])
                 self.plan_contact_path('annotated full lift preflight', final)
@@ -212,13 +225,22 @@ class AnnotatedGraspMixin:
             # RB-Y1 closes along tool Y, matching the library convention.
             # Filter conservatively with the full object projection, then check
             # the actual RB-Y1 hand/arm against the scene at all approach samples.
+            approach_penalty = (self.annotation_approach_penalty(pose)
+                                if hasattr(self, 'annotation_approach_penalty') else .2*(pose[2, 2]+1))
             score = (abs(width - self.profile.preferred_contact_width_m)
-                     + 0.2 * (pose[2, 2] + 1) + .0002 * (index // orientation_count))
+                     + approach_penalty + .0002 * (index // orientation_count))
+            # A tall object's upper surface can strike the palm before pads
+            # reach a deep contact. Prefer shallow enough contacts, while
+            # retaining native collision and physical hold qualification.
+            palm_clearance = getattr(self, 'annotation_palm_clearance', None)
+            if palm_clearance is not None:
+                score += max(0., float(vertices[:, 2].max()) - palm_clearance - pose[2, 3])
             # A narrow cross-section near a rounded object's top is not a
             # robust carry grip. Include depth for pad-region grasps so a
             # centred annotation wins over a shallow cap pinch. Whole-object
             # grasps retain their established horizontal-centering policy.
-            centre_dimensions = 3 if self.profile.grasp_width_mode == 'contact_region' else 2
+            centre_dimensions = (3 if self.profile.grasp_width_mode == 'contact_region'
+                                 and palm_clearance is None else 2)
             score += getattr(self, "annotation_center_weight", 0.) * float(
                 np.linalg.norm(pose[:centre_dimensions, 3]
                                - self.bread_pose()[:centre_dimensions, 3]))
@@ -265,6 +287,14 @@ class AnnotatedGraspMixin:
         # grasp simply because that symmetric orientation has another index.
         rejected_contacts = {index % annotation_count for index in rejected_physical}
         candidates = [item for item in candidates if item[1] % annotation_count not in rejected_contacts]
+        rejected_poses=getattr(self,'rejected_grasp_local_poses',())
+        if rejected_poses:
+            from cross_episode_sim.manipulation.grasp_qualification import equivalent_grasp
+            # Library fallback changes annotation indices. Object-relative
+            # geometry remains meaningful across those changes and jaw flips.
+            inverse=np.linalg.inv(self.bread_pose())
+            candidates=[item for item in candidates if not any(
+                equivalent_grasp(inverse @ item[3],old) for old in rejected_poses)]
         if getattr(self, 'diverse_planning_candidates', False):
             # Explore different contact positions and approach directions before
             # spending the budget on adjacent poses or parallel-jaw flips.
@@ -281,7 +311,12 @@ class AnnotatedGraspMixin:
             self.report['annotation_selection']['distinct_planning_candidates'] = len(diverse)
             self.report['annotation_selection']['fewer_than_five_distinct_available'] = len(diverse) < 5
         budget = getattr(self, 'annotation_candidate_budget', 16)
-        self.report['annotation_selection']['planning_budget'] = budget
+        candidates = (self.select_annotation_candidates(candidates, budget)
+                      if hasattr(self, 'select_annotation_candidates') else candidates[:budget])
+        self.report['annotation_selection']['planning_budget'] = len(candidates)
+        self.report['annotation_selection']['candidate_order'] = [
+            dict(index=i, score=float(score), width_m=float(width), tcp_xyz=pose[:3, 3].tolist())
+            for score, i, width, pose in candidates]
         self.report['annotation_selection']['planning_attempts'] = 0
         # A high support can make a long pregrasp unreachable even when the
         # contact pose is reachable. Adapters may request shorter approaches;
@@ -290,7 +325,7 @@ class AnnotatedGraspMixin:
             (getattr(self, 'annotation_standoff', .10),))))
         if not standoffs or any(not np.isfinite(s) or s <= 0 for s in standoffs):
             raise ValueError('Annotated pregrasp standoffs must be positive and finite')
-        attempts = ((item, standoff) for item in candidates[:budget] for standoff in standoffs)
+        attempts = ((item, standoff) for item in candidates for standoff in standoffs)
         for (_, index, width, pose), standoff in attempts:
             self.report['annotation_selection']['planning_attempts'] += 1
             aperture = (min(.05, (width + .006) / 2)
@@ -301,9 +336,38 @@ class AnnotatedGraspMixin:
             goal = list(pre[:3, 3] - [0, 0, self.embodiment.planner_tool_offset()]) + list(
                 Rotation.from_matrix(pre[:3, :3]).as_quat(scalar_first=True)
             )
+            planning_phase = 'pregrasp'
             try:
-                trajectory = self.planner.plan(positions, goal)
+                try:
+                    trajectory = self.planner.plan(positions, goal)
+                except RuntimeError:
+                    if not getattr(self.args, 'fixed_atomic_interface', False):
+                        raise
+                    # A pose-optimizer miss is not proof of unreachable IK.
+                    # Try a local endpoint solve, retaining planner self/world
+                    # checks and every native swept/lift preflight below.
+                    seeds = [positions]
+                    if len(positions) == 7 and self.profile.name.lower().startswith('franka'):
+                        seeds.append([0., .25, 0., -1.5, 0., 3.35, 0.])
+                    errors = []
+                    for seed in seeds:
+                        try:
+                            endpoint = self.nearby_ik(pre, seed, trust_radius=6.,
+                                                      preserve_self_clearance=True)
+                            probe.qpos[:] = self.data.qpos
+                            probe.qpos[addresses] = endpoint
+                            self.embodiment.probe_aperture(self.model, probe, aperture)
+                            forward_collision(self.model, probe)
+                            self.validate_grasp_probe(probe)
+                            trajectory = self.planner.plan_joints(positions, endpoint)
+                            break
+                        except RuntimeError as exc:
+                            errors.append(str(exc))
+                    else:
+                        raise RuntimeError(f'Pregrasp IK/path candidates failed: {errors}')
+                    self.record(pregrasp_ik_fallback=True)
                 q = np.asarray(trajectory[-1])
+                planning_phase = 'contact approach'
                 contact_path = []
                 mesh_contact = getattr(self, 'annotation_mesh_contact_approach', False)
                 samples = 19 if mesh_contact else 6
@@ -328,12 +392,14 @@ class AnnotatedGraspMixin:
                     self.validate_grasp_probe(probe)
                 # cuRobo excludes some self pairs and the head chain. Check its
                 # whole free-space approach with the actual MuJoCo geometry too.
+                planning_phase = 'free-space mesh validation'
                 for waypoint_joints in trajectory:
                     probe.qpos[:] = self.data.qpos
                     probe.qpos[addresses] = waypoint_joints
                     self.embodiment.probe_aperture(self.model, probe, aperture)
                     forward_collision(self.model, probe)
                     self.validate_grasp_probe(probe)
+                planning_phase = 'lift preflight'
                 self.validate_grasp_lift(contact_path[-1], aperture)
                 self.args.grip_open = aperture
                 self.preplanned_moves = {"pregrasp": (pre.copy(), trajectory)}
@@ -356,13 +422,15 @@ class AnnotatedGraspMixin:
                     pregrasp_standoff_m=float(standoff),
                 )
                 self.selected_annotation_variant = index
+                self.selected_grasp_local_pose = np.linalg.inv(self.bread_pose()) @ pose
                 self.record(selected_annotation=index % annotation_count, orientation_variant=index, projected_width_m=width)
                 return pose.copy(), pre
             except RuntimeError as exc:
                 self.report["annotation_selection"]["rejected"].append(
-                    {"index": index, "reason": str(exc)}
+                    {"index": index, "phase": planning_phase, "standoff_m": float(standoff), "reason": str(exc)}
                 )
-                self.record(rejected_annotation=index, reason=str(exc))
+                self.record(rejected_annotation=index, planning_phase=planning_phase,
+                            standoff_m=float(standoff), reason=str(exc))
         raise RuntimeError("No annotated grasp passed robot reachability and collision checks")
 
 

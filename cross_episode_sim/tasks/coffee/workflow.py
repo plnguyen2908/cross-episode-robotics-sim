@@ -294,7 +294,6 @@ class CoffeeWorkflow(BrewActions, MoonlakeRobotPour):
             if depth>.0015:raise RuntimeError('Excessive button contact penetration')
             self.report['max_button_travel_m']=max(travel,self.report.get('max_button_travel_m',0.))
             if touch and force>.05 and travel>.0006 and not self.button_pressed:
-                if not self.button_prerequisites():raise RuntimeError('Machine button prerequisites not met')
                 self.button_pressed=True;self.event('button_pressed',button=self.active_button_body,force_n=force,travel_m=travel)
 
         self.machine_before_step()

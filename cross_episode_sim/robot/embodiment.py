@@ -39,6 +39,8 @@ class RobotEmbodiment(ABC):
         cfg.robot_cls.add_robot_to_scene(
             cfg, spec, namespace, [0., 0.], [1., 0., 0., 0.])
         cfg.robot_cls.apply_control_overrides(spec, cfg)
+        from cross_episode_sim.robot.cameras import install_onboard_cameras
+        install_onboard_cameras(spec, self.profile, namespace)
 
     def validate_model(self, model):
         missing = validate(self.profile, model)
@@ -357,6 +359,13 @@ class TidyBotFrankaEmbodiment(RobotEmbodiment):
             q = list(self.profile.travel_posture)
             q[-1] += angle
             choices.append(tuple(q))
+        # Wrist yaw alone cannot resolve link5/link7 interference. Try a more
+        # open elbow/wrist fold too; every path must pass native-mesh checks.
+        for elbow,wrist in ((-.6,1.0),(-1.0,1.4),(-1.4,1.8)):
+            for yaw in (0.,.7,-.7):
+                q=list(self.profile.travel_posture)
+                q[3],q[5],q[6]=elbow,wrist,yaw
+                choices.append(tuple(q))
         return tuple(dict.fromkeys(choices))
 
     def add_to_scene(self, spec, namespace='robot_0/'):
@@ -386,7 +395,7 @@ class TidyBotFrankaEmbodiment(RobotEmbodiment):
             spec.add_mesh(name=name, file=str(mesh_dir / f'{part}.stl'))
             base.add_geom(name=name + '_visual',
                           type=mujoco.mjtGeom.mjGEOM_MESH,
-                          meshname=name, rgba=rgba, group=0,
+                          meshname=name, rgba=rgba, group=1,
                           contype=0, conaffinity=0)
 
 

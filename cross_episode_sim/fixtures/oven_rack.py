@@ -141,7 +141,9 @@ class OvenRackTest(CabinetDoorTest):
                     planning_start_self_gap=self.planner.self_clearance(current.tolist()))
         self._precise_contact_boxes = getattr(self,'_precise_contact_boxes',set()) | blocked
         self.load_world()
-        path = self.planner.plan_joints(current,q)
+        path = (self.local_contact_path(current, q)
+                if joint_target is not None and getattr(self.args, 'fixed_atomic_interface', False)
+                else self.planner.plan_joints(current,q))
         self._door_plans = {stage:path}
         super().plan_and_move(stage,pose,hinge_target=joint_target)
         return q
@@ -162,7 +164,8 @@ class OvenRackTest(CabinetDoorTest):
 
     def grasp(self):
         self.embodiment.open_gripper(self)
-        self.tick(.5)
+        from cross_episode_sim.control.timing import wait_for_open_gripper
+        wait_for_open_gripper(self, .5)
         self.rebuild_planner()
         pose = self.target_pose()
         pre = pose.copy(); pre[:3,3] -= .08*pose[:3,2]
@@ -170,7 +173,9 @@ class OvenRackTest(CabinetDoorTest):
                        seed=np.array([.513,-.293,.474,-2.003,-.606,2.124,-.346]))
         self.move_pose('grasp '+self.component,pose)
         self.embodiment.command_gripper(self.data,self.profile.gripper_close)
-        self.tick(1.)
+        from cross_episode_sim.control.timing import wait_for_stable_condition
+        wait_for_stable_condition(self, 1., lambda: len(self.handle_contacts()) >= 2,
+                                  label="fixture_grasp")
         self.record(component=self.component, physical_fingers=self.handle_contacts())
         if len(self.handle_contacts()) < 2:
             raise RuntimeError('No bilateral contact on oven '+self.component)
@@ -203,12 +208,16 @@ class OvenRackTest(CabinetDoorTest):
 
     def release(self):
         self.embodiment.open_gripper(self)
-        self.tick(.5)
+        from cross_episode_sim.control.timing import wait_for_open_gripper
+        wait_for_open_gripper(self, .5)
         self.articulating = False
         self.rebuild_planner()
         pose = self.tcp().copy();pose[:3,3] -= .10*pose[:3,2]
         self.move_pose('release and withdraw from '+self.component,pose)
-        self.tick(.5)
+        from cross_episode_sim.control.timing import wait_for_stable_condition
+        wait_for_stable_condition(self, .5,
+            lambda: not self.handle_contacts() and abs(float(self.data.qvel[self.model.jnt_dofadr[self.door_joint]])) < .02,
+            label='fixture_release')
 
     def record(self, **metrics):
         if getattr(self,'component','door') == 'rack' and 'door_angle_deg' in metrics:

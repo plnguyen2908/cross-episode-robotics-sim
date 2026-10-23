@@ -141,7 +141,7 @@ class TableTransfer(AnnotatedGraspMixin, NavigationTransfer):
         return [c for c in matches if self.model.geom_bodyid[self.model.geom(c['geom']).id] in self.support_bids]
 
     def move(self, stage, pose):
-        if stage.startswith('lift bread'):
+        if stage.startswith('lift bread') or stage == 'withdraw held object from compartment':
             return self.mesh_contact_move(stage, pose)
         return super().move(stage, pose)
 
