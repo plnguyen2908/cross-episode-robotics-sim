@@ -1,96 +1,185 @@
 # Cross-Episode Robotics Sim
 
-Multi-room household tasks for a mobile manipulator in [RoboCasa](https://robocasa.ai), built
-for studying how a robot can use its past episodes to finish the current one.
+A MuJoCo/RoboCasa household simulation and demonstration generator for studying
+**compositional planning, reusable robot skills, and generalization to new tasks
+and settings**. A TidyBot++ mobile base carries a Franka FR3 arm and Robotiq 2F-85
+gripper. Composite policies act through a fixed atomic interface in one persistent
+physical scene.
 
-A TidyBot++ holonomic base carries a Franka FR3 arm with a Robotiq 2F-85 gripper through a
-kitchen, dining room and living room. Everything is physically simulated in MuJoCo: objects move
-only through gripper contact, food and coffee grounds are free rigid bodies, and doors, drawers,
-knobs and buttons move on their native joints.
+## Project direction and current status
 
-The repository provides
+The intended dataset is a **shared corpus of past training episodes**, with held-out
+composite tasks or out-of-distribution settings for evaluation. It is not a fixed
+package of specially selected history videos attached to every test example.
+Memory models may later learn from or retrieve that corpus.
 
-- **two composite tasks** with oracle demonstrations: breakfast for two (gather empty vessels
-  from three rooms, a person fills them, serve them) and making espresso;
-- **a fixed interface of 16 atomic functions**, each with a successful physical demonstration
-  and a [separate normal-speed video](#atomic-skills-and-videos);
-- **a template task** (`tidy_up`: return a mug and a book to their rooms) that shows how tasks are
-  composed from the skills;
-- **a Gymnasium environment** where a learned policy drives the same robot and is scored by the
-  same measured goal predicates;
-- **dataset export** from demonstrations to robomimic-style HDF5, with a minimal behavior
-  cloning example.
+| Workstream | Current implementation | Next milestone |
+| --- | --- | --- |
+| Benchmark and composite data | Five tasks, configurable procedures, randomized houses/objects/furniture/appearance, physical goal checks, recorded demonstrations | Define reproducible training/test splits and measure reliability across new samples |
+| Atomic skills and VLA training | Fixed 16-function oracle interface, physical atomic demos, shared motion components, dataset/policy utilities | Validate a synchronized training action/observation contract; train and evaluate VLA baselines |
+| Memory and planning | Intended planner queries memory, decomposes a task into subtasks and ordered skills; skills can be executed by a VLA | First establish VLA generalization baselines; memory learning/retrieval is later work |
 
-The latest atomic demonstrations are listed [below](#atomic-skills-and-videos).
-The [project page](https://plnguyen2908.github.io/cross-episode-robotics-sim/) and
-the composite examples below contain earlier demonstrations. Those previews are
-time-lapses and their full videos are 3× speed; the new atomic clips are **1× speed**.
+A single planner can produce both the subtask decomposition and ordered skill
+calls. “Bag of skills” describes the fixed capabilities available to the planner;
+it does not remove execution order or physical preconditions. Current generation
+uses oracle recipes and simulator-aware controllers, not a trained memory model.
 
-| Breakfast for two | Making espresso |
-|---|---|
-| ![Breakfast for two, time-lapse](docs/previews/breakfast.gif) | ![Making espresso, time-lapse](docs/previews/coffee.gif) |
-| [▶ breakfast.mp4](docs/videos/breakfast.mp4) · 816 s simulated | [▶ coffee.mp4](docs/videos/coffee.mp4) · 330 s simulated |
-| Collect two mugs and two bowls from three rooms, wait while a person fills them with randomly chosen food, then carry each filled vessel to the office desk (the dining-room table). | Twist out the portafilter, pour 32 grounds from a box, reinstall and lock it, put a cup under the spout, press power, then brew. |
+**Latest saved-batch evidence:** `composite_pilot_k8yxo0si` has **35/35 successful
+reports**, including the two repaired grocery runs and finalized videos. See
+[recovery evidence](docs/batch_failure_recovery_2026_10_22.md). This is a resumed
+batch with fixes, not a first-attempt success rate or a guarantee for unseen houses.
+Some door calls still take about 60 simulated seconds, exceeding the 5–15 s target.
 
-## Atomic skills and videos
+**Read before changing execution:** [AGENTS.md](AGENTS.md),
+[mandatory motion defaults](docs/human_like_motion.md#mandatory-defaults), and
+[onboard observation requirements](docs/onboard_observations.md).
 
-The fixed public vocabulary has **16 functions**, including generic waiting.
-Each link below opens a separate successful physical demonstration. Opening and
-closing are separate clips; all clips preserve normal playback speed.
+## Start here
 
-| Atomic function | Purpose | Video |
-|---|---|---|
-| `navigate` | Approach a target; transport a held object when a destination is supplied. | [Watch navigate](docs/videos/atomic/navigate.mp4) |
-| `pick` | Grasp and lift an object using a top-down approach. | [Watch pick](docs/videos/atomic/pick.mp4) |
-| `place` | Place the held object, release it, and withdraw. | [Watch place](docs/videos/atomic/place.mp4) |
-| `open_door` | Grasp a handle and open a hinged fixture. | [Watch open_door](docs/videos/atomic/open_door.mp4) |
-| `close_door` | Grasp a handle and close a hinged fixture. | [Watch close_door](docs/videos/atomic/close_door.mp4) |
-| `open_drawer` | Open a drawer with a top-down handle grasp. | [Watch open_drawer](docs/videos/atomic/open_drawer.mp4) |
-| `close_drawer` | Close a drawer with a top-down handle grasp. | [Watch close_drawer](docs/videos/atomic/close_drawer.mp4) |
-| `open_lid` | Open a hinged lid or remove a detachable lid. | [Watch open_lid](docs/videos/atomic/open_lid.mp4) |
-| `close_lid` | Close a hinged lid or reseat a detachable lid. | [Watch close_lid](docs/videos/atomic/close_lid.mp4) |
-| `push_button` | Press a button and withdraw. | [Watch push_button](docs/videos/atomic/push_button.mp4) |
-| `turn_lever` | Turn a rotary lever to the requested state. | [Watch turn_lever](docs/videos/atomic/turn_lever.mp4) |
-| `push_lever` | Push a sliding lever and withdraw. | [Watch push_lever](docs/videos/atomic/push_lever.mp4) |
-| `rotate_knob` | Rotate a knob to the requested state. | [Watch rotate_knob](docs/videos/atomic/rotate_knob.mp4) |
-| `insert` | Insert an already-held object into a receptacle and release. | [Watch insert](docs/videos/atomic/insert.mp4) |
-| `slide_oven_rack` | Slide an oven rack in or out when its path is clear. | [Watch slide_oven_rack](docs/videos/atomic/slide_oven_rack.mp4) |
-| `wait` | Advance simulated time; does not require an empty hand. | [Watch wait](docs/videos/atomic/wait.mp4) |
+1. Install the two environments and assets using [setup below](#installation).
+2. Read the [ownership map](#code-ownership-and-extension-points) before editing.
+3. Preview configurations, then run one example before a large batch.
+4. Inspect physical outcomes and executed skill calls, not just videos or plans.
+5. Use a new batch for a changed sampling distribution; resume only to keep the
+   saved configurations and retry unfinished/failed examples.
 
-**Validation (13 October 2026):** all 16 functions have successful physical demos
-in their tested scenes. These selected successes are not a dataset-wide success
-rate or a guarantee for every object/layout. The door clips demonstrate native
-cabinet/oven fixtures; opening the newly added room doors is not yet validated.
-A removable lid can remain held after opening. Waiting advances simulation time;
-it does not independently heat objects or mark a task successful.
+## Current composite tasks
 
-The [video provenance manifest](docs/videos/atomic/manifest.json) records the source
-run, call arguments, and duration for every clip. Videos are downloadable from their
-GitHub file pages if the browser does not play them inline.
+| Task key | Goal | Supported procedure variation |
+| --- | --- | --- |
+| `set_table` | Serve the requested bowls and cups at the dining table | Complete each setting, or bowls then cups |
+| `clear_and_store` | Put vessels in appropriate cabinet/drawer storage | Finish one storage unit, or open both before storing and closing |
+| `prepare_and_serve_meal` | Microwave a meal and retrieve/serve refrigerated items | Retrieve the other items during heating, or before heating |
+| `unpack_and_sort_groceries` | Drinks into the purple basket, snacks into the orange basket | Drinks first or snacks first; baskets stay at their initial supports |
+| `warm_two_pots` | Warm two graspable vessels on separate burners, then switch off | Start the first burner early, or place both vessels before starting |
 
-The active direction uses these fixed capabilities for new composite tasks and
-later VLA training. Coffee pouring and portafilter operations are legacy workflows,
-not additional functions in this fixed vocabulary.
+Heating is a **duration predicate, not simulated heat transfer**. The prompt states
+the minimum (normally 30 simulated seconds). The private evaluator counts only
+qualifying appliance-on time with the object properly placed; the planner can
+wait or do other work. There is no public “ready” signal. Atomic knob/button
+qualification does not require waiting through a heating task.
 
-## Why
+## Generation logic
 
-Given past episodes, either the most similar ones or all of them, how can a robot use that
-experience to finish the current episode?
+Sample the base-house seed and room count **before** task variations. Default
+YAMLs sample 5–7 rooms: exactly one kitchen and dining room, at least one bedroom.
+The selected native kitchen then determines how the house geometry is fitted.
+Validate doors and furnished circulation before and after scene changes.
 
-Physical agents today pair a planner with skill policies and start every episode from scratch,
-even when they have done something similar before. A past episode records what worked and what
-did not: the sequence of subtasks that completed a similar task, which dock reached a crowded
-counter, which grasp slipped, where the mugs were put away, how long the machine took to warm up.
-Retrieving that experience should let the robot replace search with recall in the current
-episode.
+The original six controls are **execution order, object instances, kitchen layout,
+furniture translation, furniture rotation, and door/route choice**. Furniture
+instances and appearance extend that pool. The original case is the empty subset,
+not a seventh control. Any subset can be sampled, including one control; selected
+values can still equal baseline values. Task-defining sorting colors are protected.
 
-The tasks here generate those episodes. Every run is a complete record (the instruction, the
-plan of operations, every action and measured outcome, and the attempts that failed and were
-rolled back) in a house whose layout and objects change from day to day. That gives both the
-experience to retrieve from and a way to measure whether using it helps finish a new episode,
-compared with starting from scratch.
+```mermaid
+flowchart TD
+    L[Sample base house with constrained room growth<br/>Exactly 1 kitchen + 1 dining; at least 1 bedroom] --> V[Validate room geometry, door sweeps<br/>and paths through furnished rooms]
+    V --> S[Save base layout + seed]
+    S --> A[Task baseline + YAML]
+    A --> B[Sample a subset of variation controls]
+    B --> C[1. Execution order]
+    B --> D[2. Object instances<br/>3. Kitchen layout<br/>4. Furniture translation<br/>5. Furniture rotation<br/>Additional: furniture instances]
+    B --> E[6. Door and route choice]
+    B --> AP[Appearance: coordinated wall / floor palette<br/>Furniture and object colors + lighting]
+    C --> F[Build ordered atomic-skill plan]
+    D --> G[Build scene geometry]
+    E -->|Door-opening behavior| F
+    E -->|Initial door states| G
+    G --> Q[Recheck changed geometry:<br/>door sweeps, paths and task feasibility]
+    Q --> R[Apply appearance controls<br/>Preserve task-defining object colors]
+    AP --> R
+    R --> H[For each atomic skill: plan motion in scene]
+    F --> H
+    H --> O[Optimize components, smooth timing<br/>and interpolate motion commands]
+    O --> P[Execute in physics and check skill result]
+    P --> I[Check task success; save metadata, actions<br/>and 2×2 RGB-D video: navigation above wrist]
+```
 
-## Quick start
+Static scene checks do not prove that the loaded robot can reach every target.
+Failed layout candidates and physical attempts remain recorded. The generator
+never silently substitutes the old three-room house when house sampling fails.
+
+### Execution order and doors are composed together
+
+The procedure creates the task calls. The route choice determines both initial
+door states and any required opening prefix on the accepted room graph. A* finds
+motion paths through the resulting physical scene; it does not invent door-opening
+calls. The stove task stays in the kitchen and omits the door-route control.
+
+```mermaid
+flowchart TD
+    A[1. Selected execution order] --> B[Task builds its ordered atomic calls]
+    B --> C[Task sequence T]
+
+    D[6. Joint door and route choice] --> E[Set initial door states in scene]
+    D --> F{Open the direct shortcut?}
+    F -->|Yes| G[Resolve closed doors on sampled route<br/>Prefix P: navigate and open each leaf<br/>in route traversal order]
+    F -->|No: default or detour| H[Empty prefix P]
+
+    G --> J[Combine: P followed by T]
+    H --> J
+    C --> J
+    J --> K[Execute each atomic call in order]
+    E --> K
+    K --> L[Each navigate call plans through<br/>the currently available physical space]
+```
+
+### Motion optimization inside every atomic call
+
+Optimize internal navigation, posture changes and pauses first, then construct
+checked motion segments and retime/interpolate their commands. This applies to
+fixture-local repositioning too. The next skill receives the actual resulting
+physical state. This is not video acceleration or only a post-generation replay.
+
+```mermaid
+flowchart TD
+    A[Atomic skill + measured physical state] --> B[Optimize internal components:<br/>checked posture retention, route shortcuts,<br/>adaptive readiness instead of idle holds]
+    B --> C[Construct and collision-check<br/>task-specific motion segments / waypoints]
+    C --> D{Motion type}
+    D -->|Arm motion| E[joint_commands:<br/>linear joint-path interpolation<br/>with quintic timing]
+    E --> F[bounded_joint_durations:<br/>enforce command speed and acceleration bounds]
+    D -->|Navigation| G[forward_route + BaseSegment.pose:<br/>checked forward turn/drive segments<br/>with quintic timing]
+    G --> H[navigation_segments + route_durations:<br/>retime using distance, turns and remaining budget]
+    D -->|Gripper, contact feedback, explicit wait| I[Keep event-specific control<br/>and required verification]
+    F --> J[Execute commands in physics]
+    H --> J
+    I --> J
+    J --> K[Check tracking, contact, grip and skill success]
+    K --> L[Record executed actions and state<br/>Continue to next skill on success]
+```
+
+The default arm path uses **piecewise-linear joint interpolation with quintic
+timing**, not a Hermite spline across every skill. Navigation uses checked forward
+turn/drive geometry with quintic timing. The timing function is
+`10u³ − 15u⁴ + 6u⁵`. See [functions and interpolation details](docs/composite_variation_pipeline.md#functions-used-by-the-current-default).
+
+The nominal command grid is 50 Hz; retained path knots and bounded timing can
+change intervals. Do not assume recordings already satisfy a particular VLA's
+uniform action-rate convention. Preserve grasp/release verification, contact
+feedback and explicit waits. Omit tuck/redocking only after swept collision
+checks; faster execution must pass physics, with backoff on failure. Record actual
+per-call duration and exceptions. See [motion policy and implementation gaps](docs/human_like_motion.md).
+
+## Robot observations
+
+Exactly **two physical onboard RGB-D cameras** provide robot observations:
+
+- `robot_0/navigation_cam`: base-fixed mast behind the arm.
+- `robot_0/wrist_cam`: wrist-mounted camera.
+
+New demo videos have four synchronized panels: navigation RGB/depth above wrist
+RGB/depth. Depth visualization uses a fixed 0–8 m range. Colored depth video is
+not raw metric depth; check the recording/export path before assuming a dataset
+contains metric depth for every frame. Fixed room and overhead cameras are for
+diagnostics only, never planner/VLA inputs. `house_overview.png` is a diagnostic
+3D view, not an extra robot observation.
+
+Keep mast collision geometry enabled. Camera changes require saved-trajectory
+clearance checks and fresh composite physics tests, not just an initial-tuck render.
+Older saved videos retain their original camera conventions.
+
+## Installation
 
 Two Python 3.11 environments are used, because RoboCasa pins `mujoco==3.3.1` while the
 simulator here uses `mujoco==3.5.0`. The RoboCasa environment is only needed to download its
@@ -124,84 +213,229 @@ python -c 'from cross_episode_sim.manipulation.molmo_objects import assets_root;
 #   export MLSPACES_CACHE_DIR=/big/disk/molmo-spaces-resources
 #   export MLSPACES_ASSETS_DIR=/big/disk/molmospaces-assets
 
-# Run demonstrations (headless rendering through EGL)
 export MUJOCO_GL=egl
-python -m cross_episode_sim.tasks.breakfast.gather --seed 17 --output runs/breakfast
-python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee
-python -m cross_episode_sim.tasks.coffee.workflow --output runs/coffee2 --cups 2   # two cups
-python -m cross_episode_sim.tasks.full_breakfast --seed 7 --output runs/example7   # 2 histories + current
-# Default: 1–3 paired settings, added furniture, randomized furniture/vessel/machine poses.
-python -m cross_episode_sim.tasks.full_breakfast --seed 19 --prepare-only   # scene checks, no robot execution
-python -m cross_episode_sim.tasks.full_breakfast --seed 19 --people 3 --extra-furniture 2 --gpus 0 1 2
-# Reproduce the earlier two-setting layout profile:
-python -m cross_episode_sim.tasks.full_breakfast --seed 7 --layout-profile baseline --gpus 0 1 2
-scripts/run_skill.sh drawer runs/drawer      # skill demos, see docs/tasks.md
-scripts/run_skill.sh detach-portafilter runs/pf_detach
-scripts/run_skill.sh attach-portafilter runs/pf_attach
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 ```
 
-Each run directory holds `report.json` (measured outcome and every stage), `trace.json`
-(simulator state at 25 Hz), the scene, and videos rendered after physics ends.
-See [docs/installation.md](docs/installation.md) for details and troubleshooting.
+See [installation and troubleshooting](docs/installation.md). Asset downloads and
+scene authoring must finish before judging controller failures. Set
+`CES_ROBOCASA_PYTHON` if the separate RoboCasa interpreter is not discovered; set
+`PYTHON=/path/to/sim/bin/python` when invoking shell launchers outside the sim environment.
 
-## Documentation
-
-| | |
-|---|---|
-| [Installation](docs/installation.md) | Environments, RoboCasa patch, MolmoSpaces assets, data bundle |
-| [Tasks](docs/tasks.md) | Breakfast, coffee, cross-episode examples and the atomic skills: what they do, success criteria, commands |
-| [Generation interfaces](docs/generation_interfaces.md) | JSON and Python APIs for reusable histories and composed current examples |
-| [History task design](docs/history_task_design.md) | Three task layers, four history categories, and reusable histories for current-task generation |
-| [Running and training policies](docs/policies.md) | VLM/agent evaluation with oracle or VLA skills, `TaskEnv`, rollouts, dataset export, behavior cloning |
-| [Adding a task](docs/adding_a_task.md) | Scene preparation, transactional skills, composite episodes, goals |
-| [Architecture](docs/architecture.md) | Package layout, controller layers, navigation and manipulation stack |
-| [Data](docs/data.md) | What the data bundle contains and how to regenerate it |
-
-## Repository layout
-
-```
-cross_episode_sim/
-  tasks/breakfast, tasks/coffee   composite tasks: scene preparation, episode controller, CLI
-  tasks/full_breakfast            cross-episode example generator: two histories and the episode to solve
-  fixtures/                       atomic fixture skills (doors, drawers, knobs, levers, buttons, ...)
-  skills/                         transactional skill runner, checkpoints, composite episodes
-  manipulation/                   RoboCasa manipulation: grasp qualification, recovery, placement
-  navigation/                     SE(2) route planners and holonomic route execution
-  controller/                     shared base controller: scene, physics, grasping, arm motion
-  robot/                          TidyBot++/FR3 embodiment, robot profile, cuRobo arm planner
-  env/                            Gymnasium environment and task hooks for learned policies
-  data/                           dataset export, trajectory cleanup, run provenance
-  grasping/                       grasp-qualification sweep that builds the grasp registry
-scripts/                          data install, skill launcher, policy rollouts, bundle builder
-examples/                         replay policy, behavior cloning
-third_party/robocasa/             three-room house patch for RoboCasa
-```
-
-## Development
+## Run and resume generation
 
 ```bash
-pytest                 # unit tests: geometry, state logic, skill wiring
-ruff check . && ruff format --check .
+# Preview sampled configurations without physics or rendering.
+python -m cross_episode_sim.generation.composite_pilot \
+  --suite randomized --write-configs /tmp/composite_configs
+
+# Check dependencies/assets; this does not validate physical task success.
+bash scripts/generate_composite_variations.sh --preflight
+
+# One task, one sampled example.
+bash scripts/generate_composite_variations.sh \
+  --task set_table --count-per-task 1 --workers 1
+
+# Default: 7 sampled attempts per task, 35 total; unique output folder.
+bash scripts/generate_composite_variations.sh --workers 8
+
+# A new reproducible distribution/batch.
+bash scripts/generate_composite_variations.sh \
+  --seed 123 --count-per-task 100 --workers 8
+
+# Preserve successes and saved configurations; retry failed/unfinished examples.
+bash scripts/generate_composite_variations.sh \
+  --resume runs/YOUR_BATCH --workers 8
+
+# Custom per-task sampling specification.
+bash scripts/generate_composite_pilot.sh \
+  --sampling-yaml configs/composite_sampling/randomized/set_table.yaml --workers 1
 ```
 
-Full demonstrations are the integration tests: run breakfast, coffee and `scripts/run_skill.sh`
-for each skill, and check `report.json` for `"success": true`.
+Eight workers share an **episode queue**, not one GPU per task. Each running
+example leases an idle visible GPU through execution and rendering. Restrict the
+pool with `CUDA_VISIBLE_DEVICES`; fewer available GPUs or pending examples means
+fewer active workers. GPU assignments are printed and saved. Progress includes a
+tqdm batch bar and episode-specific `[step/total]` skill stages.
 
-## Status and scope
+**Counts are attempts, not guaranteed successes.** Failures stop that episode;
+other queued episodes continue. `--timeout` bounds each episode (default 7200 wall
+seconds). Rendering follows physics, so “goal passed; rendering video” is not yet
+a completed video. Resume does not regenerate successful videos or adopt new YAML
+settings. Use a fresh batch for those changes.
 
-- Demonstrations come from an **oracle controller** that reads simulator state (object poses and
-  geometry). They are ground truth for evaluating memory and policies, not a camera-only policy.
-- Coffee brewing is a timed state model without fluid or heat simulation. Grounds and food are
-  free rigid bodies.
-- Model evaluation supports **VLM planners and agents**, with oracle skills, VLA skills, or
-  direct actions on breakfast. Coffee/current supports both planners with oracle skills;
-  VLA/direct coffee still needs machine events independent of demonstrator phase flags.
-  See the [evaluation interfaces and commands](docs/policies.md#evaluating-vlm-planners)
-  and [batch generation, collection, and Qwen evaluation](docs/policies.md#batch-generation-and-qwen-evaluation).
-- Legacy composite validation is described in [docs/tasks.md](docs/tasks.md). The latest
-  [16 atomic demonstrations](#atomic-skills-and-videos) each passed in their tested scene;
-  this does not establish reliability across all RoboCasa assets or validate every legacy
-  composite/round-trip task.
+The shell variation launcher defaults to `--suite randomized`. The Python module
+and `generate_composite_pilot.sh` retain the legacy `pilot` default unless a suite
+or sampling YAML is supplied. `--suite variations` explicitly selects the older
+fixed coverage suite. Do not confuse those suites with random subset sampling.
+
+Edit the [per-task YAMLs](configs/composite_sampling/randomized) to control counts,
+seeds, room counts, subset sizes and parameter distributions. See
+[randomized generation](docs/randomized_composites.md) and
+[YAML schema](docs/composite_sampling.md). Sampling supported procedures does not
+synthesize arbitrary valid permutations, and asset pools are qualified selections,
+not every installed asset. Train/test splits must still be designed explicitly.
+
+## What each example saves
+
+| Artifact | Use |
+| --- | --- |
+| `config.json`, `instruction.txt`, `oracle_plan.json` | Reproduction settings, task prompt, intended atomic order |
+| `skill_calls.json`, `run.log` | Actual calls, arguments, outcomes, timings and planning/contact diagnostics |
+| `report.json`, `physics_result.json` | Measured outcome; physics completion and rendering status |
+| `scene.xml`, `model.mjb`, `initial_state.npz` | Authored scene, compiled robot-inclusive model and initial physical state |
+| `base_layout.json`, `room_graph.json`, `resolved_route.json` | Accepted house and route decisions |
+| `scene_setup_attempts.json`, `rejected_setups/`, `rejected_trials/` | Rejected setup/physical attempts, when produced |
+| `gpu_assignment.json`, `house_overview.png` | Worker GPU and diagnostic 3D house view |
+| `trace.json`, `action_recording/` | Recorded state/action evidence; consult export conventions before training |
+| `composite.mp4`, `head_camera.mp4` | Final rendered outputs; inspect camera metadata rather than infer views from legacy filenames |
+
+Oracle generation may restore checkpoints after rejected trials and retain the
+successful physical branch. A recovered demo is not evidence of single-attempt
+online-policy success. Keep rejection provenance when reporting reliability.
+Machine-local `runs/` links in engineering notes are not portable GitHub assets.
+
+## Code ownership and extension points
+
+| Layer | Entry points | Contract |
+| --- | --- | --- |
+| Sampling and workers | [composite_pilot.py](cross_episode_sim/generation/composite_pilot.py), [sampling configs](configs/composite_sampling/randomized) | Choose configurations, lease GPUs, resume, collect results |
+| Scene setup | [episode_setup.py](cross_episode_sim/generation/episode_setup.py), [composite_scenes.py](cross_episode_sim/generation/composite_scenes.py), [household_scene.py](cross_episode_sim/generation/household_scene.py), [household_native_scene.py](cross_episode_sim/generation/household_native_scene.py) | Construct the scene once, allocate objects and save setup evidence |
+| Composite policies | [base.py](cross_episode_sim/tasks/composites/base.py), [task subclasses](cross_episode_sim/tasks/composites) | Implement `make_prompt()` and `make_plan()`; call atomics, do not construct scenes or judge success |
+| Atomic API | [fixed_interface.py](cross_episode_sim/skills/fixed_interface.py), [atomic.py](cross_episode_sim/skills/atomic.py) | Fixed vocabulary, argument/precondition checks and physical postconditions |
+| Simulator adapter | [household.py](cross_episode_sim/env/household.py) | Maintain persistent state and bind atomic behaviors to the scene |
+| Motion and contact | [control](cross_episode_sim/control), [navigation](cross_episode_sim/navigation), [manipulation](cross_episode_sim/manipulation), [fixtures](cross_episode_sim/fixtures) | Checked trajectories, actuator commands, grasp and fixture interaction |
+| Independent evaluation | [composite_goals.py](cross_episode_sim/evaluation/composite_goals.py), [heating_duration.py](cross_episode_sim/evaluation/heating_duration.py) | Measure goal predicates and qualifying appliance time independently of recipe completion |
+| Training/evaluation utilities | [policy guide](docs/policies.md), [data package](cross_episode_sim/data) | Export and policy adapters; verify support for the intended task and action representation |
+
+### Adding or modifying a task
+
+1. Add the task-specific prompt and ordered recipes under `tasks/composites/`,
+   inheriting the shared policy initialization. Reuse the fixed interface.
+2. Declare scene requirements in datagen: object pools, receptacles, appliances,
+   room requirements and parameters. Atomic skills must not spawn/reset scenes.
+3. Implement independent physical goal predicates. Generic prompt categories must
+   not accidentally become one hidden required instance ID. Preserve explicit
+   semantic constraints such as correct storage type or basket color.
+4. Add sampling controls and validate their combinations, including closed-door
+   routes, transformed furniture, object fit and grasp feasibility.
+5. Test schema/plan/setup/goal logic, then run representative physical examples.
+   Include sequential use: isolated atomic success does not guarantee a composite.
+6. Inspect videos, measured timings, reports and rejected trials. Document any
+   remaining limits before launching a large batch.
+
+See [adding a task](docs/adding_a_task.md) and [composite ownership/timing](docs/composite_pilot.md)
+for details. Some older pages describe earlier pilot snapshots; the current
+randomized suite and dated physical evidence above take precedence for batch status.
+
+## Atomic skills and videos
+
+Trajectory construction: [Motion shaping toward human-like demonstrations](docs/human_like_motion.md).
+Optimize internal navigation, posture changes, and readiness first; then apply
+trajectory smoothing/interpolation. See the [component audit and validation](docs/atomic_component_optimization.md)
+for separate component-only and smoothed commands and local review videos.
+
+Post-generation interpolation of recorded actions: [Smooth Action replay](docs/action_replay.md).
+Composite generation preserves successful sources: [workflow and current validation](docs/composite_optimized_defaults.md).
+Optional live motion experiments (not generation defaults): [timing setup and validation](docs/smooth_action.md).
+
+The fixed public vocabulary has **16 functions**, including generic waiting.
+Each link below opens a separate successful physical demonstration. Opening and
+closing are separate clips; all clips preserve normal playback speed.
+
+| Atomic function | Purpose | Video |
+|---|---|---|
+| `navigate` | Approach a target; transport a held object when a destination is supplied. | [Watch navigate](docs/videos/atomic/navigate.mp4) |
+| `pick` | Grasp and lift an object using top grasps first, then physically checked side or angled rim grasps if top candidates fail. | [Watch pick](docs/videos/atomic/pick.mp4) |
+| `place` | Place the held object, release it, and withdraw. | [Watch place](docs/videos/atomic/place.mp4) |
+| `open_door` | Open a hinged fixture using checked handle/contact motions and local repositioning. | [Watch open_door](docs/videos/atomic/open_door.mp4) |
+| `close_door` | Close a hinged fixture using checked handle/contact motions. | [Watch close_door](docs/videos/atomic/close_door.mp4) |
+| `open_drawer` | Open a drawer with a top-down handle grasp. | [Watch open_drawer](docs/videos/atomic/open_drawer.mp4) |
+| `close_drawer` | Close a drawer with a top-down handle grasp. | [Watch close_drawer](docs/videos/atomic/close_drawer.mp4) |
+| `open_lid` | Open a hinged lid or remove a detachable lid. | [Watch open_lid](docs/videos/atomic/open_lid.mp4) |
+| `close_lid` | Close a hinged lid or reseat a detachable lid. | [Watch close_lid](docs/videos/atomic/close_lid.mp4) |
+| `push_button` | Press a button and withdraw. | [Watch push_button](docs/videos/atomic/push_button.mp4) |
+| `turn_lever` | Turn a rotary lever to the requested state. | [Watch turn_lever](docs/videos/atomic/turn_lever.mp4) |
+| `push_lever` | Push a sliding lever and withdraw. | [Watch push_lever](docs/videos/atomic/push_lever.mp4) |
+| `rotate_knob` | Rotate a knob to the requested state. | [Watch rotate_knob](docs/videos/atomic/rotate_knob.mp4) |
+| `insert` | Insert an already-held object into a receptacle and release. | [Watch insert](docs/videos/atomic/insert.mp4) |
+| `slide_oven_rack` | Slide an oven rack in or out when its path is clear. | [Watch slide_oven_rack](docs/videos/atomic/slide_oven_rack.mp4) |
+| `wait` | Advance simulated time; does not require an empty hand. | [Watch wait](docs/videos/atomic/wait.mp4) |
+
+**Validation (13 October 2026):** all 16 functions have successful physical demos
+in their tested scenes. These selected successes are not a dataset-wide success
+rate or a guarantee for every object/layout. The linked October 13 clips demonstrate native
+cabinet/oven fixtures. Later room-door execution is validated in the randomized
+batch below; these older clips are not evidence of its latest timing or cameras.
+A removable lid can remain held after opening. Waiting advances simulation time;
+it does not independently heat objects or mark a task successful.
+
+The [video provenance manifest](docs/videos/atomic/manifest.json) records the source
+run, call arguments, and duration for every clip. Videos are downloadable from their
+GitHub file pages if the browser does not play them inline.
+
+The active direction uses these fixed capabilities for new composite tasks and
+later VLA training. Coffee pouring and portafilter operations are legacy workflows,
+not additional functions in this fixed vocabulary.
+
+
+## Development and validation
+
+```bash
+# Focused interface, composition, setup and timing checks.
+pytest -q tests/test_composite_tasks.py tests/test_composite_pilot.py \
+  tests/test_episode_setup.py tests/test_heating_duration.py
+
+# Relevant regression checks for the latest basket/carry fixes.
+pytest -q tests/test_remaining_batch_recovery.py tests/test_carry_posture.py
+
+# Broader checks when appropriate for the change.
+pytest
+ruff check .
+ruff format --check .
+```
+
+Unit tests establish geometry/state/control logic, not real rollout success.
+For motion changes, run a standalone atomic test and a representative composite,
+check physical postconditions and inspect the video. Never fix a failure by
+teleporting objects, disabling collisions, weakening success checks or accelerating
+playback. Save the exact configuration, failed stage and rejected-attempt evidence.
+
+If a batch fails, distinguish **scene setup**, **navigation/IK**, **grasp retention**,
+**placement/withdrawal**, **task goal**, and **rendering** before changing policy.
+A failed planning candidate is not itself a failed episode. Check `skill_calls.json`
+and the final report. Resume preserves successful examples, so do not delete the
+batch just to retry a failure.
+
+## Documentation map
+
+| Guide | Contents |
+| --- | --- |
+| [Installation](docs/installation.md) | Asset setup, environments and troubleshooting |
+| [Randomized composites](docs/randomized_composites.md) | Current generation defaults, validation, retries and artifacts |
+| [Variation pipeline](docs/composite_variation_pipeline.md) | Three diagrams, route composition and exact smoothing functions |
+| [Sampling YAML](docs/composite_sampling.md) | Control subsets and distributions |
+| [Base layouts](docs/base_layout_sampling.md) | Room growth and static validation scope |
+| [Fixed atomic skills](docs/fixed_atomic_skills.md) | Interface and qualification context |
+| [Human-like motion](docs/human_like_motion.md) | Mandatory defaults and implementation gaps |
+| [Onboard observations](docs/onboard_observations.md) | Camera geometry and RGB-D conventions |
+| [Latest recovery evidence](docs/batch_failure_recovery_2026_10_22.md) | Resumed 35/35 batch, fixes and remaining timing gap |
+| [Policies and export](docs/policies.md) | Existing model adapters and training utilities |
+| [Architecture](docs/architecture.md) | Broader package structure and controller stack |
+
+## Legacy workflows
+
+Breakfast/espresso, paired history/current generation, and earlier Qwen/EQA
+experiments remain in the repository for provenance. They are not the current
+five-task benchmark definition or evidence of completed memory/VLA training.
+Coffee pouring and portafilter operations are outside the fixed public skill set.
+See [legacy tasks](docs/tasks.md), [history design](docs/history_task_design.md),
+[generation interfaces](docs/generation_interfaces.md), and
+[Qwen results](docs/qwen_test_set_v1_results.md).
+
+The [project page](https://plnguyen2908.github.io/cross-episode-robotics-sim/) includes
+older previews, some accelerated; do not use their playback duration to measure
+current physical motion. Current composite videos play at normal speed.
 
 ## Acknowledgments
 
