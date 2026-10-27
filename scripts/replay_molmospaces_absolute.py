@@ -21,7 +21,7 @@ def main():
     p.add_argument('--seed',type=int,default=0)
     p.add_argument('--reference-trace',type=Path,help='Successful native absolute replay control_trace.npz for offline deltas')
     p.add_argument('--no-render',action='store_true')
-    p.add_argument('--action-space',choices=['absolute_joint_position','joint_delta','joint_target_delta','joint_target_velocity'],default='absolute_joint_position')
+    p.add_argument('--action-space',choices=['absolute_joint_position','joint_delta','joint_target_delta','joint_target_velocity','eef_pose'],default='absolute_joint_position')
     p.add_argument('--seconds',type=float,help='Truncated wiring check only; not task qualification')
     p.add_argument('--render-only',action='store_true')
     args=p.parse_args()
@@ -41,7 +41,11 @@ def main():
     with np.load(recording/'initial_state.npz') as initial:
         mujoco.mj_setState(m,d,initial['state'],int(initial['state_type']))
     mujoco.mj_forward(m,d)
-    controller=MolmoSpacesController(m,d,configuration=args.controller_config,action_space=args.action_space,native_action_noise=args.native_action_noise,dt=float(m.opt.timestep))
+    controller_class=MolmoSpacesController
+    if args.action_space=='eef_pose':
+        from cross_episode_sim.finetuning.molmospaces_eef import MolmoSpacesPoseController
+        controller_class=MolmoSpacesPoseController
+    controller=controller_class(m,d,configuration=args.controller_config,action_space=args.action_space,native_action_noise=args.native_action_noise,dt=float(m.opt.timestep))
     scorer=CompositeReplayScorer(m,d,args.source);fixtures=ReplayFixtures(m,d)
     with np.load(recording/'actions.npz') as raw:
         times=raw['time'];commands=raw['ctrl'];expected=raw['qpos'];stages=raw['stage']
@@ -74,6 +78,12 @@ def main():
                 if args.action_space=='joint_target_velocity' else encode_target_deltas(controller.reference[group],commands[:,ids]))
         np.savez_compressed(args.output/'converted_actions.npz',commands=converted,time=times)
         commands=converted
+    eef_poses=None
+    if args.action_space=='eef_pose':
+        from cross_episode_sim.finetuning.molmospaces_eef import encode_eef_targets
+        eef_poses=encode_eef_targets(controller,commands)
+        np.savez_compressed(args.output/'eef_actions.npz',eef_pose=eef_poses,
+            base=commands[:,controller.groups['base']],gripper=commands[:,controller.groups['gripper']],time=times)
     full_steps=len(times)
     if args.seconds is not None:
         if args.seconds<=0:raise ValueError('seconds must be positive')
@@ -86,6 +96,7 @@ def main():
         full_native_environment=False)
     (args.output/'configuration.json').write_text(json.dumps(report,indent=2))
     control_states=np.empty((len(times),m.nq));
+    execution_error=None;completed_steps=0
     poses=[];max_error=0.;start=float(d.time);last_stage=None
     stride=round(.04/m.opt.timestep)
     for i in tqdm(range(len(times)),desc='Native MolmoSpaces controller replay'):
@@ -94,20 +105,33 @@ def main():
             tqdm.write(f'{d.time-start:.2f}s — {stage}')
             last_stage=stage
         control_states[i]=d.qpos
-        controller.apply_recorded_command(commands[i])
+        if eef_poses is not None:
+            try:
+                controller.step({'eef_pose':eef_poses[i],'base':commands[i,controller.groups['base']],
+                                 'gripper':commands[i,controller.groups['gripper']]})
+            except RuntimeError as error:
+                (args.output/'ik_failure.json').write_text(json.dumps(dict(step=i,time=float(d.time),error=str(error),detail=controller.ik_failure),indent=2))
+                execution_error=str(error)
+                break
+        else:
+            controller.apply_recorded_command(commands[i])
         fixtures.step();scorer.observe(d)
         mujoco.mj_step(m,d)
+        completed_steps=i+1
         if not np.isfinite(d.qpos).all():raise RuntimeError('Physics diverged')
         if i%stride==0:poses.append(d.qpos.copy())
         max_error=max(max_error,float(np.max(np.abs(d.qpos-expected[i]))))
     scorer.observe(d)
     goal=scorer.score(json.loads((args.source/'initial_snapshot.json').read_text()),d)
-    result=dict(backend="molmospaces",action_space=args.action_space,native_action_noise=args.native_action_noise,seed=args.seed,success=all(goal.values()) and len(times)==full_steps,truncated=len(times)!=full_steps,goal_evidence=goal,
+    result=dict(backend="molmospaces",action_space=args.action_space,native_action_noise=args.native_action_noise,seed=args.seed,success=all(goal.values()) and completed_steps==full_steps and execution_error is None,truncated=completed_steps!=full_steps,execution_error=execution_error,goal_evidence=goal,
                 simulated_seconds=float(d.time)-start,max_qpos_error=max_error,
                 full_native_environment=False)
+    if eef_poses is not None:
+        result.update(ik_backend='molmo_spaces.kinematics.mujoco_kinematics.MlSpacesKinematics',
+                      ik_calls=controller.ik_calls,ik_retries=controller.ik_retries,max_joint_target_step=controller.max_joint_step,max_pose_matrix_error=controller.max_pose_error)
     (args.output/'result.json').write_text(json.dumps(result,indent=2))
     np.savez_compressed(args.output/'executed.npz',qpos=poses,final_qpos=d.qpos)
-    np.savez_compressed(args.output/'control_trace.npz',qpos=control_states,time=times,success=result['success'])
+    np.savez_compressed(args.output/'control_trace.npz',qpos=control_states[:completed_steps],time=times[:completed_steps],success=result['success'])
     mujoco.mj_saveModel(m,str(args.output/'model.mjb'),None)
     print(json.dumps(result),flush=True)
     if not args.no_render:render_video(m,d,poses,args.output)

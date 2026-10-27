@@ -227,3 +227,33 @@ state parity, and physical heating-duration scoring.
 Qualification is at the original 500 Hz recording clock and lossless rational
 replay precision. It is not a qualification of float32 training export, a
 changed action rate, or the native measured-state velocity controller.
+
+## End-effector pose: experimental, not qualified
+
+`MolmoSpacesPoseController` in `finetuning/molmospaces_eef.py` accepts
+`base`, `eef_pose` (a rigid 4×4 TCP transform in the planar robot-base frame),
+and absolute `gripper`. Offline native FK converts joint targets to TCP poses.
+Runtime uses upstream `MlSpacesKinematics.ik`, followed by the same native
+position controllers. Recorded future arm targets are not supplied to IK.
+This is absolute TCP pose, not yet an end-effector-delta interface.
+
+The standalone native IK robot is spawned at floor height zero; saved scenes
+place the base 5 mm higher. The private IK model now copies that saved base
+height, and initialization rejects a mismatch between physical and IK TCP
+frames. Physics geometry and upstream solver code are unchanged. A local
+test verifies frame equality and that issuing a command does not reset state
+or advance simulation time.
+
+Set-table trial `runs/molmospaces_eef_set_table_05` still fails at native IK
+solve 50 (4.852 simulated seconds, pregrasp), with native noise enabled, seed 0.
+Live-state seeds and bounded local null-space retries did not resolve it.
+The pose conversion loses the original seven-joint arm's redundant posture;
+the next investigation is maintaining a feasible, continuous IK branch.
+This run is **not** a successful controller demo. Earlier pose-frame checks
+used only internal FK consistency and were insufficient; physical-frame
+equality is now checked explicitly.
+
+The prototype currently requires the native integration environment (including
+native robot-config/IK dependencies); it is not yet added to the five-task
+qualified controller batch. Absolute, target-delta, and target-velocity
+qualification remains separate from this experiment.
