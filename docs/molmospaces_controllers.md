@@ -43,8 +43,9 @@ Both `test_robosuite_absolute.sh` and `test_robosuite_controllers.sh` redirect
 to these explicitly labeled MolmoSpaces entry points. Legacy robosuite
 conversion experiments remain explicit opt-in via
 `scripts/test_controller_tasks.py --backend robosuite`; they are not the
-qualified default. Velocity, measured-state delta and EEF replay remain unqualified. The precise
-previous-target-delta qualification is documented at the end of this page.
+qualified default. Measured-state joint delta remains unqualified. The limited
+target-delta, target-velocity, and end-effector-pose replay qualifications are
+documented below; they do not establish robustness across arbitrary scenes.
 
 Output records `backend: molmospaces`, actual parameter changes, measured
 goal evidence, simulated duration, executed states, and an MP4. A truncated
@@ -69,6 +70,38 @@ mujoco.mj_step(model, data)     # caller owns the physics clock
 Keep one controller instance per model/data pair. All three groups are required.
 Invalid shapes/nonfinite values fail before any control command is changed.
 Do not use these absolute goals with a velocity or torque actuator model.
+
+### End-effector caller example
+
+Use one persistent instance for an initialized, compatible MobileFranka scene:
+
+```python
+from cross_episode_sim.finetuning.molmospaces_eef import MolmoSpacesPoseController
+
+controller = MolmoSpacesPoseController(
+    model, data, dt=float(model.opt.timestep), native_action_noise=False,
+)
+controller.step({
+    "base": [x, y, yaw],          # world x/y in metres, yaw in radians
+    "eef_pose": T_base_tcp,       # rigid 4x4 NumPy transform: base -> TCP
+    "gripper": [gripper_goal],   # native units: 0=open, 255=closed
+})
+# Advance the environment's normal physics/fixture loop afterwards.
+```
+
+`step` sets commands; it does not advance simulation time. Base coordinates
+are absolute world planar coordinates, while the hand transform is relative
+to the robot's planar base frame. Its translation is in metres and its upper
+3x3 block is a rotation matrix. It is not a world-frame hand pose or a delta.
+The gripper is not a normalized 0–1 value. Invalid inputs raise `ValueError`;
+an exhausted IK search raises `RuntimeError` and records `ik_failure`.
+
+For joint-position, target-delta, or target-velocity inputs, use
+`MolmoSpacesController(..., action_space=...)` and the same `step` pattern,
+with seven `arm` values instead of `eef_pose`. The interface is deliberately
+low-level: it requires an existing model/data pair, the correct actuator
+configuration, and a caller-owned physics clock. It is not yet a generic
+robot-independent controller factory.
 
 ## Evidence
 
@@ -339,3 +372,62 @@ and motion-quality checks are still needed before adopting this path as an
 optimized atomic demonstration executor. The existing atomic/datagen motion
 defaults have not been replaced. Float32 export, other control rates, new
 scenes, and real hardware are not qualified by this five-example test.
+
+### Additional multi-room demos — October 27, 2026
+
+With the controller frozen at `116e535`, **7/10 additional demos passed**;
+9/10 completed the IK sequence. These are two previously untested successful
+source recordings per task, selected before replay with no replacements.
+The original five development examples are excluded. Selection is recorded in
+`configs/vla/controller_eef_extended_sources.json`.
+
+| Task | Physical successes |
+|---|---:|
+| Set table | 2/2 |
+| Clear and store | 1/2 |
+| Prepare and serve meal | 2/2 |
+| Sort groceries | 2/2 |
+| Warm two pots | 0/2 |
+
+The samples cover 5–7-room houses, furniture translations/rotations, alternate
+object instances, routes, and execution procedures. All use kitchen layout 3,
+two people, native action noise enabled with seed 0, and their original 500 Hz
+recording clock. This is scene/procedure testing, not multiple noise seeds or
+multiple kitchen layouts. No motion/controller changes were made to fit these
+ten examples during the test.
+
+Failures:
+
+- `clear_and_store__2`: completed the full replay; bowls/cabinet goals passed,
+  but cups-in-drawer and drawer-closed goals failed. Its absolute-joint
+  baseline has not been tested.
+- `warm_two_pots__1`: completed the full replay; pot-placement and heating
+  goals failed.
+- `warm_two_pots__2`: IK failed at solve 3240, 165.67 simulated seconds,
+  during the recorded handle-reach phase.
+
+Both stove sources also failed pot-placement/heating checks when their
+original absolute joint commands were replayed through the same native
+controllers with the same noise seed. Thus their physical replay failures
+are not unique to pose conversion; the second pose replay additionally has
+an IK failure. These baselines do not excuse or remove the pose failures
+from the 7/10 result. Robustness is **not yet sufficient to assume success**
+on an arbitrary saved demonstration.
+
+Artifacts:
+
+- [Complete report](../runs/molmospaces_eef_extended_01/qualification.json)
+- [Successful five-room set-table video](../runs/molmospaces_eef_extended_01/set_table__1/rollout.mp4)
+- [Failed stove pose replay video](../runs/molmospaces_eef_extended_01/warm_two_pots__2/rollout.mp4)
+- Matched stove baselines: `runs/molmospaces_eef_extended_warm_absolute_01`.
+
+Reproduce the ten physics-only checks (the shell wrapper makes a new output
+folder; videos can be rendered afterwards from the saved executed states):
+
+```bash
+PYTHON=/nobackup/le/cross-episode-native-molmospaces/.venv-native/bin/python \
+SOURCES=configs/vla/controller_eef_extended_sources.json \
+GPUS=0,1,2,3,4,5,6,7 WORKERS=8 \
+bash scripts/test_molmospaces_controllers.sh \
+  --action-space eef_pose --native-action-noise --seed 0 --no-render
+```

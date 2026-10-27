@@ -1,0 +1,12 @@
+{
+  "clear_and_store__1": "runs/train_test_v1/test_multi_room/batches/round_continuous/clear_and_store_000000",
+  "clear_and_store__2": "runs/train_test_v1/test_multi_room/batches/round_continuous/clear_and_store_000001",
+  "prepare_and_serve_meal__1": "runs/train_test_v1/test_multi_room/batches/round_continuous/prepare_and_serve_meal_000001",
+  "prepare_and_serve_meal__2": "runs/train_test_v1/test_multi_room/batches/round_continuous/prepare_and_serve_meal_000002",
+  "set_table__1": "runs/train_test_v1/test_multi_room/batches/round_continuous/set_table_000006",
+  "set_table__2": "runs/train_test_v1/test_multi_room/batches/round_continuous/set_table_000008",
+  "unpack_and_sort_groceries__1": "runs/train_test_v1/test_multi_room/batches/round_continuous/unpack_and_sort_groceries_000002",
+  "unpack_and_sort_groceries__2": "runs/train_test_v1/test_multi_room/batches/round_continuous/unpack_and_sort_groceries_000005",
+  "warm_two_pots__1": "runs/train_test_v1/test_multi_room/batches/round_continuous/warm_two_pots_000000",
+  "warm_two_pots__2": "runs/train_test_v1/test_multi_room/batches/round_continuous/warm_two_pots_000001"
+}
