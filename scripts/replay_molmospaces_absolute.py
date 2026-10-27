@@ -6,7 +6,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 from tqdm import tqdm
-from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController, DEFAULT_CONFIG
+from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController, DEFAULT_CONFIG, configure_native_actuators
 from cross_episode_sim.finetuning.replay_scoring import CompositeReplayScorer
 from cross_episode_sim.control.replay_fixtures import ReplayFixtures
 from cross_episode_sim.data.replay_angles import continuous_yaw_commands
@@ -17,9 +17,15 @@ def main():
     p.add_argument('--source',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--controller-config',type=Path,default=DEFAULT_CONFIG)
+    p.add_argument('--native-action-noise',action=argparse.BooleanOptionalAction,default=False)
+    p.add_argument('--seed',type=int,default=0)
+    p.add_argument('--reference-trace',type=Path,help='Successful native absolute replay control_trace.npz for offline deltas')
+    p.add_argument('--no-render',action='store_true')
+    p.add_argument('--action-space',choices=['absolute_joint_position','joint_delta','joint_target_delta'],default='absolute_joint_position')
     p.add_argument('--seconds',type=float,help='Truncated wiring check only; not task qualification')
     p.add_argument('--render-only',action='store_true')
     args=p.parse_args()
+    np.random.seed(args.seed)
     if args.render_only:
         m=mujoco.MjModel.from_binary_path(str(args.output/'model.mjb'))
         d=mujoco.MjData(m)
@@ -30,11 +36,12 @@ def main():
     meta=json.loads((recording/'metadata.json').read_text())
     if not meta['source_success']:raise ValueError('Source must be successful')
     m=mujoco.MjModel.from_binary_path(str(recording/'model.mjb'))
+    actuator_changes=configure_native_actuators(m,args.controller_config)
     d=mujoco.MjData(m)
     with np.load(recording/'initial_state.npz') as initial:
         mujoco.mj_setState(m,d,initial['state'],int(initial['state_type']))
     mujoco.mj_forward(m,d)
-    controller=MolmoSpacesController(m,d,configuration=args.controller_config)
+    controller=MolmoSpacesController(m,d,configuration=args.controller_config,action_space=args.action_space,native_action_noise=args.native_action_noise)
     scorer=CompositeReplayScorer(m,d,args.source);fixtures=ReplayFixtures(m,d)
     with np.load(recording/'actions.npz') as raw:
         times=raw['time'];commands=raw['ctrl'];expected=raw['qpos'];stages=raw['stage']
@@ -42,16 +49,42 @@ def main():
         yaw_qpos=int(m.joint('robot_0/base_theta').qposadr[0]),
         yaw_actuator=m.actuator('robot_0/base_theta_act').id)
     if not np.allclose(np.diff(times),m.opt.timestep,atol=1e-8):raise ValueError('Timing mismatch')
+    # Fixed offline conversion: reference is the recorded pre-step measured
+    # state, never the live replay state or an online absolute-target correction.
+    if args.reference_trace:
+        reference=np.load(args.reference_trace)
+        if not np.array_equal(reference['time'],times):raise ValueError('Reference clock differs')
+        if not bool(reference['success']):raise ValueError('Reference replay did not pass')
+        expected=reference['qpos']
+    if args.action_space == 'joint_delta':
+        converted=commands.copy()
+        for group in ('base', 'arm'):
+            for actuator,joint in zip(controller.groups[group],controller.robot_view.get_move_group(group)._joint_ids):
+                address=int(m.jnt_qposadr[joint])
+                converted[:,actuator]-=expected[:,address]
+        np.savez_compressed(args.output/'converted_actions.npz',
+                            commands=converted,time=times)
+        commands=converted
+    if args.action_space == 'joint_target_delta':
+        converted=commands.astype(np.longdouble)
+        for group in ('base','arm'):
+            ids=controller.groups[group]
+            from cross_episode_sim.data.target_deltas import encode_target_deltas
+            converted[:,ids]=encode_target_deltas(controller.reference[group],commands[:,ids])
+        np.savez_compressed(args.output/'converted_actions.npz',commands=converted,time=times)
+        commands=converted
     full_steps=len(times)
     if args.seconds is not None:
         if args.seconds<=0:raise ValueError('seconds must be positive')
         times=times[:max(1,round(args.seconds/m.opt.timestep))]
     groups=controller.groups
     report=dict(source=str(args.source),backend="molmospaces",controller_config=str(args.controller_config),
-        controller='molmo_spaces.controllers.joint_pos.JointPosController',
-        actuator_changes=controller.changes,retiming=False,state_resets_during_execution=0,
+        controller=('molmo_spaces.controllers.joint_rel_pos.JointRelPosController' if args.action_space=='joint_delta' else 'molmo_spaces.controllers.joint_pos.JointPosController'),
+        action_space=args.action_space,delta_storage_dtype=str(commands.dtype),native_action_noise=args.native_action_noise,seed=args.seed,delta_reference='previous_command_target' if args.action_space=='joint_target_delta' else str(args.reference_trace) if args.reference_trace else 'legacy_pre_step_measured_state' if args.action_space=='joint_delta' else None,
+        actuator_changes=actuator_changes,retiming=False,state_resets_during_execution=0,
         full_native_environment=False)
     (args.output/'configuration.json').write_text(json.dumps(report,indent=2))
+    control_states=np.empty((len(times),m.nq));
     poses=[];max_error=0.;start=float(d.time);last_stage=None
     stride=round(.04/m.opt.timestep)
     for i in tqdm(range(len(times)),desc='Native MolmoSpaces controller replay'):
@@ -59,6 +92,7 @@ def main():
         if stage!=last_stage:
             tqdm.write(f'{d.time-start:.2f}s — {stage}')
             last_stage=stage
+        control_states[i]=d.qpos
         controller.apply_recorded_command(commands[i])
         fixtures.step();scorer.observe(d)
         mujoco.mj_step(m,d)
@@ -67,14 +101,15 @@ def main():
         max_error=max(max_error,float(np.max(np.abs(d.qpos-expected[i]))))
     scorer.observe(d)
     goal=scorer.score(json.loads((args.source/'initial_snapshot.json').read_text()),d)
-    result=dict(backend="molmospaces",success=all(goal.values()) and len(times)==full_steps,truncated=len(times)!=full_steps,goal_evidence=goal,
+    result=dict(backend="molmospaces",action_space=args.action_space,native_action_noise=args.native_action_noise,seed=args.seed,success=all(goal.values()) and len(times)==full_steps,truncated=len(times)!=full_steps,goal_evidence=goal,
                 simulated_seconds=float(d.time)-start,max_qpos_error=max_error,
                 full_native_environment=False)
     (args.output/'result.json').write_text(json.dumps(result,indent=2))
     np.savez_compressed(args.output/'executed.npz',qpos=poses,final_qpos=d.qpos)
+    np.savez_compressed(args.output/'control_trace.npz',qpos=control_states,time=times,success=result['success'])
     mujoco.mj_saveModel(m,str(args.output/'model.mjb'),None)
     print(json.dumps(result),flush=True)
-    render_video(m,d,poses,args.output)
+    if not args.no_render:render_video(m,d,poses,args.output)
 
 
 def render_video(m,d,poses,output):

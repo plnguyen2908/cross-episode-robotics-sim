@@ -9,6 +9,9 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--sources',type=Path,default=Path('configs/vla/controller_demo_sources.json'))
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--native-action-noise',action=argparse.BooleanOptionalAction,default=False)
+    p.add_argument('--seed',type=int,default=0)
+    p.add_argument('--action-space',choices=['absolute_joint_position','joint_target_delta','joint_delta'],default='absolute_joint_position')
     p.add_argument('--workers',type=int,default=8)
     p.add_argument('--gpus',default='0')
     args=p.parse_args()
@@ -18,7 +21,7 @@ def main():
     sources=json.loads(args.sources.read_text())
     args.output.mkdir(parents=True,exist_ok=False)
     (args.output/'batch_config.json').write_text(json.dumps(dict(
-        backend='molmospaces',action_space='absolute_joint_position',sources=sources),indent=2))
+        backend='molmospaces',action_space=args.action_space,native_action_noise=args.native_action_noise,seed=args.seed,sources=sources),indent=2))
     slots=queue.Queue()
     for gpu in gpus:slots.put(gpu)
     def run(item):
@@ -27,7 +30,8 @@ def main():
             out=args.output/name
             with (args.output/(name+'.log')).open('w') as log:
                 code=subprocess.run([sys.executable,'scripts/replay_molmospaces_absolute.py',
-                    '--source',source,'--output',str(out)],stdout=log,stderr=subprocess.STDOUT,
+                    '--source',source,'--output',str(out),'--action-space',args.action_space,
+                    '--seed',str(args.seed),'--native-action-noise' if args.native_action_noise else '--no-native-action-noise'],stdout=log,stderr=subprocess.STDOUT,
                     env={**os.environ,'CUDA_VISIBLE_DEVICES':gpu}).returncode
             result=json.loads((out/'result.json').read_text()) if (out/'result.json').exists() else {'success':False}
             return dict(task=name,**result,exit_code=code,render_complete=code==0)

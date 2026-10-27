@@ -22,9 +22,9 @@ class ReplayFixtures:
 
     def step(self):
         if self.microwave is not None:
-            from cross_episode_sim.fixtures.microwave_button import MicrowaveButtonTest,next_state
+            from cross_episode_sim.fixtures.microwave_state import button_contacts,next_state
             c=self.microwave
-            start,sf=MicrowaveButtonTest.contacts(c,'start');stop,tf=MicrowaveButtonTest.contacts(c,'stop')
+            start,sf=button_contacts(c,'start');stop,tf=button_contacts(c,'stop')
             state=next_state(c.turned_on,start,stop,abs(c.data.qpos[c.door_address])/(np.pi/2)>=.90)
             if state!=c.turned_on:
                 self.events.append(dict(time=float(c.data.time),fixture='microwave',turned_on=state))

@@ -4,7 +4,7 @@ import itertools
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from cross_episode_sim.fixtures.microwave_button import next_state
+from cross_episode_sim.fixtures.microwave_state import next_state
 from cross_episode_sim.paths import robocasa_dir
 
 class MicrowaveStateTest(unittest.TestCase):

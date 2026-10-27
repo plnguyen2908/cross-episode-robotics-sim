@@ -9,15 +9,7 @@ from cross_episode_sim.fixtures.faucet import FaucetTest
 
 DOOR = 'microwave_main_group_door'
 
-def next_state(on, start, stop, door_open):
-    """RoboCasa Microwave.update_state contact-triggered latch semantics."""
-    if door_open:
-        return False
-    if on and stop:
-        return False
-    if not on and start:
-        return True
-    return on
+from cross_episode_sim.fixtures.microwave_state import next_state, button_contacts
 
 class MicrowaveButtonTest(CabinetDoorTest):
     fixture_body = DOOR
@@ -54,22 +46,7 @@ class MicrowaveButtonTest(CabinetDoorTest):
     def kitchen_world_geoms(self):
         return CrossRoomManipulation.kitchen_world_geoms(self)
 
-    def contacts(self, name):
-        force = 0.
-        touched = False
-        for i, c in enumerate(self.data.contact):
-            gids = (c.geom1, c.geom2)
-            if self.button_ids[name] not in gids:
-                continue
-            other = gids[1] if gids[0] == self.button_ids[name] else gids[0]
-            body = self.model.body(self.model.geom_bodyid[other]).name or ''
-            if body.startswith('robot_0/gripper/'):
-                touched = True
-                if self.model.geom_bodyid[other] in self.pad_bids:
-                    f = np.zeros(6)
-                    mujoco.mj_contactForce(self.model, self.data, i, f)
-                    force += max(0., float(f[0]))
-        return touched, force
+    contacts = button_contacts
 
     def before_step(self):
         super().before_step()
