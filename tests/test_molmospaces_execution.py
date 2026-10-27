@@ -79,3 +79,44 @@ def test_extended_delta_roundtrip_preserves_native_targets():
     # Do not silently qualify a platform/sequence with insufficient precision.
     with pytest.raises(ValueError,match='precision'):
         encode_target_deltas([1.23456789012345],[[1.23e-13]])
+
+
+@pytest.mark.parametrize('dt',[.002,.02,.04])
+def test_target_velocity_roundtrip_and_clock(dt):
+    from cross_episode_sim.data.target_deltas import encode_target_velocities
+    targets=np.array([[.1,-.5],[.12,-.45],[.12,-.45],[.3,-.3]])
+    initial=np.array([0.,-.6],dtype=np.longdouble)
+    rates=encode_target_velocities(initial,targets,dt)
+    from fractions import Fraction
+    reference=[Fraction.from_float(float(x)) for x in initial]
+    for rate,target in zip(rates,targets):
+        reference=[x+Fraction(v.decode("ascii"))*Fraction.from_float(dt) for x,v in zip(reference,rate)]
+        np.testing.assert_array_equal(np.asarray(reference,dtype=float),target)
+    np.testing.assert_allclose(np.array([float(Fraction(x.decode("ascii"))) for x in rates[0]]),[.1/dt,.1/dt])
+    with pytest.raises(ValueError,match='dt'):encode_target_velocities(initial,targets,0)
+
+
+@pytest.mark.skipif(not SOURCE.exists(),reason='Requires local saved robot model')
+def test_native_integrated_velocity_keeps_gripper_absolute():
+    m=mujoco.MjModel.from_binary_path(str(SOURCE));d=mujoco.MjData(m);mujoco.mj_forward(m,d)
+    backend=MolmoSpacesController(m,d,action_space='joint_target_velocity',dt=.02)
+    # Set a valid previous target; integration must not anchor to measured state.
+    backend.reference['arm']=np.array([0.,-.5,0.,-2.,0.,1.,0.],dtype=np.longdouble)
+    from fractions import Fraction
+    backend.velocity_reference['arm']=[Fraction.from_float(float(x)) for x in backend.reference['arm']]
+    start=backend.reference['arm'].copy()
+    command={'base':np.zeros(3),'arm':np.full(7,.5),'gripper':np.array([100.])}
+    backend.step(command);backend.step(command)
+    np.testing.assert_allclose(d.ctrl[backend.groups['arm']],start+.02)
+    np.testing.assert_allclose(d.ctrl[backend.groups['gripper']],[100.])
+
+
+def test_velocity_exact_cancellation_and_tiny_target():
+    from fractions import Fraction
+    from cross_episode_sim.data.target_deltas import encode_target_velocities
+    targets=np.array([[1.23456789012345],[0.],[1.23e-100],[0.]])
+    rates=encode_target_velocities([0.],targets,.002)
+    reference=Fraction(0)
+    for row,target in zip(rates,targets):
+        reference+=Fraction(row[0].decode('ascii'))*Fraction.from_float(.002)
+        assert float(reference)==target[0]

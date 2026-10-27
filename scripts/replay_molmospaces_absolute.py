@@ -21,7 +21,7 @@ def main():
     p.add_argument('--seed',type=int,default=0)
     p.add_argument('--reference-trace',type=Path,help='Successful native absolute replay control_trace.npz for offline deltas')
     p.add_argument('--no-render',action='store_true')
-    p.add_argument('--action-space',choices=['absolute_joint_position','joint_delta','joint_target_delta'],default='absolute_joint_position')
+    p.add_argument('--action-space',choices=['absolute_joint_position','joint_delta','joint_target_delta','joint_target_velocity'],default='absolute_joint_position')
     p.add_argument('--seconds',type=float,help='Truncated wiring check only; not task qualification')
     p.add_argument('--render-only',action='store_true')
     args=p.parse_args()
@@ -41,7 +41,7 @@ def main():
     with np.load(recording/'initial_state.npz') as initial:
         mujoco.mj_setState(m,d,initial['state'],int(initial['state_type']))
     mujoco.mj_forward(m,d)
-    controller=MolmoSpacesController(m,d,configuration=args.controller_config,action_space=args.action_space,native_action_noise=args.native_action_noise)
+    controller=MolmoSpacesController(m,d,configuration=args.controller_config,action_space=args.action_space,native_action_noise=args.native_action_noise,dt=float(m.opt.timestep))
     scorer=CompositeReplayScorer(m,d,args.source);fixtures=ReplayFixtures(m,d)
     with np.load(recording/'actions.npz') as raw:
         times=raw['time'];commands=raw['ctrl'];expected=raw['qpos'];stages=raw['stage']
@@ -65,12 +65,13 @@ def main():
         np.savez_compressed(args.output/'converted_actions.npz',
                             commands=converted,time=times)
         commands=converted
-    if args.action_space == 'joint_target_delta':
-        converted=commands.astype(np.longdouble)
+    if args.action_space in ('joint_target_delta','joint_target_velocity'):
+        converted=commands.astype('S256' if args.action_space=='joint_target_velocity' else np.longdouble)
         for group in ('base','arm'):
             ids=controller.groups[group]
-            from cross_episode_sim.data.target_deltas import encode_target_deltas
-            converted[:,ids]=encode_target_deltas(controller.reference[group],commands[:,ids])
+            from cross_episode_sim.data.target_deltas import encode_target_deltas, encode_target_velocities
+            converted[:,ids]=(encode_target_velocities(controller.reference[group],commands[:,ids],float(m.opt.timestep))
+                if args.action_space=='joint_target_velocity' else encode_target_deltas(controller.reference[group],commands[:,ids]))
         np.savez_compressed(args.output/'converted_actions.npz',commands=converted,time=times)
         commands=converted
     full_steps=len(times)
@@ -80,7 +81,7 @@ def main():
     groups=controller.groups
     report=dict(source=str(args.source),backend="molmospaces",controller_config=str(args.controller_config),
         controller=('molmo_spaces.controllers.joint_rel_pos.JointRelPosController' if args.action_space=='joint_delta' else 'molmo_spaces.controllers.joint_pos.JointPosController'),
-        action_space=args.action_space,delta_storage_dtype=str(commands.dtype),native_action_noise=args.native_action_noise,seed=args.seed,delta_reference='previous_command_target' if args.action_space=='joint_target_delta' else str(args.reference_trace) if args.reference_trace else 'legacy_pre_step_measured_state' if args.action_space=='joint_delta' else None,
+        action_space=args.action_space,storage_dtype=str(commands.dtype),integration_dt=float(m.opt.timestep),native_action_noise=args.native_action_noise,seed=args.seed,delta_reference='previous_command_target' if args.action_space in ('joint_target_delta','joint_target_velocity') else str(args.reference_trace) if args.reference_trace else 'legacy_pre_step_measured_state' if args.action_space=='joint_delta' else None,
         actuator_changes=actuator_changes,retiming=False,state_resets_during_execution=0,
         full_native_environment=False)
     (args.output/'configuration.json').write_text(json.dumps(report,indent=2))

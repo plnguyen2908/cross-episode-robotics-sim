@@ -11,7 +11,7 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--native-action-noise',action=argparse.BooleanOptionalAction,default=False)
     p.add_argument('--seed',type=int,default=0)
-    p.add_argument('--action-space',choices=['absolute_joint_position','joint_target_delta','joint_delta'],default='absolute_joint_position')
+    p.add_argument('--action-space',choices=['absolute_joint_position','joint_target_delta','joint_delta','joint_target_velocity'],default='absolute_joint_position')
     p.add_argument('--workers',type=int,default=8)
     p.add_argument('--gpus',default='0')
     args=p.parse_args()

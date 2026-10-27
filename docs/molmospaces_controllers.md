@@ -171,3 +171,59 @@ This is not yet a float32 LeRobot/VLA export or a 50 Hz conversion qualification
 Native measured-state `joint_delta` remains a separate, unqualified open-loop
 replay format. No-noise meal failures and seeded earlier failures are retained;
 the working result does not establish seed-independent robustness.
+
+## Integrated target-path velocity
+
+`joint_target_velocity` encodes
+`(target[t] - previous_target) / dt` and integrates it into the previous
+commanded target before upstream position control. It does **not** use
+MolmoSpaces' measured-state `JointVelController`, nor a torque velocity servo.
+
+- Arm: seven joint rates in radians/second.
+- Base: world x/y rates in meters/second, yaw rate in radians/second.
+- Gripper: absolute native actuator command (never integrated).
+- The constructor's `dt` is the action integration interval. Do not infer it
+  from video FPS; the replay script uses the source recording's actual clock.
+- Numeric velocity vectors from a policy are accepted. Target integration
+  persists across calls and uses native positional control limits.
+- Offline qualification stores rates as exact ASCII rational numbers
+  (numerator/denominator) in NumPy arrays. This preserves division and subsequent
+  integration without rounding residue; native controllers receive float64
+  position targets as usual. No future/saved absolute target is consulted
+  during velocity execution.
+- Rational replay storage is **not a float32 training format**. Casting the rates
+  to training dtype and changing the action frequency require separate tests.
+
+Run all five:
+
+```bash
+GPUS=0,1,2,3,4 WORKERS=5 bash scripts/test_molmospaces_controllers.sh \
+  --action-space joint_target_velocity --native-action-noise --seed 0
+```
+
+For direct use, construct `MolmoSpacesController(model, data,
+action_space="joint_target_velocity", dt=0.02)` and call `step` with
+`{"base": [vx, vy, yaw_rate], "arm": joint_rates, "gripper": [goal]}`.
+The caller advances physics; `step` does not advance or reset simulation state.
+
+### Velocity qualification result: 5/5
+
+All five tasks passed in `runs/molmospaces_target_velocity_seed0_v3`,
+with native action noise enabled and seed 0. Every saved executed qpos sample
+matches the corresponding successful target-delta replay **exactly** (maximum
+difference 0.0). Each run contains `delta_parity.json` with the comparison.
+
+| Task | Samples compared | Video |
+|---|---:|---|
+| Set table | 3,370 | [Passed](../runs/molmospaces_target_velocity_seed0_v3/set_table/rollout.mp4) |
+| Clear and store | 8,687 | [Passed](../runs/molmospaces_target_velocity_seed0_v3/clear_and_store/rollout.mp4) |
+| Prepare and serve meal | 11,940 | [Passed](../runs/molmospaces_target_velocity_seed0_v3/prepare_and_serve_meal/rollout.mp4) |
+| Sort groceries | 3,510 | [Passed](../runs/molmospaces_target_velocity_seed0_v3/unpack_and_sort_groceries/rollout.mp4) |
+| Warm two pots | 4,873 | [Passed](../runs/molmospaces_target_velocity_seed0_v3/warm_two_pots/rollout.mp4) |
+
+Thirteen regression tests passed, covering integration clocks, absolute gripper
+semantics, exact cancellation, native controller mapping, yaw limits, microwave
+state parity, and physical heating-duration scoring.
+Qualification is at the original 500 Hz recording clock and lossless rational
+replay precision. It is not a qualification of float32 training export, a
+changed action rate, or the native measured-state velocity controller.
