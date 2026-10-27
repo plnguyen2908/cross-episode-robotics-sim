@@ -1,4 +1,4 @@
-"""Parallel qualification of the supported MolmoSpaces absolute controller."""
+"""Parallel physical replay checks for MolmoSpaces controllers."""
 import argparse,json,os,subprocess,sys,queue
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor,as_completed
@@ -11,7 +11,8 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--native-action-noise',action=argparse.BooleanOptionalAction,default=False)
     p.add_argument('--seed',type=int,default=0)
-    p.add_argument('--action-space',choices=['absolute_joint_position','joint_target_delta','joint_delta','joint_target_velocity'],default='absolute_joint_position')
+    p.add_argument('--action-space',choices=['absolute_joint_position','joint_target_delta','joint_delta','joint_target_velocity','eef_pose'],default='absolute_joint_position')
+    p.add_argument('--no-render',action='store_true')
     p.add_argument('--workers',type=int,default=8)
     p.add_argument('--gpus',default='0')
     args=p.parse_args()
@@ -31,10 +32,10 @@ def main():
             with (args.output/(name+'.log')).open('w') as log:
                 code=subprocess.run([sys.executable,'scripts/replay_molmospaces_absolute.py',
                     '--source',source,'--output',str(out),'--action-space',args.action_space,
-                    '--seed',str(args.seed),'--native-action-noise' if args.native_action_noise else '--no-native-action-noise'],stdout=log,stderr=subprocess.STDOUT,
+                    '--seed',str(args.seed),'--native-action-noise' if args.native_action_noise else '--no-native-action-noise']+(['--no-render'] if args.no_render else []),stdout=log,stderr=subprocess.STDOUT,
                     env={**os.environ,'CUDA_VISIBLE_DEVICES':gpu}).returncode
             result=json.loads((out/'result.json').read_text()) if (out/'result.json').exists() else {'success':False}
-            return dict(task=name,**result,exit_code=code,render_complete=code==0)
+            return dict(task=name,**result,exit_code=code,render_complete=code==0 and not args.no_render)
         finally:slots.put(gpu)
     results=[]
     with ThreadPoolExecutor(max_workers=min(args.workers,len(gpus))) as pool:

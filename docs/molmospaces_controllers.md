@@ -228,7 +228,7 @@ Qualification is at the original 500 Hz recording clock and lossless rational
 replay precision. It is not a qualification of float32 training export, a
 changed action rate, or the native measured-state velocity controller.
 
-## End-effector pose: experimental, not qualified
+## End-effector pose: native IK and joint control
 
 `MolmoSpacesPoseController` in `finetuning/molmospaces_eef.py` accepts
 `base`, `eef_pose` (a rigid 4×4 TCP transform in the planar robot-base frame),
@@ -237,6 +237,13 @@ Runtime uses upstream `MlSpacesKinematics.ik`, followed by the same native
 position controllers. Recorded future arm targets are not supplied to IK.
 This is absolute TCP pose, not yet an end-effector-delta interface.
 
+The base does **not** use IK. Its separate `[x, y, yaw]` target goes to the
+native `JointPosController` for the planar base move group. IK is called with
+`unlocked_move_group_ids=['arm']` only; the private IK base stays at identity
+because the requested hand transform is relative to that planar base frame.
+The upstream IK implementation is imported unchanged. Our integration selects
+and retries seeds, then sends its seven-joint solution to native joint control.
+
 The standalone native IK robot is spawned at floor height zero; saved scenes
 place the base 5 mm higher. The private IK model now copies that saved base
 height, and initialization rejects a mismatch between physical and IK TCP
@@ -244,16 +251,91 @@ frames. Physics geometry and upstream solver code are unchanged. A local
 test verifies frame equality and that issuing a command does not reset state
 or advance simulation time.
 
-Set-table trial `runs/molmospaces_eef_set_table_05` still fails at native IK
+The original set-table trial `runs/molmospaces_eef_set_table_05` failed at native IK
 solve 50 (4.852 simulated seconds, pregrasp), with native noise enabled, seed 0.
 Live-state seeds and bounded local null-space retries did not resolve it.
-The pose conversion loses the original seven-joint arm's redundant posture;
-the next investigation is maintaining a feasible, continuous IK branch.
-This run is **not** a successful controller demo. Earlier pose-frame checks
+The pose conversion loses the original seven-joint arm's redundant posture.
+This old run is **not** a successful controller demo. Earlier pose-frame checks
 used only internal FK consistency and were insufficient; physical-frame
 equality is now checked explicitly.
 
-The prototype currently requires the native integration environment (including
-native robot-config/IK dependencies); it is not yet added to the five-task
-qualified controller batch. Absolute, target-delta, and target-velocity
-qualification remains separate from this experiment.
+### Pose execution fixes
+
+- Seed native IK from the **current measured posture** for each changed pose,
+  matching upstream `_tcp_to_jp_fn` in
+  `molmo_spaces/policy/solvers/object_manipulation/base_object_manipulation_planner_policy.py`.
+  The previous commanded target can differ from the physical arm during
+  tracking/contact. Using it as the seed completed IK but dropped bowls in
+  clear-and-store; the measured-state experiment passed that task.
+- Bias the seed's redundant direction away from nearby joint limits and
+  toward the native configured nominal arm posture. This changes the private
+  solver seed only; it never changes live joint state.
+- If the near-straight tuck gets stuck at the wrist limit, try deterministic
+  bent-elbow seeds through the same native solver. These are solver seeds,
+  never resets of physical robot joints and never recorded future targets.
+- If local retries fail, try bounded perturbations with an independent fixed
+  RNG and choose the nearest solved posture; finally try the native configured
+  home posture. This does not consume the native action-noise RNG.
+- Retain the upstream solver's default damping, step size, and iteration
+  budget, with a tighter `eps=1e-7` primary tolerance. An intermediate local
+  experiment used excessive damping and caused false failures on reachable
+  poses; those settings were removed from the primary solve.
+- Preserve physical execution and final task scoring. Solving poses is not
+  proof of task success, and a 6-DoF hand pose does not preserve a 7-joint
+  trajectory exactly. Alternate arm postures can change collision/contact
+  behavior; qualification must execute the full task.
+- Log both consecutive solved-target changes (`max_joint_target_step`) and
+  target distance from the measured arm (`max_target_from_measured`). These
+  are not interchangeable. Early measured-state prototype runs used the old
+  `max_joint_target_step` label for the latter; current direct runs separate
+  them. Physical task success alone does not establish smooth human-like
+  motion or eliminate large IK branch changes.
+
+The runner accepts `--action-space eef_pose` and optional `--no-render` for
+physics-only testing. It requires the native integration environment including
+native robot-config/IK dependencies (the local environment has `mink==0.0.13`
+and `molmospaces-resources==0.0.3a2`). On this checkout:
+
+```bash
+PYTHON=/nobackup/le/cross-episode-native-molmospaces/.venv-native/bin/python \
+GPUS=0,1,2,3,4 WORKERS=5 bash scripts/test_molmospaces_controllers.sh \
+  --action-space eef_pose --native-action-noise --seed 0
+```
+
+Sixteen regression tests pass, including independent FK comparisons in the
+saved physical model at multiple recorded arm configurations, recovery of the
+original failed pose, unchanged live state during command generation, and the
+existing joint-controller/fixture/scoring tests. Controller compatibility in
+saved scenes is separate from full native-environment migration.
+
+### Measured-state pose replay: 5/5 physical successes
+
+All five complete recordings passed the unchanged physical task checks with
+native action noise enabled, seed 0, and the original 500 Hz clock. None was
+stopped early when partial goals were achieved. Summary:
+`runs/molmospaces_eef_measured_batch_01/qualification.json`.
+
+| Task | Simulated seconds | Video |
+|---|---:|---|
+| Set table | 134.788 | [Passed](../runs/molmospaces_eef_measured_batch_01/set_table/rollout.mp4) |
+| Clear and store | 347.472 | [Passed](../runs/molmospaces_eef_clear_integrated_01/rollout.mp4) |
+| Prepare and serve meal | 477.600 | [Passed](../runs/molmospaces_eef_measured_batch_01/prepare_and_serve_meal/rollout.mp4) |
+| Sort groceries | 140.398 | [Passed](../runs/molmospaces_eef_measured_batch_01/unpack_and_sort_groceries/rollout.mp4) |
+| Warm two pots | 194.908 | [Passed](../runs/molmospaces_eef_measured_batch_01/warm_two_pots/rollout.mp4) |
+
+The measured-state experiment was first injected through a small wrapper.
+After integrating it into `MolmoSpacesPoseController.step`, a fresh direct
+clear-and-store replay matched all **173,736** pre-step physical state samples
+exactly (maximum difference 0.0), as well as the saved rendered states and
+model. `integration_parity.json` and `render_provenance.json` document this.
+The wrapper itself never supplied future recorded joints to IK.
+
+**Limits:** these are successful pose-input replays, not lossless reproduction
+of the original arm trajectory and not a smoothness qualification. Large
+posture changes remain possible: the direct cabinet run's largest consecutive
+joint-target change was 4.898 radians. That is a command difference, not an
+instantaneous physical joint teleport. Velocity/acceleration, grip retention,
+and motion-quality checks are still needed before adopting this path as an
+optimized atomic demonstration executor. The existing atomic/datagen motion
+defaults have not been replaced. Float32 export, other control rates, new
+scenes, and real hardware are not qualified by this five-example test.

@@ -94,6 +94,9 @@ def main():
         action_space=args.action_space,storage_dtype=str(commands.dtype),integration_dt=float(m.opt.timestep),native_action_noise=args.native_action_noise,seed=args.seed,delta_reference='previous_command_target' if args.action_space in ('joint_target_delta','joint_target_velocity') else str(args.reference_trace) if args.reference_trace else 'legacy_pre_step_measured_state' if args.action_space=='joint_delta' else None,
         actuator_changes=actuator_changes,retiming=False,state_resets_during_execution=0,
         full_native_environment=False)
+    if eef_poses is not None:
+        report.update(ik_seed_reference=controller.seed_reference,
+                      ik_uses_recorded_joint_targets=False)
     (args.output/'configuration.json').write_text(json.dumps(report,indent=2))
     control_states=np.empty((len(times),m.nq));
     execution_error=None;completed_steps=0
@@ -128,7 +131,11 @@ def main():
                 full_native_environment=False)
     if eef_poses is not None:
         result.update(ik_backend='molmo_spaces.kinematics.mujoco_kinematics.MlSpacesKinematics',
-                      ik_calls=controller.ik_calls,ik_retries=controller.ik_retries,max_joint_target_step=controller.max_joint_step,max_pose_matrix_error=controller.max_pose_error)
+                      ik_seed_reference=controller.seed_reference,
+                      ik_calls=controller.ik_calls,ik_retries=controller.ik_retries,
+                      max_joint_target_step=controller.max_joint_step,
+                      max_target_from_measured=controller.max_measured_target_step,
+                      max_pose_matrix_error=controller.max_pose_error)
     (args.output/'result.json').write_text(json.dumps(result,indent=2))
     np.savez_compressed(args.output/'executed.npz',qpos=poses,final_qpos=d.qpos)
     np.savez_compressed(args.output/'control_trace.npz',qpos=control_states[:completed_steps],time=times[:completed_steps],success=result['success'])
