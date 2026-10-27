@@ -1,0 +1,7 @@
+{
+  "set_table": "runs/train_test_v1/train/batches/round_0162/set_table_000162",
+  "clear_and_store": "runs/train_test_v1/train/batches/round_0162/clear_and_store_000162",
+  "prepare_and_serve_meal": "runs/train_test_v1/train/batches/round_continuous/prepare_and_serve_meal_000167",
+  "unpack_and_sort_groceries": "runs/train_test_v1/train/batches/round_0162/unpack_and_sort_groceries_000162",
+  "warm_two_pots": "runs/train_test_v1/train/batches/round_0162/warm_two_pots_000162"
+}

@@ -1,0 +1,571 @@
+{
+  "upstream_revision": "3ad93ae1f77de995a87b5511bea18c655cfcb2ce",
+  "base_size": [
+    0.481,
+    0.481,
+    0.335
+  ],
+  "actuators": {
+    "robot_0/fr3_joint1": {
+      "actuator_gainprm": [
+        4500.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -4500.0,
+        -450.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        -2.7437,
+        2.7437
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/fr3_joint2": {
+      "actuator_gainprm": [
+        4500.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -4500.0,
+        -450.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        -1.7837,
+        1.7837
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/fr3_joint3": {
+      "actuator_gainprm": [
+        3500.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -3500.0,
+        -350.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        -2.9007,
+        2.9007
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/fr3_joint4": {
+      "actuator_gainprm": [
+        3500.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -3500.0,
+        -350.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        -3.0421,
+        -0.1518
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/fr3_joint5": {
+      "actuator_gainprm": [
+        2000.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -2000.0,
+        -200.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        -2.8065,
+        2.8065
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/fr3_joint6": {
+      "actuator_gainprm": [
+        2000.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -2000.0,
+        -200.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        0.5445,
+        4.5169
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/fr3_joint7": {
+      "actuator_gainprm": [
+        2000.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -2000.0,
+        -200.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        -3.0159,
+        3.0159
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/gripper/fingers_actuator": {
+      "actuator_gainprm": [
+        0.313725,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -100.0,
+        -10.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        0.0,
+        255.0
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        -5.0,
+        5.0
+      ],
+      "actuator_forcelimited": 1
+    },
+    "robot_0/base_x_act": {
+      "actuator_gainprm": [
+        25000.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -25000.0,
+        -3167.947179986504,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        -25.0,
+        25.0
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/base_y_act": {
+      "actuator_gainprm": [
+        25000.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -25000.0,
+        -3167.947179986504,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        -25.0,
+        25.0
+      ],
+      "actuator_ctrllimited": 1,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    },
+    "robot_0/base_theta_act": {
+      "actuator_gainprm": [
+        5000.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_biasprm": [
+        0.0,
+        -5000.0,
+        -253.8911061374469,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_dynprm": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "actuator_gaintype": 0,
+      "actuator_biastype": 1,
+      "actuator_dyntype": 0,
+      "actuator_ctrlrange": [
+        0.0,
+        0.0
+      ],
+      "actuator_ctrllimited": 0,
+      "actuator_forcerange": [
+        0.0,
+        0.0
+      ],
+      "actuator_forcelimited": 0
+    }
+  }
+}

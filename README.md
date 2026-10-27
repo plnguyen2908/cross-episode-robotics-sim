@@ -6,6 +6,13 @@ and settings**. A TidyBot++ mobile base carries a Franka FR3 arm and Robotiq 2F-
 gripper. Composite policies act through a fixed atomic interface in one persistent
 physical scene.
 
+## Qualified controller backend: MolmoSpaces
+
+Absolute-position replay now uses **MolmoSpaces native controllers** for the
+base, arm and gripper. All five composite replay checks passed.
+[Setup, function interface, qualification scope and commands](docs/molmospaces_controllers.md).
+The full native-environment migration is separate and remains unfinished.
+
 ## Project direction and current status
 
 The intended dataset is a **shared corpus of past training episodes**, with held-out
