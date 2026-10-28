@@ -1,0 +1,3 @@
+[submodule "external/roboicl"]
+	path = external/roboicl
+	url = https://github.com/Mosi-AI/RoboICL.git
