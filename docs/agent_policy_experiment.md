@@ -200,3 +200,17 @@ Goal evidence is saved for evaluation but not returned to the agent.
   `runs/astra_gpt-policy-eval_all_oh4di_rj`.
 - Both are truncated wiring tests, not completed-task evaluations or evidence of
   high success rates. No pretrained/fine-tuned VLA is used in these runs.
+
+
+### Detailed runtime logging
+
+Detailed logs are enabled by default alongside tqdm. Each episode writes
+`run.log` with timestamp, elapsed wall time, setup/client startup stages,
+call index, current/historical image counts, model-request wait and duration,
+selected tool arguments, reported token usage, execution/retrieval duration,
+feedback (including IK failures), simulated time, goal evidence and termination.
+Blocking stages emit a heartbeat every 15 seconds; configure `--log-interval`.
+Heartbeats mean the host is still waiting, not that the model has made progress.
+Goal evidence remains evaluator-only and is never added to model observations.
+Restart the command to load this logging change; existing processes retain
+old code. Logs flush immediately and are compatible with tqdm.

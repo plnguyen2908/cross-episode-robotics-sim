@@ -25,12 +25,13 @@ def main():
     p.add_argument('--max-calls',type=int,default=100)
     p.add_argument('--seconds',type=float,default=1800)
     p.add_argument('--request-timeout',type=float,default=240)
+    p.add_argument('--log-interval',type=float,default=15,help='Heartbeat interval during scene/model/tool work, seconds')
     p.add_argument('--limit',type=int,help='Maximum episodes; omitted evaluates all matching episodes')
     p.add_argument('--mock',action='store_true',help='Offline physical wiring test; not a policy evaluation')
     p.add_argument('--preflight',action='store_true',help='Validate inputs without creating simulator/model')
     p.add_argument('--controller-config',type=Path,default=ROOT/'configs/controllers/molmospaces_mobile_franka.json')
     a=p.parse_args()
-    if min(a.max_calls,a.seconds,a.request_timeout)<=0 or (a.limit is not None and a.limit<=0):p.error('Limits must be positive')
+    if min(a.max_calls,a.seconds,a.request_timeout,a.log_interval)<=0 or (a.limit is not None and a.limit<=0):p.error('Limits must be positive')
     from cross_episode_sim.agent_policy.history import catalog,public_catalog,frames
     from cross_episode_sim.agent_policy.interface import validate
     if a.source:sources=[a.source.resolve()]
@@ -48,9 +49,14 @@ def main():
     for source in sources:
         for name in ['action_recording/model.mjb','action_recording/initial_state.npz','initial_snapshot.json','config.json','task_manifest.json','instruction.txt']:
             if not (source/name).is_file():raise FileNotFoundError(source/name)
+    from cross_episode_sim.agent_policy.progress import Progress
+    batch_log=Progress('Astra',interval=a.log_interval)
+    batch_log.log(f'Selected {len(sources)} episodes | task={a.task} split={a.split} framework={a.framework} memory={a.memory}')
     histories=[]
     if a.memory=='all':
-        histories=catalog(a.history_root)
+        with batch_log.stage(f'Index history videos from {a.history_root}'):
+            histories=catalog(a.history_root)
+        batch_log.log(f'History ready: {len(histories)} videos')
         if a.history_manifest:
             supplied=json.loads(a.history_manifest.read_text())
             if supplied!=histories:raise ValueError('History manifest differs from allowed fine-tuning pool')
@@ -70,12 +76,14 @@ def main():
     from tqdm import tqdm
     results=[]
     for index,source in enumerate(tqdm(sources,desc='Astra episodes',unit='episode')):
+        batch_log.log(f'Episode {index+1}/{len(sources)} | source={source}')
         result=run_episode(a,source,output/f'{index:04d}_{source.name}',histories)
         results.append(result)
         summary={'episodes':len(results),'successes':sum(x['success'] for x in results),
                  'success_rate':sum(x['success'] for x in results)/len(results),
                  'mock':a.mock,'results':results}
         (output/'summary.json').write_text(json.dumps(summary,indent=2))
+        batch_log.log(f'Completed {len(results)}/{len(sources)} | successes={summary["successes"]} | success_rate={summary["success_rate"]:.1%}')
     print(json.dumps(summary),flush=True)
 
 
@@ -85,18 +93,35 @@ def run_episode(a,source,output,histories):
     from cross_episode_sim.agent_policy.interface import validate
     from cross_episode_sim.agent_policy.history import frames,public_catalog
     output.mkdir();env=None;backend=None;failure=None;calls=0;termination='call_limit';start=time.monotonic()
+    from cross_episode_sim.agent_policy.progress import Progress
+    log=Progress(output.name,output/'run.log',a.log_interval)
+    log.log(f'framework={a.framework} model={a.model} effort={a.effort} memory={a.memory} history_videos={len(histories)}')
+    log.log(f'Limits: {a.max_calls} calls, {a.seconds:g}s simulated, {a.request_timeout:g}s per request | output={output}')
     feedback={'ok':True,'message':'Initial observation'};extra=[];goals={};simtime=0.;success=False
     try:
-        env=Environment(source,output,a.controller_config)
-        if not a.mock:backend=Backend(a.framework,a.model,a.effort,a.memory,a.request_timeout,output)
+        with log.stage('Scene setup and initial rendering'):
+            env=Environment(source,output,a.controller_config)
+        log.log(f'Task: {env.prompt}')
+        if not a.mock:
+            with log.stage('Start Codex client'):
+                backend=Backend(a.framework,a.model,a.effort,a.memory,a.request_timeout,output)
         for turn in range(a.max_calls):
-            state,images=env.observe(turn)
+            call_label=f'Call {turn+1}/{a.max_calls}'
+            with log.stage(f'{call_label}: capture current views'):
+                state,images=env.observe(turn)
             sent_images=images+extra
             obs={'task':env.prompt,'robot':state,'last_tool_result':feedback}
             if turn==0:obs['history_catalog']=public_catalog(histories)
+            log.log(f'{call_label}: input={len(images)} current images + {len(extra)} historical images | sim={state["simulation_seconds"]:.2f}s')
+            request_start=time.monotonic()
             if a.mock:
                 decision=({'name':'wait','arguments':{'seconds':.2}} if turn==0 else {'name':'finish','arguments':{}})
-            else:decision=backend.decide(obs,sent_images)
+            else:
+                with log.stage(f'{call_label}: waiting for {a.model} (timeout {a.request_timeout:g}s)'):
+                    decision=backend.decide(obs,sent_images)
+            log.log(f'{call_label}: decision after {time.monotonic()-request_start:.1f}s: {json.dumps(decision,ensure_ascii=False)}')
+            usage=getattr(backend,'last_usage',None)
+            if usage:log.log(f'{call_label}: token usage {json.dumps(usage)}')
             calls+=1;extra=[]
             record={'turn':turn,'observation':obs,'images':[str(x) for x in sent_images],
                     'decision':decision,'usage':getattr(backend,'last_usage',None)}
@@ -105,14 +130,18 @@ def run_episode(a,source,output,histories):
                 name,args=decision['name'],decision['arguments']
                 if name=='finish':termination='agent_finished';feedback={'ok':True}
                 elif name=='history_frame':
-                    extra=frames(histories,args['video_id'],args['seconds'],output)
+                    with log.stage(f'{call_label}: inspect history {args["video_id"]} at {args["seconds"]}s'):
+                        extra=frames(histories,args['video_id'],args['seconds'],output)
                     feedback={'ok':True,'history_video_id':args['video_id'],'timestamps':args['seconds'],'historical_images':[x.name for x in extra]}
                 else:
                     remaining=a.seconds-(float(env.data.time)-env.start)
                     if args.get('seconds',0)>remaining:
+                        log.log(f'{call_label}: requested duration exceeds remaining simulation budget ({remaining:.2f}s)')
                         termination='simulation_time_limit';break
                     before=float(env.data.time)
-                    try:feedback=env.act(name,args)
+                    try:
+                        with log.stage(f'{call_label}: execute {name}'):
+                            feedback=env.act(name,args)
                     except (ValueError,RuntimeError) as exc:
                         feedback={'ok':False,'error':str(exc),'executed_seconds':float(env.data.time)-before}
                         if 'Physics diverged' in str(exc):raise
@@ -120,14 +149,16 @@ def run_episode(a,source,output,histories):
             except (ValueError,KeyError,TypeError) as exc:
                 feedback={'ok':False,'error':str(exc),'executed_seconds':0};record['feedback']=feedback
             with (output/'exchanges.jsonl').open('a') as f:f.write(json.dumps(record,allow_nan=False)+'\n')
-            print(f'{source.name}: [{calls}/{a.max_calls}] {decision.get("name")} | sim={float(env.data.time)-env.start:.2f}s | ok={feedback["ok"]}',flush=True)
+            log.log(f'{call_label}: feedback {json.dumps(feedback,ensure_ascii=False)} | sim={float(env.data.time)-env.start:.2f}s')
             goals=env.goals();success=env.stable>=2
+            log.log(f'{call_label}: goals {sum(bool(v) for v in goals.values())}/{len(goals)} | {json.dumps(goals)} | stable_checks={env.stable}/2')
             (output/'progress.json').write_text(json.dumps({'calls':calls,'goal_evidence':goals,'simulated_seconds':float(env.data.time)-env.start},indent=2))
             if success:termination='success';break
             if termination=='agent_finished':break
             if float(env.data.time)-env.start>=a.seconds:termination='simulation_time_limit';break
     except Exception as exc:
         failure=f'{type(exc).__name__}: {exc}';termination='error'
+        log.log(f'ERROR: {failure}')
     finally:
         if backend:backend.close()
         if env:
@@ -135,6 +166,9 @@ def run_episode(a,source,output,histories):
     result={'source':str(source),'success':success and not failure,'mock':a.mock,'failure':failure,
             'termination':termination,'goal_evidence':goals,'calls':calls,'simulated_seconds':simtime,
             'wall_seconds':time.monotonic()-start,'video':str(output/'rollout.mp4')}
-    (output/'result.json').write_text(json.dumps(result,indent=2));return result
+    (output/'result.json').write_text(json.dumps(result,indent=2))
+    log.log(f'FINISHED: success={result["success"]} reason={termination} calls={calls} sim={simtime:.2f}s wall={result["wall_seconds"]:.1f}s')
+    log.log(f'Video: {result["video"]} | Result: {output / "result.json"}')
+    return result
 
 if __name__=='__main__':main()
