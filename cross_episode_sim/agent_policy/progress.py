@@ -19,7 +19,7 @@ class Progress:
     def log(self, message):
         from tqdm import tqdm
         elapsed = time.monotonic() - self.started
-        line = f'{datetime.now(ZoneInfo('America/New_York')).isoformat(timespec="seconds")} [{self.label}] +{elapsed:.1f}s | {message}'
+        line = f'{datetime.now(ZoneInfo("America/New_York")).isoformat(timespec="seconds")} [{self.label}] +{elapsed:.1f}s | {message}'
         with self.lock:
             tqdm.write(line)
             sys.stdout.flush()
