@@ -1,3 +1,6 @@
 [submodule "external/roboicl"]
 	path = external/roboicl
 	url = https://github.com/Mosi-AI/RoboICL.git
+[submodule "external/gpt-policy-eval"]
+	path = external/gpt-policy-eval
+	url = https://github.com/cheng-haha/GPT-Policy-Eval.git

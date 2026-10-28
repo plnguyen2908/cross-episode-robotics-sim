@@ -1,19 +1,26 @@
-# RoboICL: agent policy experiment
+# Agent policy experiments: RoboICL and GPT-Policy-Eval
 
 ## Setup status
 
-Upstream repository is pinned as the `external/roboicl` Git submodule at `17b379a6deea33f71bd31e05bd60d1daf627acfb`.
-This branch starts at project commit `3694d5e`. The main working tree had
-uncommitted controller, data, and fine-tuning changes when this checkout was
-created; those changes are NOT included here. Reconcile the validated project
-changes before implementing the simulator adapter. No evaluation has run and
-no cross-sim adapter is implemented by this setup.
+Both frameworks are merged into main as pinned upstream submodules:
 
-After checking out this branch elsewhere, initialize the dependency with:
+| Framework | Path | Upstream commit |
+| --- | --- | --- |
+| RoboICL | `external/roboicl` | `17b379a6deea33f71bd31e05bd60d1daf627acfb` |
+| GPT-Policy-Eval | `external/gpt-policy-eval` | `2ca201638e1139fe35973c8a2d209a894b389db1` |
+
+Initialize the dependencies:
 
 ```bash
-git submodule update --init external/roboicl
+git submodule update --init external/roboicl external/gpt-policy-eval
+bash scripts/setup_roboicl_codex.sh
 ```
+
+GPT-Policy-Eval already includes a Codex backend. RoboICL uses the tracked
+optional patch described below. Neither framework has a cross-sim simulator
+adapter yet; no end-to-end evaluation has run. Existing uncommitted project
+controller/data work was preserved by the merge and is not included in its
+commit.
 
 ## Two paired evaluation conditions
 
@@ -57,7 +64,7 @@ persistent summary must be built solely from allowed history, with provenance.
 
 ## Next implementation work
 
-1. Reconcile the tested controller/runtime changes from main.
+1. Qualify the shared controller/runtime for both adapters.
 2. Implement the project simulator adapter for this upstream framework.
 3. Build the frozen history-video manifest and inspect/sample tools.
 4. Verify observations and motion tools with deterministic smoke checks.
