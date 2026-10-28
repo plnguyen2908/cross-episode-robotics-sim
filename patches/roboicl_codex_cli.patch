@@ -1,0 +1,215 @@
+diff --git a/roboicl/policy/astra_policy.py b/roboicl/policy/astra_policy.py
+index f70d432..09fb344 100644
+--- a/roboicl/policy/astra_policy.py
++++ b/roboicl/policy/astra_policy.py
+@@ -109,9 +109,14 @@ class Model:
+             or "https://api.openai.com/v1/responses",
+         )
+         self.model_name = model_cfg.get("model", "gpt-6-astra")
++        self.transport = os.environ.get("ROBOICL_TRANSPORT", "api")
++        if self.transport not in ("api", "codex_cli"):
++            raise ValueError("ROBOICL_TRANSPORT must be api or codex_cli")
+         self.api_key = os.environ.get("ASTRA_API_KEY")
+-        if not self.api_key:
++        if not self.api_key and self.transport == "api":
+             raise RuntimeError("ASTRA_API_KEY is required (use the private credential launcher)")
++        if self.transport == "codex_cli":
++            self.api_key = "unused-codex-cli-auth"
+         self.effort = os.environ.get("ASTRA_REASONING_EFFORT", model_cfg.get("reasoning_effort", "xhigh"))
+         self.max_chunk = int(model_cfg.get("max_chunk", 32))
+         configured_output = model_cfg.get("max_output_tokens")
+@@ -223,6 +228,9 @@ class Model:
+         return tools
+ 
+     def _request(self, payload):
++        if getattr(self, "transport", "api") == "codex_cli":
++            from .codex_transport import request
++            return request(payload, timeout=240)
+         wire_payload = to_wire_payload(payload, self.api_mode)
+         authorization = f"Bearer {self.api_key}"
+         request = urllib.request.Request(
+diff --git a/roboicl/policy/bounded_policy.py b/roboicl/policy/bounded_policy.py
+index 6c21a24..c5b605f 100644
+--- a/roboicl/policy/bounded_policy.py
++++ b/roboicl/policy/bounded_policy.py
+@@ -451,21 +451,26 @@ class Model(LegacyModel):
+             self._log('http_transport.jsonl', {**diagnostic, 'event': event,
+                       'elapsed_s': time.monotonic()-started, **fields})
+         try:
+-            # No global proxy mutation; direct is explicit and per request only.
+-            open_request = (urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+-                            if mode == 'direct' else urllib.request.urlopen)
+-            with open_request(request, timeout=remaining) as reply:
+-                headers = getattr(reply, 'headers', {})
+-                record('headers', http_status=getattr(reply, 'status', None),
+-                       response_headers={k: headers.get(k) for k in
+-                           ('x-request-id', 'x-oneapi-request-id', 'cf-ray', 'server', 'date')
+-                           if headers.get(k)})
+-                if 'text/event-stream' in headers.get('Content-Type', ''):
+-                    response = read_sse_response(
+-                        reply, record, None if remaining is None else started+remaining)
+-                else:
+-                    response = _validate_json_response(
+-                        from_wire_response(json.load(reply), api_mode))
++            if getattr(self, 'transport', 'api') == 'codex_cli':
++                from .codex_transport import request as codex_request
++                response = codex_request(payload, timeout=remaining)
++                diagnostic['http_backend'] = 'codex_cli'
++            else:
++                # No global proxy mutation; direct is explicit and per request only.
++                open_request = (urllib.request.build_opener(urllib.request.ProxyHandler({})).open
++                                if mode == 'direct' else urllib.request.urlopen)
++                with open_request(request, timeout=remaining) as reply:
++                    headers = getattr(reply, 'headers', {})
++                    record('headers', http_status=getattr(reply, 'status', None),
++                           response_headers={k: headers.get(k) for k in
++                               ('x-request-id', 'x-oneapi-request-id', 'cf-ray', 'server', 'date')
++                               if headers.get(k)})
++                    if 'text/event-stream' in headers.get('Content-Type', ''):
++                        response = read_sse_response(
++                            reply, record, None if remaining is None else started+remaining)
++                    else:
++                        response = _validate_json_response(
++                            from_wire_response(json.load(reply), api_mode))
+             record('completed', response_id=response.get('id'), response_status=response.get('status'))
+         except urllib.error.HTTPError as exc:
+             self.budget_poisoned = True
+diff --git a/roboicl/policy/codex_transport.py b/roboicl/policy/codex_transport.py
+new file mode 100644
+index 0000000..40c5ea4
+--- /dev/null
++++ b/roboicl/policy/codex_transport.py
+@@ -0,0 +1,87 @@
++"""Explicit opt-in Codex transport. No credentials or robot tools enter the child."""
++import base64
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++from uuid import uuid4
++
++
++def request(payload, timeout=240):
++    tools = payload.get('tools', [])
++    if len(tools) != 1 or tools[0].get('name') != 'act':
++        raise ValueError('Codex transport requires exactly one act function')
++    if payload.get('previous_response_id'):
++        raise ValueError('Codex transport requires explicit conversation history')
++    with tempfile.TemporaryDirectory(prefix='roboicl-codex-') as tmp:
++        root = Path(tmp)
++        images = []
++        def convert(value):
++            if isinstance(value, list):
++                return [convert(x) for x in value]
++            if not isinstance(value, dict):
++                return value
++            if value.get('type') == 'reasoning':
++                raise ValueError('API reasoning items cannot be reused in Codex mode')
++            if value.get('type') == 'input_image':
++                url = value.get('image_url', '')
++                header, sep, data = url.partition(',')
++                if not sep or header not in ('data:image/png;base64', 'data:image/jpeg;base64'):
++                    raise ValueError('Only embedded PNG/JPEG images supported')
++                path = root / f'image_{len(images):05d}.{ "png" if "png" in header else "jpg"}'
++                path.write_bytes(base64.b64decode(data, validate=True))
++                images.append(path)
++                return {'type': 'image_reference', 'attachment_index': len(images), 'name': path.name}
++            return {k: convert(v) for k, v in value.items()}
++        history = convert(payload.get('input', []))
++        schema = root / 'schema.json'
++        schema.write_text(json.dumps(tools[0]['parameters']))
++        output = root / 'answer.json'
++        prompt = ('Act as the robot policy described below. Return only the act function arguments '
++                  'as JSON matching the output schema. Do not execute actions or use other tools. '
++                  'Image attachments are numbered in the same order as image_reference entries.\n'
++                  + json.dumps({'instructions': payload.get('instructions', ''),
++                                'conversation': history, 'function': tools[0]}, ensure_ascii=False))
++        cmd = [os.environ.get('ROBOICL_CODEX_BIN', 'codex'), 'exec',
++               '--ignore-user-config', '--ignore-rules', '--ephemeral',
++               '--skip-git-repo-check', '--sandbox', 'read-only', '--json',
++               '--model', payload.get('model', 'gpt-6-astra'),
++               '--output-schema', str(schema), '--output-last-message', str(output)]
++        for feature in ('shell_tool', 'unified_exec', 'view_image', 'browser_use'):
++            cmd += ['--disable', feature]
++        effort = payload.get('reasoning', {}).get('effort')
++        if effort:
++            cmd += ['-c', 'model_reasoning_effort=' + json.dumps(effort)]
++        for image in images:
++            cmd += ['--image', str(image)]
++        cmd += ['-']
++        env = dict(os.environ)
++        for key in ('ASTRA_API_KEY', 'OPENAI_API_KEY', 'CODEX_API_KEY'):
++            env.pop(key, None)
++        result = subprocess.run(cmd, input=prompt, text=True, capture_output=True,
++                                cwd=root, env=env, timeout=timeout, check=False)
++        if result.returncode:
++            raise RuntimeError(f'Codex CLI failed (exit {result.returncode}); no action dispatched')
++        usage = None
++        for line in result.stdout.splitlines():
++            try:
++                event = json.loads(line)
++            except json.JSONDecodeError:
++                continue
++            if event.get('type') == 'turn.completed':
++                usage = event.get('usage')
++            if event.get('type') in ('turn.failed', 'error'):
++                raise RuntimeError('Codex CLI turn failed; no action dispatched')
++        if not usage or any(type(usage.get(k)) is not int or usage[k] < 0
++                            for k in ('input_tokens', 'output_tokens')):
++            raise ValueError('Codex did not report valid usage; no action dispatched')
++        args = json.loads(output.read_text())
++        if not isinstance(args, dict):
++            raise ValueError('Expected action argument object')
++        # Existing RoboICL tensor/finite-value validation remains authoritative.
++        return {'id': 'codex_' + uuid4().hex, 'status': 'completed',
++                'transport': 'codex_cli', 'usage': usage,
++                'output': [{'type': 'function_call', 'name': 'act',
++                            'call_id': 'call_' + uuid4().hex,
++                            'arguments': json.dumps(args, allow_nan=False)}]}
+diff --git a/tests/test_codex_transport_offline.py b/tests/test_codex_transport_offline.py
+new file mode 100644
+index 0000000..896308b
+--- /dev/null
++++ b/tests/test_codex_transport_offline.py
+@@ -0,0 +1,40 @@
++import base64
++import json
++from pathlib import Path
++import subprocess
++import unittest
++from unittest.mock import patch
++from roboicl.policy.codex_transport import request
++
++PAYLOAD = {'model':'gpt-6-astra', 'tools':[{'name':'act','parameters':{'type':'object'}}],
++           'input':[{'role':'user','content':[{'type':'input_image','image_url':
++               'data:image/png;base64,'+base64.b64encode(b'image').decode()}]}]}
++
++class TransportTests(unittest.TestCase):
++    def fake(self, cmd, **kw):
++        self.assertNotIn('ASTRA_API_KEY', kw['env'])
++        self.assertNotIn('OPENAI_API_KEY', kw['env'])
++        self.assertIn('--ephemeral', cmd)
++        self.assertIn('image_reference', kw['input'])
++        self.assertEqual(Path(cmd[cmd.index('--image')+1]).read_bytes(), b'image')
++        Path(cmd[cmd.index('--output-last-message')+1]).write_text(json.dumps({'actions': [],'execution_note':'test'}))
++        return subprocess.CompletedProcess(cmd,0,json.dumps({'type':'turn.completed','usage':{'input_tokens':12,'output_tokens':5}}),'')
++    def test_images_history_usage(self):
++        with patch('subprocess.run', side_effect=self.fake), patch.dict('os.environ', {'ASTRA_API_KEY':'secret'}):
++            a=request(PAYLOAD); b=request(PAYLOAD)
++        self.assertEqual(a['usage']['input_tokens'],12)
++        self.assertNotEqual(a['output'][0]['call_id'],b['output'][0]['call_id'])
++    def test_failure(self):
++        with patch('subprocess.run', return_value=subprocess.CompletedProcess([],1,'','')):
++            with self.assertRaises(RuntimeError): request(PAYLOAD)
++    def test_missing_usage(self):
++        with patch('subprocess.run', return_value=subprocess.CompletedProcess([],0,'','')):
++            with self.assertRaises(ValueError): request(PAYLOAD)
++    def test_timeout(self):
++        with patch('subprocess.run', side_effect=subprocess.TimeoutExpired('codex',1)):
++            with self.assertRaises(subprocess.TimeoutExpired): request(PAYLOAD)
++    def test_remote_image_rejected(self):
++        p=dict(PAYLOAD,input=[{'type':'input_image','image_url':'https://example.com/x.png'}])
++        with self.assertRaises(ValueError): request(p)
++
++if __name__ == '__main__': unittest.main()

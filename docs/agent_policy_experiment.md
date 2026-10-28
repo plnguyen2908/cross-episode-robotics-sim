@@ -64,3 +64,42 @@ persistent summary must be built solely from allowed history, with provenance.
 5. Run one paired episode, inspect its video and logs, then run the full suite.
 
 Upstream environment installers and robot launch scripts have not been run.
+
+## Codex CLI transport (local adaptation)
+
+Apply the tracked patch after initializing the pinned upstream checkout:
+
+```bash
+bash scripts/setup_roboicl_codex.sh
+codex login
+codex login status
+export ROBOICL_TRANSPORT=codex_cli
+# Optional if codex is not on PATH:
+# export ROBOICL_CODEX_BIN=/absolute/path/to/codex
+```
+
+Then use RoboICL's usual runner in its installed environment. It does not require
+ASTRA_API_KEY in this mode. `ROBOICL_TRANSPORT=api` retains the original backend.
+CLI auth uses the user's existing Codex account. Requested model access and
+usage limits still apply. No login credentials are copied or read by this code.
+The child drops API-key environment variables, uses an ephemeral read-only
+session with user config/rules ignored and shell/browser tools disabled, and
+receives images as attachments and explicit selected conversation history.
+It returns structured act arguments; existing action validation and budget
+accounting are retained. Invalid output, absent usage or timeout stops dispatch.
+No CLI session memory carries over: RoboICL owns the visible history.
+
+This is a separate experimental transport, not an exact API reproduction:
+Codex has its own instructions and token overhead; encrypted API reasoning
+cannot carry across modes. CLI-reported usage is recorded, while the original
+API token estimate is only an estimate. API output-token caps are not enforced
+by this CLI adapter. Use request/time limits as well; token overruns stop action
+dispatch after a response but cannot undo inference already performed.
+
+Validation: five offline transport tests pass (image/history construction,
+credential removal, usage/call IDs, process failure, missing usage, timeout,
+unsupported remote images); changed modules compile. No live model call or
+robot rollout has been performed. Cross-sim adapter and all-history video access
+remain to be implemented; upstream RoboICL still uses its own reference sampler.
+
+CLI reference: https://learn.chatgpt.com/docs/non-interactive-mode
