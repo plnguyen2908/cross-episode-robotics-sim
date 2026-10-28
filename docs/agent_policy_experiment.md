@@ -214,3 +214,18 @@ Heartbeats mean the host is still waiting, not that the model has made progress.
 Goal evidence remains evaluator-only and is never added to model observations.
 Restart the command to load this logging change; existing processes retain
 old code. Logs flush immediately and are compatible with tqdm.
+
+
+### Default evaluation limits — confirmed October 28, 2026
+
+| Argument | Default | Scope |
+| --- | --- | --- |
+| `--max-calls` | 100 | Model decisions per episode, including history-frame requests and observation calls |
+| `--seconds` | 1800 | Simulated seconds per episode (30 minutes); not wall-clock time |
+| `--request-timeout` | 240 | Wall-clock seconds per model request |
+| `--limit` | Unset | All matching test episodes for the selected task and split |
+| `--log-interval` | 15 | Wall-clock seconds between blocking-stage heartbeats |
+
+Detailed progress prints to the terminal alongside tqdm and is also saved to
+each episode's `run.log`. Existing running processes must be restarted to load
+code changes. These defaults are configurable through the command-line flags.
