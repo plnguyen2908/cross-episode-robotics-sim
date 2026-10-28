@@ -1,0 +1,3 @@
+[submodule "external/gpt-policy-eval"]
+	path = external/gpt-policy-eval
+	url = https://github.com/cheng-haha/GPT-Policy-Eval.git
