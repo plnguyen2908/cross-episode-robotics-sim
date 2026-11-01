@@ -91,3 +91,5 @@ mount/FOV checks passed. All four sensor tests passed (7.73 seconds).
 [Watch the demonstration](../runs/sensor_interface_v2/sensor_demo.mp4) ·
 [Sample frame](../runs/sensor_interface_v2/frame_0151.png) ·
 [Machine-readable report](../runs/sensor_interface_v2/report.json)
+
+Next: [RGB-D tracking and reconstruction](rgbd_slam.md).
