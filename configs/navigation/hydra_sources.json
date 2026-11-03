@@ -1,0 +1,42 @@
+{
+  "hydra": {
+    "path": "external/Hydra",
+    "url": "https://github.com/MIT-SPARK/Hydra.git",
+    "revision": "f9fc834b07f1c9d3207fee674747f17c41a75262"
+  },
+  "config_utilities": {
+    "path": ".tools/hydra_ws/src/config_utilities",
+    "url": "https://github.com/MIT-SPARK/config_utilities.git",
+    "revision": "1df5f6b5444f8823232cfdb1cef69c2bd41ada96"
+  },
+  "spark_dsg": {
+    "path": ".tools/hydra_ws/src/spark_dsg",
+    "url": "https://github.com/MIT-SPARK/Spark-DSG.git",
+    "revision": "39f1c2e28789620c968aa44d35d2938616385e32"
+  },
+  "spatial_hash": {
+    "path": ".tools/hydra_ws/src/spatial_hash",
+    "url": "https://github.com/MIT-SPARK/Spatial-Hash.git",
+    "revision": "8045892f34978d78870d806a50f8e5aefdbe52fc"
+  },
+  "kimera_rpgo": {
+    "path": ".tools/hydra_ws/src/kimera_rpgo",
+    "url": "https://github.com/MIT-SPARK/Kimera-RPGO.git",
+    "revision": "222ad5e863daa26419b3341ad62e44fb307cba14"
+  },
+  "kimera_pgmo": {
+    "path": ".tools/hydra_ws/src/kimera_pgmo",
+    "url": "https://github.com/MIT-SPARK/Kimera-PGMO.git",
+    "revision": "382b1f3530f4df69347309687d6887ed2905446c"
+  },
+  "pose_graph_tools": {
+    "path": ".tools/hydra_ws/src/pose_graph_tools",
+    "url": "https://github.com/MIT-SPARK/pose_graph_tools.git",
+    "revision": "965dfe864487be9040195c598fd89718563c348c"
+  },
+  "teaser_plusplus": {
+    "path": ".tools/hydra_ws/src/teaser_plusplus",
+    "url": "https://github.com/MIT-SPARK/TEASER-plusplus.git",
+    "revision": "52a9c52ee7d4c838c5e8a75458c33178be5bfb70"
+  }
+}

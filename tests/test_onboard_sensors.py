@@ -21,6 +21,8 @@ def test_packet_allowlist_and_synchronization(scene):
     m,d,s=scene;p=s.capture()
     assert {f.name for f in fields(SensorPacket)}=={'timestamp','cameras','arm','gripper','base_frame'}
     assert set(p.cameras)=={'navigation','wrist'}
+    assert p.cameras['navigation'].robot_mask.shape==(120,160)
+    assert .005 < p.cameras['navigation'].robot_mask.mean() < .8
     assert p.timestamp==d.time
     assert len(p.arm.names)==7 and len(p.gripper.names)==2
     assert all('base_' not in n for n in p.arm.names+p.gripper.names)
@@ -53,6 +55,7 @@ def test_no_base_pose_in_extrinsics_or_proprioception(scene):
     for n,delta in [('base_x',3),('base_y',-4),('base_theta',1.2)]:d.qpos[m.jnt_qposadr[m.joint('robot_0/'+n).id]]+=delta
     mujoco.mj_forward(m,d);q=s.capture()
     for k in p.cameras:assert np.array_equal(p.cameras[k].T_base_optical,q.cameras[k].T_base_optical)
+    assert np.array_equal(p.cameras['navigation'].robot_mask,q.cameras['navigation'].robot_mask)
     assert np.array_equal(p.arm.position,q.arm.position)
     assert np.array_equal(p.gripper.position,q.gripper.position)
 
@@ -64,3 +67,29 @@ def test_capture_does_not_step_or_mutate_physics(scene):
     for a,b in [(q,d.qpos),(v,d.qvel),(ctrl,d.ctrl),(mount,m.cam_pos),(collisions,m.geom_contype)]:assert np.array_equal(a,b)
     packet.arm.position[:]=100
     assert np.array_equal(q,d.qpos)
+
+
+def test_isolated_depth_returns_are_unknown_not_filled():
+    from cross_episode_sim.sensors.onboard import depth_validity
+    d=np.full((9,9),2.,np.float32);d[4,4]=.3
+    valid=depth_validity(d)
+    assert not valid[4,4] and valid.sum()==80
+    assert d[4,4]==np.float32(.3)  # raw measurement unchanged
+    d[:,4]=.3  # a one-pixel-wide connected pole must survive
+    assert depth_validity(d).all()
+    d[0,0]=np.nan;d[0,1]=np.inf;d[0,2]=0.;d[0,3]=9.
+    assert not depth_validity(d)[0,:4].any()
+
+
+def test_depth_edges_do_not_create_unmasked_robot_top_plate():
+    source=Path('runs/set_table_pipeline_development/full_attempt_13/development/transfer_01_bowl/carry/private_checkpoint')
+    if not source.exists():pytest.skip('Recorded depth-edge regression state unavailable')
+    m=mujoco.MjModel.from_binary_path(str(source/'model.mjb'));d=mujoco.MjData(m)
+    mujoco.mj_setState(m,d,np.load(source/'state.npy'),mujoco.mjtState.mjSTATE_INTEGRATION);mujoco.mj_forward(m,d)
+    before=d.qpos.copy()
+    with OnboardSensorInterface(m,d) as sensor:
+        camera=sensor.capture().cameras['wrist']
+        for u,v in [(100,272),(97,261),(108,301)]:
+            assert camera.robot_mask[v,u] or not camera.valid_depth[v,u]
+        assert m.vis.quality.offsamples==0
+        assert np.array_equal(d.qpos,before)

@@ -1,0 +1,2 @@
+# Install into the existing isolated sensor environment; retain its torch build.
+transformers==4.57.1

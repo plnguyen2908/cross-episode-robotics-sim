@@ -69,3 +69,15 @@ Never silently fall back to the old three-room house when sampling fails. Save
 candidate seeds/rejections and distinguish static validity from physical success.
 Resume preserves saved configurations and successful episodes; new distributions
 require a new batch. See docs/randomized_composites.md for controls and artifacts.
+
+
+## Sensor-only semantic mapping scope — November 1, 2026
+
+Hydra/DAAAM integration focuses on manipulable objects, initially cups and bowls.
+Keep furniture/receptacle recognition separate for navigation or placement.
+SLAM/observed occupancy and live depth supply collision geometry: retain all
+observed table, leg, chair and wall geometry regardless of semantic labels.
+Do not interpret excluded semantic labels as free space. Native Hydra's estimated
+place/room regions may support routing when linked to repeated visual room labels
+and observed free-space routes. They are estimates, not simulator room truth.
+Never use simulator object identities, true poses, or room graphs as perception inputs.

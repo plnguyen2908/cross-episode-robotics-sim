@@ -25,6 +25,8 @@ class RGBDCamera:
     K: np.ndarray
     distortion: np.ndarray
     T_base_optical: np.ndarray
+    robot_mask: np.ndarray | None = None
+    raw_depth_m: np.ndarray | None = None
 
     def camera_info(self):
         """ROS CameraInfo-compatible values, without a ROS dependency."""
@@ -42,6 +44,26 @@ class SensorPacket:
     arm: JointObservation
     gripper: JointObservation
     base_frame: str = 'robot_0/base'
+
+
+def depth_validity(depth, max_depth_m=8.):
+    """Reject isolated inconsistent returns without inventing replacement depth.
+
+    One agreeing 8-connected neighbor preserves thin edges/poles. Isolated
+    returns become unknown, not free space. Keep raw_depth_m for audit/export.
+    """
+    depth=np.asarray(depth)
+    valid=np.isfinite(depth)&(depth>0)&(depth<=max_depth_m)
+    if min(depth.shape)<3:return valid
+    supported=np.zeros(depth.shape,bool)
+    tolerance=np.maximum(.02,.02*depth)
+    h,w=depth.shape
+    for dr,dc in ((-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)):
+        target=(slice(max(0,-dr),min(h,h-dr)),slice(max(0,-dc),min(w,w-dc)))
+        neighbor=(slice(max(0,dr),min(h,h+dr)),slice(max(0,dc),min(w,w+dc)))
+        with np.errstate(invalid='ignore'):
+            supported[target] |= valid[neighbor] & (np.abs(depth[target]-depth[neighbor])<=tolerance[target])
+    return valid & supported
 
 
 def transform(position, quaternion):
@@ -78,6 +100,11 @@ class OnboardSensorInterface:
         # Rendering-only buffer sizes; leave geometry, camera settings and physics untouched.
         model.vis.global_.offwidth=max(width,model.vis.global_.offwidth)
         model.vis.global_.offheight=max(height,model.vis.global_.offheight)
+        # Multisample resolve blends foreground/background depth at robot
+        # silhouettes, producing phantom geometry outside calibrated bounds.
+        # Render synchronized RGB/depth without MSAA; this changes rasterization
+        # only, not camera pose, scene geometry, collision, or physical state.
+        model.vis.quality.offsamples=0
         self._renderer=mujoco.Renderer(model,height=height,width=width)
         self._option=mujoco.MjvOption();self._option.geomgroup[0]=0;self._option.sitegroup[:]=0
 
@@ -86,9 +113,9 @@ class OnboardSensorInterface:
         return JointObservation(names,self._data.qpos[self._model.jnt_qposadr[ids]].copy(),
                                self._data.qvel[self._model.jnt_dofadr[ids]].copy())
 
-    def _extrinsic(self,cid):
+    def _body_transform(self,bid):
         m,d=self._model,self._data
-        chain=[];bid=int(m.cam_bodyid[cid])
+        chain=[];bid=int(bid)
         while bid!=self._base:
             if bid==0:raise ValueError('Camera is not attached to the robot base')
             chain.append(bid);bid=int(m.body_parentid[bid])
@@ -102,8 +129,63 @@ class OnboardSensorInterface:
                 q=np.r_[np.cos(angle/2),m.jnt_axis[jid]*np.sin(angle/2)]
                 A=transform(np.zeros(3),q);pivot=m.jnt_pos[jid]
                 A[:3,3]=pivot-A[:3,:3]@pivot;T=T@A
-        T=T@transform(m.cam_pos[cid],m.cam_quat[cid])
+        return T
+
+    def _extrinsic(self,cid):
+        m=self._model
+        T=self._body_transform(m.cam_bodyid[cid])@transform(m.cam_pos[cid],m.cam_quat[cid])
         return T@np.diag([1.,-1.,-1.,1.])
+
+    def _robot_mask(self,cid,K,depth=None):
+        # Project known robot-only visual bounds via encoder FK. No world poses,
+        # scene labels or simulator segmentation are consulted.
+        from PIL import Image,ImageDraw,ImageFilter
+        import itertools
+        canvas=Image.new('L',(self.width,self.height));draw=ImageDraw.Draw(canvas)
+        optical=np.linalg.inv(self._extrinsic(cid));m=self._model
+        signs=np.array(list(itertools.product([-1,1],repeat=3)))
+        depth_mask=np.zeros((self.height,self.width),bool)
+        if depth is not None:
+            v,u=np.indices(depth.shape)
+            measured=np.stack([(u-K[0,2])*depth/K[0,0],(v-K[1,2])*depth/K[1,1],depth],axis=-1)
+        def box(T,center,half):
+            corners=center+signs*half
+            xyz=corners@T[:3,:3].T+T[:3,3]
+            if depth is not None:
+                # Restrict the exact 3-D depth test to the projected box bounds.
+                # Boxes crossing the camera plane retain a full-image test.
+                if xyz[:,2].max()<=0:return
+                x0,y0,x1,y1=0,0,self.width,self.height
+                if xyz[:,2].min()>.02:
+                    projected=xyz@K.T;uv=projected[:,:2]/projected[:,2:3]
+                    x0,y0=np.maximum(np.floor(uv.min(0)).astype(int)-1,[0,0])
+                    x1,y1=np.minimum(np.ceil(uv.max(0)).astype(int)+2,[self.width,self.height])
+                    if x1<=x0 or y1<=y0:return
+                local=(measured[y0:y1,x0:x1]-T[:3,3])@T[:3,:3]
+                depth_mask[y0:y1,x0:x1] |= np.all(np.abs(local-center)<=half,axis=-1)
+                return
+            if np.any(xyz[:,2]<=.02):return
+            uv=xyz@K.T;uv=uv[:,:2]/uv[:,2:3]
+            # Project the convex hull of the box, not an image-sized rectangle.
+            from scipy.spatial import ConvexHull,QhullError
+            try:order=ConvexHull(uv).vertices
+            except QhullError:return
+            draw.polygon([tuple(p) for p in uv[order]],fill=255)
+        # All calibrated robot visuals, including base and camera mast. Passive
+        # finger links remain covered by the conservative gripper envelope.
+        for bid in range(m.nbody):
+            name=m.body(bid).name or ''
+            if not name.startswith('robot_0/') or ('/gripper/' in name and name!='robot_0/gripper/base'):continue
+            T=self._body_transform(bid)
+            for gid in range(m.body_geomadr[bid],m.body_geomadr[bid]+m.body_geomnum[bid]):
+                if m.geom_group[gid]==0:continue
+                G=T@transform(m.geom_pos[gid],m.geom_quat[gid])
+                box(optical@G,m.geom_aabb[gid,:3],m.geom_aabb[gid,3:]+.02)
+        # Conservative known gripper envelope covers passive finger linkages.
+        T=self._body_transform(m.body('robot_0/gripper/base').id)
+        box(optical@T,np.array([0.,0.,.08]),np.array([.10,.10,.13]))
+        return depth_mask if depth is not None else np.asarray(canvas.filter(ImageFilter.MaxFilter(5)))>0
+
 
     def capture(self):
         # mj_step may leave position-dependent render caches at the previous step.
@@ -117,10 +199,12 @@ class OnboardSensorInterface:
             try:
                 r.enable_depth_rendering();depth=r.render().copy().astype(np.float32)
             finally:r.disable_depth_rendering()
-            valid=np.isfinite(depth)&(depth>0)&(depth<=self.max_depth_m)
+            raw_depth=depth.copy()
+            valid=depth_validity(depth,self.max_depth_m)
             depth[~valid]=np.nan
             frames[key]=RGBDCamera(self.CAMERA_NAMES[key]+'_optical',rgb,depth,valid,
-                                  self._K[key].copy(),np.zeros(5),self._extrinsic(cid))
+                                  self._K[key].copy(),np.zeros(5),self._extrinsic(cid),
+                                  self._robot_mask(cid,self._K[key],depth),raw_depth)
         return SensorPacket(float(self._data.time),frames,self._joints(self.ARM_NAMES),self._joints(self.GRIPPER_NAMES))
 
     def close(self):self._renderer.close()

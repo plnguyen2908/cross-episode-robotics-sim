@@ -15,7 +15,7 @@ def camera():
 
 
 def test_static_tracking_and_map():
-    mapper=RGBDMapper(voxel_size=.01);c=camera()
+    mapper=RGBDMapper(voxel_size=.01,tracking_backend='odometry');c=camera()
     a=mapper.update(c,0.);b=mapper.update(c,.1)
     assert a.accepted and b.accepted
     np.testing.assert_allclose(b.T_map_base,np.eye(4),atol=.003)
@@ -23,7 +23,7 @@ def test_static_tracking_and_map():
 
 
 def test_invalid_depth_fails_closed():
-    mapper=RGBDMapper();c=camera()
+    mapper=RGBDMapper(tracking_backend='odometry');c=camera()
     r=mapper.update(replace(c,depth_m=np.full_like(c.depth_m,np.nan)),0.)
     assert not r.accepted and r.T_map_base is None
     assert not mapper.update(c,.1).accepted
@@ -31,7 +31,7 @@ def test_invalid_depth_fails_closed():
 
 
 def test_timestamp_and_calibration_contract():
-    mapper=RGBDMapper();c=camera();mapper.update(c,1.)
+    mapper=RGBDMapper(tracking_backend='odometry');c=camera();mapper.update(c,1.)
     with pytest.raises(ValueError,match='increase'):mapper.update(c,1.)
     with pytest.raises(ValueError,match='calibration'):mapper.update(replace(c,K=c.K*2),2.)
 
@@ -44,7 +44,7 @@ def test_translation_direction_and_metric_scale():
     # At fx=120, translating the camera +0.02m shifts this z=2.4m plane
     # left by exactly one pixel. This verifies inversion and metric scale.
     shifted=replace(c,rgb=np.roll(c.rgb,-1,axis=1))
-    mapper=RGBDMapper();mapper.update(c,0.);result=mapper.update(shifted,.1)
+    mapper=RGBDMapper(tracking_backend='odometry');mapper.update(c,0.);result=mapper.update(shifted,.1)
     assert result.accepted
     assert abs(result.T_map_base[0,3]-.02)<.008
     assert abs(result.T_map_base[1,3])<.008

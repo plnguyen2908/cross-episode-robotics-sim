@@ -185,20 +185,9 @@ class CompositeController(ContainedPayloadMixin,BreakfastEpisode):
                 xy[1-axis]+=lateral
                 yield np.array([*xy,np.arctan2(-outward[1],-outward[0])])
             return
-        # High fridge shelves still have a full-height housing in front of
-        # the tucked arm; countertop-style 26 cm docks are too close.
-        distances = (((.50, .43, .35, .55) if pickup else (.43, .50, .35, .55)) if room == 'fridge' else
-                     ((.26, .30, .35, .43) if hi[2] >= .88 or
-                     self._surface_specs[room].get('burner_site') else (.35, .43, .50, .28)))
-        if self._surface_specs[room].get('burner_site'):
-            distances = (*distances, .50, .60, .70)
-        laterals = (0., -.10, .10, -.20, -.30, -.40) if room == 'fridge' else (0., -.10, .10)
-        for distance in distances:
-            for lateral in laterals:
-                xy = np.array(point[:2])
-                xy[axis] = (hi if outward[axis] > 0 else lo)[axis]+outward[axis]*distance
-                xy[1-axis] += lateral
-                yield np.array([*xy, np.arctan2(point[1]-xy[1],point[0]-xy[0])])
+        from cross_episode_sim.navigation.docking_candidates import household_surface_docks
+        yield from household_surface_docks(point,lo,hi,outward,fridge=room=='fridge',
+            burner=bool(self._surface_specs[room].get('burner_site')),pickup=pickup)
 
     def redock_loaded_for_placement(self):
         if getattr(self, '_public_skill_navigation', None) is False:

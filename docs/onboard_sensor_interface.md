@@ -4,6 +4,12 @@ Implemented on `feature/onboard-sensor-interface` in
 `/nobackup/le/cross-episode-sensors`. This is the sensor boundary only, not SLAM,
 DAAAM, navigation, ROS integration or VLA execution.
 
+Navigation observations also expose an optional `robot_mask`: a conservative
+projection of known robot geometry using measured arm/gripper joints. It excludes
+the moving robot from mapping without reading simulator segmentation or world
+poses. Raw RGB/depth are preserved; camera mounting and physical collisions are
+unchanged. The wrist observation currently leaves this mask unset.
+
 ## Use
 
 ```python
@@ -93,3 +99,7 @@ mount/FOV checks passed. All four sensor tests passed (7.73 seconds).
 [Machine-readable report](../runs/sensor_interface_v2/report.json)
 
 Next: [RGB-D tracking and reconstruction](rgbd_slam.md).
+
+## Depth-return validity (local exploration update)
+
+`RGBDCamera.raw_depth_m` preserves the raw metric depth. `depth_m` marks isolated inconsistent returns as NaN and `valid_depth` excludes them. One agreeing 8-connected neighbor (within max(2 cm, 2% depth)) is sufficient to retain a return, preserving connected thin surfaces. Rejected samples are unknown, not filled or treated as free. See [local scan tests](local_exploration_scan.md).

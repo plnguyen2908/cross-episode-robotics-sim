@@ -1,0 +1,52 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 13b5c0a..85f4efd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -34,7 +34,7 @@ endif ()
+ 
+ # Find dependencies
+ # Eigen3
+-find_package(Eigen3 3.2 QUIET REQUIRED NO_MODULE)
++find_package(Eigen3 QUIET REQUIRED NO_MODULE)
+ if (ENABLE_MKL)
+     find_package(MKL)
+     if (MKL_FOUND)
+diff --git a/cmake/teaserppConfig.cmake b/cmake/teaserppConfig.cmake
+index cd1967a..e21527d 100644
+--- a/cmake/teaserppConfig.cmake
++++ b/cmake/teaserppConfig.cmake
+@@ -1,6 +1,6 @@
+ get_filename_component(TEASERPP_CMAKE_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
+ include(CMakeFindDependencyMacro)
+ 
+-find_dependency(Eigen3 3.3 REQUIRED)
++find_dependency(Eigen3 REQUIRED)
+ 
+ include("${TEASERPP_CMAKE_DIR}/teaserppTargets.cmake")
+diff --git a/teaser/include/teaser/registration.h b/teaser/include/teaser/registration.h
+index 0e16f33..4705e31 100644
+--- a/teaser/include/teaser/registration.h
++++ b/teaser/include/teaser/registration.h
+@@ -1,3 +1,4 @@
++#include <cassert>
+ /**
+  * Copyright 2020, Massachusetts Institute of Technology,
+  * Cambridge, MA 02139
+diff --git a/teaser/src/graph.cc b/teaser/src/graph.cc
+index 5ed4872..3dcec04 100644
+--- a/teaser/src/graph.cc
++++ b/teaser/src/graph.cc
+@@ -1,3 +1,4 @@
++#include <cassert>
+ /**
+  * Copyright 2020, Massachusetts Institute of Technology,
+  * Cambridge, MA 02139
+diff --git a/teaser/src/linalg.h b/teaser/src/linalg.h
+index 3fb7024..3d487f8 100644
+--- a/teaser/src/linalg.h
++++ b/teaser/src/linalg.h
+@@ -1,3 +1,4 @@
++#include <cassert>
+ /**
+  * Copyright (c) 2020, Massachusetts Institute of Technology,
+  * Cambridge, MA 02139

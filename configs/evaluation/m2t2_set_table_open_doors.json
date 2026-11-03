@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "task": "set_table",
+  "split": "test_two_rooms",
+  "selection_rule": "All saved two-room set_table episodes with every connecting door initially open; sorted by episode ID, independent of M2T2 outcome.",
+  "first_episode": "set_table_000002",
+  "episodes": [
+    {
+      "episode_id": "set_table_000002",
+      "source": "/nobackup/le/cross-episode-robotics-sim/runs/train_test_v1/test_two_rooms/batches/round_continuous/set_table_000002",
+      "instruction": "Set the dining table for 2 people. Give each place setting one bowl and one cup. Leave extra items where they are. Finish with an empty gripper.",
+      "people": 2,
+      "initial_doors": {
+        "room_door_0": "open"
+      },
+      "status": "selected_not_evaluated"
+    },
+    {
+      "episode_id": "set_table_000003",
+      "source": "/nobackup/le/cross-episode-robotics-sim/runs/train_test_v1/test_two_rooms/batches/round_continuous/set_table_000003",
+      "instruction": "Set the dining table for 2 people. Give each place setting one bowl and one cup. Leave extra items where they are. Finish with an empty gripper.",
+      "people": 2,
+      "initial_doors": {
+        "room_door_0": "open"
+      },
+      "status": "selected_not_evaluated"
+    },
+    {
+      "episode_id": "set_table_000006",
+      "source": "/nobackup/le/cross-episode-robotics-sim/runs/train_test_v1/test_two_rooms/batches/round_continuous/set_table_000006",
+      "instruction": "Set the dining table for 2 people. Give each place setting one bowl and one cup. Leave extra items where they are. Finish with an empty gripper.",
+      "people": 2,
+      "initial_doors": {
+        "room_door_0": "open"
+      },
+      "status": "selected_not_evaluated"
+    }
+  ],
+  "reset_policy": "Restore recorded initial state without opening doors, changing posture, or moving objects.",
+  "policy_inputs": [
+    "task instruction",
+    "onboard navigation RGB-D",
+    "onboard wrist RGB-D",
+    "camera calibration",
+    "robot proprioception",
+    "online estimated map"
+  ],
+  "private_only": [
+    "source scene reset",
+    "selection metadata",
+    "semantic success scoring"
+  ],
+  "execution": "SLAM/One-Ring navigation and sensor docking; M2T2 manipulation",
+  "status": "Selection complete; full carry/place pipeline not yet validated"
+}

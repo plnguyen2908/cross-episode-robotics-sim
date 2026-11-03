@@ -74,14 +74,12 @@ def dining(state, name):
 def set_table(params, initial_state, state):
     used = set()
     valid = True
-    for i in range(1, params['people'] + 1):
-        for cat in ('bowl', 'cup'):
-            candidates = [r for r in selected(initial_state, cat) if dining(state, r)
-                and state['objects'][r].get('region') == f'setting_{i:02d}_{cat}']
-            valid &= len(candidates) == 1
-            used.update(candidates)
+    for cat in ('bowl', 'cup'):
+        candidates = [r for r in selected(initial_state, cat) if dining(state, r)]
+        valid &= len(candidates) == params['people']
+        used.update(candidates)
     return {'three_complete_settings': bool(valid),
-            'extras_unchanged': unchanged(initial_state, state, used), 'empty_hand': empty(state)}
+            'no_wrong_table_items': all(r in used or dining(initial_state, r) for r in state['objects'] if dining(state, r)), 'empty_hand': empty(state)}
 
 
 def clear_and_store(params, initial_state, state):

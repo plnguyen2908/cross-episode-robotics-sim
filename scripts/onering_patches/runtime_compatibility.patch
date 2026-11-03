@@ -1,0 +1,96 @@
+diff --git a/architecture/models/spoc_models/common/action_decoder.py b/architecture/models/spoc_models/common/action_decoder.py
+index 1038271..9cb0078 100644
+--- a/architecture/models/spoc_models/common/action_decoder.py
++++ b/architecture/models/spoc_models/common/action_decoder.py
+@@ -1,5 +1,5 @@
+ from typing import Optional, Union, Callable
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ 
+ import torch
+ import torch.nn as nn
+@@ -25,7 +25,7 @@ def create_causal_mask(T: int, device: torch.device):
+ 
+ @dataclass
+ class ActionDecoderConfig:
+-    decoder: TransformerConfig = TransformerConfig(3, 512, 8, True)
++    decoder: TransformerConfig = field(default_factory=lambda: TransformerConfig(3, 512, 8, True))
+     max_length: int = 1000
+     an_object_is_in_hand: bool = True
+     action_space: SPOCV1ActionSpace = None
+diff --git a/architecture/models/spoc_models/common/goal_cond_visual_encoder.py b/architecture/models/spoc_models/common/goal_cond_visual_encoder.py
+index 63b6610..a8bd3af 100644
+--- a/architecture/models/spoc_models/common/goal_cond_visual_encoder.py
++++ b/architecture/models/spoc_models/common/goal_cond_visual_encoder.py
+@@ -1,4 +1,4 @@
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from typing import List
+ from enum import Enum
+ 
+@@ -12,7 +12,7 @@ from architecture.models.spoc_models.common.utils import (
+ 
+ @dataclass
+ class GoalCondVisualEncoderConfig:
+-    fusion_xformer: TransformerConfig = TransformerConfig(3, 512, 8, True)
++    fusion_xformer: TransformerConfig = field(default_factory=lambda: TransformerConfig(3, 512, 8, True))
+ 
+     visual_features: List[str] = None
+     frames_features_dim: int = None
+diff --git a/training/offline/train_utils.py b/training/offline/train_utils.py
+index 70ab0d5..c457907 100644
+--- a/training/offline/train_utils.py
++++ b/training/offline/train_utils.py
+@@ -5,10 +5,7 @@ from contextlib import closing
+ 
+ import torch
+ from torch.utils.data import DataLoader
+-from torchmetrics import Precision, Recall, F1Score
+ 
+-from training.offline.dataset_mixtures import get_mixture_by_name
+-from training.offline.ilearn_dataset import iLearnMultitaskDataset
+ 
+ 
+ def process_batch_for_model(batch, preprocessor, input_sensors):
+@@ -41,6 +38,7 @@ def put_model_on_train(model, device):
+ 
+ 
+ def get_eval_metric_functions(num_classes, device):
++    from torchmetrics import Precision, Recall, F1Score
+     metric_fn = dict()
+     metric_fn["precision"] = Precision(
+         task="multiclass", num_classes=num_classes, ignore_index=-1, average=None
+@@ -87,6 +85,8 @@ def calculate_metrics(outputs, batch, metric_fn):
+ 
+ 
+ def get_dataloader(subset, args, rank, num_procs):
++    from training.offline.dataset_mixtures import get_mixture_by_name
++    from training.offline.ilearn_dataset import iLearnMultitaskDataset
+     dataset = iLearnMultitaskDataset(
+         base_data_dir=args.data_dir,
+         dataset_names=get_mixture_by_name(args.dataset_version),
+diff --git a/utils/string_utils.py b/utils/string_utils.py
+index b464bb1..d716f38 100644
+--- a/utils/string_utils.py
++++ b/utils/string_utils.py
+@@ -4,7 +4,6 @@ import numpy as np
+ import re
+ import json
+ from utils.type_utils import REGISTERED_TASK_PARAMS
+-from utils.task_spec_to_instruction import REGISTERED_INSTRUCTION_TYPES
+ 
+ 
+ def convert_string_to_byte(str_to_encode, max_len):
+@@ -40,10 +39,12 @@ def json_templated_spec_to_dict(task_string):
+ 
+ 
+ def get_natural_language_spec(task_type, task_data):
++    from utils.task_spec_to_instruction import REGISTERED_INSTRUCTION_TYPES
+     return REGISTERED_INSTRUCTION_TYPES[task_type](task_data)
+ 
+ 
+ def json_templated_to_NL_spec(task_string):
++    from utils.task_spec_to_instruction import REGISTERED_INSTRUCTION_TYPES
+     task_dict = json_templated_spec_to_dict(task_string)
+     return REGISTERED_INSTRUCTION_TYPES[task_dict["task_type"]](task_dict)
+ 

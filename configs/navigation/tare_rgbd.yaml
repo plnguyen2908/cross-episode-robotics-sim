@@ -1,0 +1,42 @@
+# Overrides of upstream indoor.yaml. Trial, not qualified whole-house defaults.
+# All inputs originate in RGB-D + visual SLAM. No simulator boundary is supplied.
+kRushHome: false
+kNoExplorationReturnHome: false
+kExtendWayPoint: false
+kLookAheadDistance: 1.0
+# Upstream SelectViewPoint samples using the original queue length after erasing
+# entries from queue_copy. Greedy range=1 avoids that out-of-bounds random index
+# without changing source. With deterministic selection, repeated trials add no value.
+kGreedyViewPointSampleRange: 1
+kLocalPathOptimizationItrMax: 1
+kUseTerrainHeight: false
+kCheckTerrainCollision: false  # no fabricated terrain map; 3D collision cloud stays enabled
+kSensorRange: 6.0
+kSurfaceCloudDwzLeafSize: 0.15
+kCollisionCloudDwzLeafSize: 0.1
+kKeyposeCloudDwzFilterLeafSize: 0.1
+kFrontierClusterTolerance: 0.4
+kFrontierClusterMinSize: 5
+rolling_occupancy_grid/resolution_x: 0.15
+rolling_occupancy_grid/resolution_y: 0.15
+rolling_occupancy_grid/resolution_z: 0.15
+viewpoint_manager/number_x: 40
+viewpoint_manager/number_y: 40
+viewpoint_manager/number_z: 1
+viewpoint_manager/resolution_x: 0.3
+viewpoint_manager/resolution_y: 0.3
+viewpoint_manager/resolution_z: 0.0
+# Planner positions are optical centres ~1.7m above the floor, behind the base.
+# Sensor-centred proposal envelope only. This cannot certify the offset base:
+# the follower checks the actual base route and live full-height depth separately.
+# A 1m sensor-centred circumscribed envelope rejected traversable doorways.
+kViewPointCollisionMargin: 0.55
+kViewPointCollisionMarginZPlus: 0.2
+kViewPointCollisionMarginZMinus: 1.65
+kCollisionGridResolutionX: 0.1
+kCollisionGridResolutionY: 0.1
+kCollisionPointThr: 1
+kCoverageDilationRadius: 0.15
+kMinAddPointNumSmall: 10
+kMinAddPointNumBig: 20
+kMinAddFrontierPointNum: 5

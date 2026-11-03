@@ -1,0 +1,25 @@
+diff --git a/utils/string_utils.py b/utils/string_utils.py
+index b464bb1..d716f38 100644
+--- a/utils/string_utils.py
++++ b/utils/string_utils.py
+@@ -4,7 +4,6 @@ import numpy as np
+ import re
+ import json
+ from utils.type_utils import REGISTERED_TASK_PARAMS
+-from utils.task_spec_to_instruction import REGISTERED_INSTRUCTION_TYPES
+ 
+ 
+ def convert_string_to_byte(str_to_encode, max_len):
+@@ -40,10 +39,12 @@ def json_templated_spec_to_dict(task_string):
+ 
+ 
+ def get_natural_language_spec(task_type, task_data):
++    from utils.task_spec_to_instruction import REGISTERED_INSTRUCTION_TYPES
+     return REGISTERED_INSTRUCTION_TYPES[task_type](task_data)
+ 
+ 
+ def json_templated_to_NL_spec(task_string):
++    from utils.task_spec_to_instruction import REGISTERED_INSTRUCTION_TYPES
+     task_dict = json_templated_spec_to_dict(task_string)
+     return REGISTERED_INSTRUCTION_TYPES[task_dict["task_type"]](task_dict)
+ 

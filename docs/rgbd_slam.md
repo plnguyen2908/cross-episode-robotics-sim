@@ -1,9 +1,15 @@
 # Step 2: sensor-only RGB-D tracking and reconstruction
 
-`RGBDMapper` uses Open3D 0.19's native hybrid frame-to-frame RGB-D odometry
-and TSDF fusion. Depth is converted from metres to uint16 millimetres for the
+Latest qualification: [RGB-D with verified VGGT recovery](rgbd_verified_recovery.md).
+The current default tracker combines RGB-D feature keyframes with Open3D odometry
+bridges and TSDF fusion. Optional learned recovery is exposed through
+`recovery_factory`; the legacy pure-odometry backend remains available for comparisons.
+The original measurements below used Open3D 0.19; the recovery suite uses 0.20.
+Depth is converted from metres to uint16 millimetres for the
 upstream fusion API; the sensor interface retains metric float depth. It does not implement
-loop closure, global relocalization, exploration, semantic mapping or navigation.
+global pose-graph optimization, general map-wide relocalization, exploration,
+semantic mapping or navigation. Verified recovery against recent reference views
+is now implemented and tested, as documented above.
 Those remain acceptance gaps before step 2 is complete for arbitrary houses.
 
 ## Interface
@@ -131,3 +137,5 @@ settings and are not an isolated ablation.
 - [Interactive map](../runs/slam_v7/interactive_map.html)
 - [Diagnostic comparison with simulator truth](../runs/slam_v7/diagnostics.png)
 - [Report](../runs/slam_v7/report.json)
+
+See [Step 3: observed navigation map](observed_navigation_map.md) for the onboard-only clearance interface and visualizations.

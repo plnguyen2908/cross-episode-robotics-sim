@@ -1,0 +1,13 @@
+diff --git a/include/kimera_rpgo/utils/pose_4dof.h b/include/kimera_rpgo/utils/pose_4dof.h
+index 8162199..9590260 100644
+--- a/include/kimera_rpgo/utils/pose_4dof.h
++++ b/include/kimera_rpgo/utils/pose_4dof.h
+@@ -25,7 +25,7 @@
+ 
+ namespace gtsam {
+ 
+-static const Eigen::MatrixBase<Eigen::Vector3d>::ConstantReturnType Z_1x3 =
++static const Eigen::Vector3d Z_1x3 =
+     Eigen::Vector3d::Zero();
+ 
+ /**

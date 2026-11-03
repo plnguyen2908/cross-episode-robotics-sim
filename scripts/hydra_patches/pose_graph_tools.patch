@@ -1,0 +1,10 @@
+diff --git a/pose_graph_tools/include/pose_graph_tools/bow_vector.h b/pose_graph_tools/include/pose_graph_tools/bow_vector.h
+index 5ae566c..99587ae 100644
+--- a/pose_graph_tools/include/pose_graph_tools/bow_vector.h
++++ b/pose_graph_tools/include/pose_graph_tools/bow_vector.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <cstdint>
+ 
+ #include <memory>
+ #include <vector>
