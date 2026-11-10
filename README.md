@@ -1,5 +1,27 @@
 # Cross-Episode Robotics Sim
 
+## Sensor pipeline SLAM default
+
+The sensor-only pipeline uses **CUDA SIFT + CUDA RGB-D fusion**, eight OpenCV
+CPU threads, and every supplied observation (no new frame skipping). Run it with
+`.venv-sift/bin/python`; prepare that environment with
+`bash scripts/setup_gpu_slam.sh` after the existing sensor dependencies are installed.
+The shell pipeline launchers select this interpreter by default; `SENSOR_PYTHON`
+can override it. Full-pipeline entry points `scripts/run_sensor_set_table.py` and
+`scripts/qualify_sensor_set_table.py` should also be launched with this interpreter.
+
+`CUDA_VISIBLE_DEVICES` chooses the physical GPU; `CUDA:0` is the first visible
+GPU. Missing CUDA dependencies produce an error, not a silent CPU fallback.
+Explicit CPU diagnostics require both `CROSS_SIM_MAPPING_DEVICE=CPU:0` and
+`CROSS_SIM_RGBD_FEATURES=opencv`. DA3 is an explicit experimental backend.
+See [SLAM measurements, limitations and overrides](docs/rgbd_slam_optimization.md).
+The full set-table runner now uses [exploration-first execution](docs/exploration_first_pipeline.md):
+observe the dining destination empty-handed, retain the map, then execute transfers.
+Optional [semantic furniture navigation](docs/semantic_furniture_navigation.md) labels
+receptacles during exploration, routes to their observed viewpoints with frozen-map
+A*, and hands nearby object search to One-Ring. Physical qualification is documented there.
+
+
 A MuJoCo/RoboCasa household simulation and demonstration generator for studying
 **compositional planning, reusable robot skills, and generalization to new tasks
 and settings**. A TidyBot++ mobile base carries a Franka FR3 arm and Robotiq 2F-85
@@ -478,3 +500,8 @@ the targets. Replacement sampling has no round limit. See the guide for resume a
 Per-task fine-tuning/test indices are saved under `tasks/TASK/SPLIT/manifest.json`,
 with a task-specific object inventory. For five tasks the targets total **5 hours
 training and 2.5 hours testing**; all tasks share the same GPU worker pool.
+
+
+### M2T2 skill interface migration
+
+The M2T2 skill interface (`cross_episode_sim.skills.m2t2_interface.M2T2SkillInterface`) has a continuous skill dispatcher and an initial set-table navigation adapter. See [the interface contract, navigation stages, and migration status](docs/sensor_skill_interface.md). Exploration, navigation, pick and place are wired into the continuous set-table runtime. A fresh two-person set-table episode passed through the interface (17 public calls,33 backend stages): [result and timings](docs/m2t2_interface_run57.md). Broader scene qualification and fixture-handler integration remain incomplete. The oracle/datagen rollback interface remains separate.

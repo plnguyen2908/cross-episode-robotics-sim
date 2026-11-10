@@ -11,39 +11,12 @@ class Detection:
     score: float
     box: tuple[float, float, float, float]
     mask: np.ndarray | None = None
+    point: tuple[float, float] | None = None
 
 
 class ObjectDetector(Protocol):
     def detect(self, rgb: np.ndarray) -> list[Detection]: ...
 
-
-class GroundingDinoDetector:
-    def __init__(self, device='cuda', model='IDEA-Research/grounding-dino-tiny', threshold=.3,verify_tables=True):
-        import torch
-        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-        self.torch=torch; self.device=device; self.threshold=threshold
-        self.processor=AutoProcessor.from_pretrained(model)
-        self.model=AutoModelForZeroShotObjectDetection.from_pretrained(model).to(device).eval()
-        self.table_verifier=TableVerifier(device) if verify_tables else None
-
-    def detect(self, rgb, text=None):
-        from PIL import Image
-        inputs=self.processor(images=Image.fromarray(rgb),text=text or 'a cup. a mug. a drinking glass. a wine glass. a bowl. a dining table. a kitchen countertop. the floor. a robot arm. a chair.',return_tensors='pt').to(self.device)
-        with self.torch.inference_mode(): outputs=self.model(**inputs)
-        result=self.processor.post_process_grounded_object_detection(outputs,inputs.input_ids,threshold=self.threshold,text_threshold=.25,target_sizes=[rgb.shape[:2]])[0]
-        detections=[]
-        for box,score,label in zip(result['boxes'],result['scores'],result['text_labels']):
-            label=label.lower()
-            if any(word in label for word in ('countertop','floor','robot','chair')):continue
-            category=next((canonical for word,canonical in [('table','dining table'),('bowl','bowl'),('mug','cup'),('cup','cup'),('glass','cup')] if word in label),None)
-            if category:
-                coordinates=tuple(box.cpu().tolist())
-                if category=='dining table' and self.table_verifier is not None and not self.table_verifier.accept(rgb,coordinates):continue
-                detection=Detection(category,float(score),coordinates)
-                # Grounding DINO can emit nested duplicates for one object.
-                if any(d.label==category and box_iou(d.box,coordinates)>.5 for d in detections):continue
-                detections.append(detection)
-        return detections
 
 
 def locate_detection(camera, detection, T_map_base):
@@ -100,7 +73,7 @@ def locate_detection(camera, detection, T_map_base):
     return point
 
 
-def table_points(camera,detection,T_map_base):
+def table_points(camera,detection,T_map_base,*,support_options=None):
     mask=np.zeros(camera.depth_m.shape,bool)
     if detection.mask is not None:mask[:]=detection.mask
     else:
@@ -111,7 +84,7 @@ def table_points(camera,detection,T_map_base):
     T=T_map_base@camera.T_base_optical
     # A detector box legitimately includes floor between table legs. The
     # support-fraction test applies to an actual segmented object mask only.
-    mask=table_surface_mask(camera.depth_m,mask,camera.K,T,min_surface_fraction=.2 if detection.mask is not None else 0.)
+    mask=table_surface_mask(camera.depth_m,mask,camera.K,T,min_surface_fraction=.2 if detection.mask is not None else 0.,**(support_options or {}))
     return compact_surface(project_mask(camera.depth_m,mask,camera.K,T)) if mask.any() else np.empty((0,3))
 
 

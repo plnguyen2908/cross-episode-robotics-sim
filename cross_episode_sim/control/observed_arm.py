@@ -12,6 +12,18 @@ def robot_calibration(model,data,output):
     import mujoco
     from cross_episode_sim.robot.arm_model import export_arm_model
     from cross_episode_sim.robot.profile import MOBILE_FRANKA
+    from cross_episode_sim.runtime.episode import current_runtime
+    runtime=current_runtime();cache_key=None
+    if runtime is not None and runtime.artifact_root is not None:
+        active=set(MOBILE_FRANKA.arm_joints+MOBILE_FRANKA.torso_joints)
+        fixed=[]
+        for j in range(model.njnt):
+            name=model.joint(j).name or ''
+            if name.startswith('robot_0/') and name.split('robot_0/',1)[1] not in active and name not in ('robot_0/base_x','robot_0/base_y','robot_0/base_theta'):
+                fixed.append((name,float(data.qpos[model.jnt_qposadr[j]])))
+        cache_key=tuple(fixed)
+        if not hasattr(runtime,'robot_calibrations'):runtime.robot_calibrations={}
+        if cache_key in runtime.robot_calibrations:return runtime.robot_calibrations[cache_key]
     local=mujoco.MjData(model)
     for j in range(model.njnt):
         name=model.joint(j).name or ''
@@ -27,6 +39,7 @@ def robot_calibration(model,data,output):
         if joint.find('child').get('link')=='base':
             joint.find('origin').set('xyz','0 0 0');joint.find('origin').set('rpy','0 0 0')
     tree.write(kin['urdf_path'])
+    if cache_key is not None:runtime.robot_calibrations[cache_key]=kin
     return kin
 
 
@@ -42,7 +55,8 @@ class ObservedArmPlanner:
         quat=Rotation.from_matrix(R.T).as_quat(scalar_first=True).tolist()
         dims=[grid.config.resolution+.01,grid.config.resolution+.01,grid.config.height_resolution+.01]
         self.boxes=[Cuboid(name=f'observed_{i}',pose=p.tolist()+quat,dims=dims) for i,p in enumerate(points)]
-        self.arm=RobotArmPlanner(None,{},kinematics=kinematics,collision_cache={'cuboid':max(16,len(self.boxes)+1+extra_obstacle_capacity),'mesh':2})
+        from .planner_cache import sensor_arm_planner
+        self.arm=sensor_arm_planner(kinematics,collision_cache={'cuboid':max(16,len(self.boxes)+1+extra_obstacle_capacity),'mesh':2})
         self.arm.planner.update_world(SceneCfg(cuboid=self.boxes))
         self.dt=self.arm.dt
     def plan(self,measured_joints,goal_position,goal_rotation):

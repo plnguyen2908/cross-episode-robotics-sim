@@ -55,6 +55,8 @@ class TargetFollower(HouseExplorer):
         eligible=(separation>=.48)&(separation<=self.max_distance)
         for rejected in self.rejected_views.get(self.target.track_id,[]):
             eligible &= np.linalg.norm(points-rejected,axis=1)>.35
+        for failed in self.failed_goals:
+            eligible &= np.linalg.norm(points-failed,axis=1)>.20
         candidates=np.flatnonzero(eligible)
         if not len(candidates):return 'target_not_reachable_yet'
         ranked=sorted(candidates,key=lambda i:costs[tuple(nodes[i])]*self.grid.config.resolution+6*abs(separation[i]-self.preferred_distance))
@@ -130,6 +132,7 @@ class SemanticNavigator:
         if packet.timestamp-self.last_detection>=self.detection_period:
             self.last_detection=packet.timestamp
             self.needs_confirmation=False
+            self.pending_categories=set()
             if hasattr(self.detector,'set_map_targets'):self.detector.set_map_targets(self.targets.targets+self.remembered_object_hypotheses,tracking)
             for name,camera in packet.cameras.items():
                 started=time.perf_counter()
@@ -137,6 +140,7 @@ class SemanticNavigator:
                 self.detection_wall_seconds+=time.perf_counter()-started;self.detection_calls+=1
                 self.last_detections[name]=detections
                 self.needs_confirmation |= getattr(self.detector,'needs_confirmation',False)
+                self.pending_categories.update(getattr(self.detector,'pending_categories',set()))
                 if self.object_mapper is None:self.targets.update(camera,detections,tracking,packet.timestamp)
             if self.object_mapper is not None:
                 self.last_mapping=(self.object_mapper.update_many(packet.cameras,tracking,self.last_detections,packet.timestamp)

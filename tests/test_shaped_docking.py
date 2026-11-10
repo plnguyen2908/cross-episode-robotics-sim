@@ -318,3 +318,50 @@ def test_spatial_collision_query_matches_exhaustive_boxes():
         points[:,:2]=(points[:,:2]-pose[:2])@rotation(pose[2])
         collision=any(np.any(np.all(np.abs((points-b.center)@b.axes)<=b.half+pad,axis=1)) for b in shapes)
         assert check.clear(pose)==(not collision)
+
+
+def test_payload_hull_excludes_empty_box_corners_but_blocks_real_overlap():
+    from scipy.spatial import ConvexHull
+    points=np.array([[.2,0,0],[-.2,0,0],[0,.2,0],[0,-.2,0],[0,0,.2],[0,0,-.2]])
+    payload=RobotBox('observed_payload',np.array([.6,0,1.]),np.eye(3),np.array([.22]*3),ConvexHull(points).equations,.02)
+    g=grid();g.config=MapConfig(extent_m=6,resolution=.1,height_resolution=.1)
+    # The diagonal corner lies inside the broad padded box but outside the
+    # padded observed hull. Use unchanged checker safety/voxel margins.
+    point=np.array([[.89,.29,1.29]])
+    broad=RobotBox(payload.name,payload.center,payload.axes,payload.half)
+    assert not ObservedShapeChecker(g,boxes()+[broad],np.zeros(3),additional_points=point).clear(np.zeros(3))
+    assert ObservedShapeChecker(g,boxes()+[payload],np.zeros(3),additional_points=point).clear(np.zeros(3))
+    assert not ObservedShapeChecker(g,boxes()+[payload],np.zeros(3),additional_points=np.array([[.7,0,1.]])).clear(np.zeros(3))
+    assert not ObservedShapeChecker(g,boxes()+[payload],np.zeros(3),additional_points=np.array([[.84,0,1.]])).clear(np.zeros(3))
+
+
+def test_carry_posture_is_not_a_false_unreachable_result():
+    """Run51 regression: valid placement targets failed from the cup posture."""
+    import mujoco
+    source=Path('/nobackup/le/cross-episode-robotics-sim/runs/train_test_v1/test_two_rooms/batches/round_continuous/set_table_000000/action_recording/model.mjb')
+    if not source.exists():pytest.skip('qualification robot unavailable')
+    geometry=RobotGeometry(mujoco.MjModel.from_binary_path(str(source)))
+    q=np.array([2.0607776578490444,-.8084927329780532,-.6261421923810083,
+                -.7416246103914835,2.368518533046018,4.2580841718931834,2.6310260874075113])
+    original=q.copy()
+    for distance in (.5,.58,.66):
+        target=np.array([distance,0.,.9060278]);solved=geometry.reach(target,q)
+        assert solved is not None
+        tcp=geometry.fk(solved)[geometry.tcp_body]@geometry.tcp_local
+        assert np.linalg.norm(tcp[:3,3]-target)<.01
+        assert np.all(solved>geometry.limits[:,0]) and np.all(solved<geometry.limits[:,1])
+    np.testing.assert_array_equal(q,original)  # Numerical seeds must not change robot state.
+    assert geometry.reach(np.array([5.,0.,.9]),q) is None
+
+
+def test_exploration_unknown_floor_does_not_disable_obstacle_checks():
+    g=grid();g.floor_views[:]=0
+    check=ObservedShapeChecker(g,boxes(),np.zeros(3),require_observed_support=False)
+    assert check.clear(np.array([.8,0.,0.]))
+    assert not g.floor_views.any()  # Never forge observed floor.
+    obstacle(g,np.array([.8,0.,.2]));check.refresh()
+    assert not check.clear(np.array([.8,0.,0.]))
+    assert check.detail['reason']=='observed_3d_collision'
+    ordinary=ObservedShapeChecker(g,boxes(),np.zeros(3))
+    assert not ordinary.clear(np.array([-.8,0.,0.]))
+    assert ordinary.detail['reason']=='unobserved_base_support'

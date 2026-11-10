@@ -11,7 +11,7 @@ class PlacementDock:
 
 
 def placement_docks(targets, current_pose, distances=(.58,.66,.50), angle_count=24,
-                    target_spacing=.15):
+                    target_spacing=.15, preferred_targets=None):
     """Sample all sides; face the chosen observed interior target at every dock.
 
     This proposes poses only. Observed swept collision/support checks, route
@@ -22,6 +22,7 @@ def placement_docks(targets, current_pose, distances=(.58,.66,.50), angle_count=
         raise ValueError('Expected finite observed placement points')
     _,indices=np.unique(np.floor(targets/target_spacing).astype(int),axis=0,return_index=True)
     targets=targets[np.sort(indices)]
+    preferred=np.asarray(preferred_targets if preferred_targets is not None else [],float).reshape(-1,3)
     result=[]
     for target in targets:
         for distance in distances:
@@ -31,7 +32,10 @@ def placement_docks(targets, current_pose, distances=(.58,.66,.50), angle_count=
                 result.append(PlacementDock(np.r_[xy,facing],target.copy(),distance))
     def cost(candidate):
         turn=(candidate.pose[2]-current_pose[2]+np.pi)%(2*np.pi)-np.pi
-        return np.linalg.norm(candidate.pose[:2]-current_pose[:2])+.12*abs(turn)
+        travel=np.linalg.norm(candidate.pose[:2]-current_pose[:2])+.12*abs(turn)
+        # Try docks facing the perceived empty patch first, then other free
+        # patches if the preferred one has no reachable collision-free dock.
+        return (float(np.linalg.norm(preferred-candidate.target,axis=1).min()),travel) if len(preferred) else (0.,travel)
     return sorted(result,key=cost)
 
 

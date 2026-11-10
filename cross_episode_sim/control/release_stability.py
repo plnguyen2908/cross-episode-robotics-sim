@@ -19,7 +19,10 @@ class ReleaseStability:
         optical=corners@T[:3,:3].T+T[:3,3]
         h,w=gray.shape
         if np.any(optical[:,2]<=.03):
-            self.stable_since=None;return False
+            self.stable_since=None;self.motion_window=[];self.previous=None;self.previous_shape=None
+            self.previous_time=float(timestamp)
+            self.events.append(dict(timestamp=float(timestamp),valid_pixels=0,ready=False,reason='placement_region_behind_camera'))
+            return False
         uv=optical@camera.K.T;uv=uv[:,:2]/uv[:,2:3]
         lo=np.maximum(np.floor(uv.min(0)).astype(int),[0,0]);hi=np.minimum(np.ceil(uv.max(0)).astype(int)+1,[w,h])
         mask=np.zeros((h,w),bool);mask[lo[1]:hi[1],lo[0]:hi[0]]=True
@@ -54,3 +57,20 @@ class ReleaseStability:
         self.previous_shape=shape
         self.events.append(dict(timestamp=float(timestamp),valid_pixels=int(mask.sum()),flow_px=flow_px,flow_m=flow_m,window_flow_rms_m=window_rms,shape_change_m=shape_change,ready=bool(ready)))
         return bool(ready)
+
+
+class MultiViewReleaseStability:
+    """Require sustained stability in every usable view; occluded views abstain."""
+    def __init__(self, target_base, radius, **kwargs):
+        self.target=target_base;self.radius=radius;self.kwargs=kwargs
+        self.gates={};self.events=[]
+
+    def update(self, cameras, timestamp):
+        decisions=[]
+        for name,camera in cameras.items():
+            gate=self.gates.setdefault(name,ReleaseStability(self.target,self.radius,**self.kwargs))
+            accepted=gate.update(camera,timestamp)
+            if gate.events:self.events.append(dict(gate.events[-1],camera=name))
+            if gate.events and gate.events[-1].get("valid_pixels",0)>=100:
+                decisions.append(accepted)
+        return bool(decisions) and all(decisions)

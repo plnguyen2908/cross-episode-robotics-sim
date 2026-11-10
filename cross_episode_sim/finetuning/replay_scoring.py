@@ -41,7 +41,6 @@ class CompositeReplayScorer:
                 else:local=model.geom_aabb[g,:3]+corners*model.geom_aabb[g,3:]
                 points.extend(local@data.geom_xmat[g].reshape(3,3).T+data.geom_xpos[g])
             self.vertices[r['role']]=(np.asarray(points)-body.xpos)@body.xmat.reshape(3,3)
-        self.regions={f'setting_{i:02d}_{cat}':np.asarray(next(r for r in self.roles if r['role']==f'{cat}_{i:02d}')['destination_position']) for i in range(1,self.config['scene'].get('people',0)+1) for cat in ('bowl','cup')} if self.config['task']=='set_table' else {}
         self.on=False;self.duration={}
         self.rules=duration_rules(self.config['task'],json.loads((source/'initial_snapshot.json').read_text()))
         self.buttons={}
@@ -90,9 +89,6 @@ class CompositeReplayScorer:
                 local=(vertices-data.geom_xpos[gid])@data.geom_xmat[gid].reshape(3,3)
                 center,half=m.geom_aabb[gid,:3],m.geom_aabb[gid,3:]
                 if np.all(local[:,:2]>=center[:2]-half[:2]-.003) and np.all(local[:,:2]<=center[:2]+half[:2]+.003):region='interior'
-            if support=='dining_table':
-                matches=[k for k,xy in self.regions.items() if np.linalg.norm(body.xpos[:2]-xy[:2])<.07]
-                if len(matches)==1:region=matches[0]
             objects[r['role']]=dict(category=r['category'],support=support,region=region,position=body.xpos.tolist(),quaternion=body.xquat.tolist())
             if 'color' in r:objects[r['role']]['color']=r['color']
         fixtures={}

@@ -109,3 +109,20 @@ def test_map_growth_keeps_robot_support_in_same_coordinates():
     x,y=g.world_to_cell([0.,0.]);assert e.support[y,x]
     x,y=g.world_to_cell([-7.,0.]);assert not e.support[y,x]
     assert not g.floor_views.any()
+
+
+def test_near_grid_corner_is_followed_instead_of_replanning_same_route():
+    from types import SimpleNamespace
+    from cross_episode_sim.navigation.local_scan import ScanConfig
+    g=ObservedNavigationMap(MapConfig(extent_m=4.,resolution=.05));e=HouseExplorer(g)
+    # Two cm from a required corner: within the old 3 cm cutoff. The checked
+    # incoming segment is valid, but skipping straight to the exit is not.
+    xy=np.array([0.,0.]);corner=np.array([.02,0.]);goal=np.array([.02,.5])
+    pose=np.eye(4);e.phase='travel';e.goal=goal;e.path=[corner.copy(),goal.copy()]
+    e.free=np.ones(g.floor_views.shape,bool);e.obstacles=np.zeros_like(e.free)
+    e.last_time=.98;e.last_sensor=1.;e.last_progress=xy.copy();e.progress_time=1.
+    e._line_free=lambda a,b:not np.allclose(b,goal)
+    packet=SimpleNamespace(timestamp=1.,arm=SimpleNamespace(position=np.array(ScanConfig().stowed_arm)))
+    result=e.step(packet,SimpleNamespace(accepted=True,T_map_base=pose),1.)
+    assert result['status']=='travel' and result['forward']>0
+    assert len(e.path)==2 and not e.failed_goals and e.plans==0

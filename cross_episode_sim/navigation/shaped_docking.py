@@ -25,6 +25,8 @@ class RobotBox:
     center:np.ndarray
     axes:np.ndarray
     half:np.ndarray
+    hull_planes:np.ndarray | None=None
+    hull_margin:float=0.
 
 class RobotGeometry:
     """Copies only known robot kinematics and collision shapes, never scene poses."""
@@ -66,15 +68,66 @@ class RobotGeometry:
         from cross_episode_sim.robot.profile import MOBILE_FRANKA
         site=model.site('robot_0/'+MOBILE_FRANKA.tcp_site).id
         self.tcp_body=int(model.site_bodyid[site]);self.tcp_local=transform(model.site_pos[site],model.site_quat[site])
+    def _joint_transform(self,i,axis,pivot,zero,value):
+        # Numerical IK perturbs one coordinate at a time. Reuse the other
+        # six rotations exactly; no rounding, quantization, or approximate FK.
+        caches=getattr(self,'_joint_transform_cache',None)
+        if caches is None:self._joint_transform_cache=caches={}
+        cache=caches.setdefault(i,{})
+        angle=value-zero;key=np.float64(angle).tobytes()
+        A=cache.get(key)
+        if A is None:
+            A=np.eye(4);A[:3,:3]=Rotation.from_rotvec(axis*angle).as_matrix()
+            A[:3,3]=pivot-A[:3,:3]@pivot;A.setflags(write=False)
+            if len(cache)>=8:cache.pop(next(iter(cache)))
+            cache[key]=A
+        return A
+
     def fk(self,q):
         poses={self.root:np.eye(4)}
         for b,(parent,local,joints) in self.bodies.items():
             if b==self.root:continue
             T=poses[parent]@local
             for i,axis,pivot,zero in joints:
-                A=np.eye(4);A[:3,:3]=Rotation.from_rotvec(axis*(q[i]-zero)).as_matrix();A[:3,3]=pivot-A[:3,:3]@pivot;T=T@A
+                A=self._joint_transform(i,axis,pivot,zero,q[i]);T=T@A
             poses[b]=T
         return poses
+    def tcp_pose(self,q):
+        """Exact FK along the tool chain; omit unrelated collision/camera bodies.
+
+        Keep the same multiplication order as fk() so finite-difference IK
+        retains its numerical behavior. Full FK remains used for collisions.
+        """
+        chain=getattr(self,'_tcp_chain',None)
+        if chain is None:
+            chain=[];body=self.tcp_body
+            while body!=self.root:
+                chain.append(body);body=self.bodies[body][0]
+            self._tcp_chain=chain=tuple(reversed(chain))
+        T=np.eye(4)
+        for body in chain:
+            _,local,joints=self.bodies[body];T=T@local
+            for i,axis,pivot,zero in joints:
+                A=self._joint_transform(i,axis,pivot,zero,q[i]);T=T@A
+        return T@self.tcp_local
+
+    def tcp_pose_jacobian(self,q):
+        """TCP pose and geometric Jacobian from calibrated robot joints only."""
+        chain=[];body=self.tcp_body
+        while body!=self.root:
+            chain.append(body);body=self.bodies[body][0]
+        T=np.eye(4);axes=[]
+        for body in reversed(chain):
+            _,local,joints=self.bodies[body];T=T@local
+            for i,axis,pivot,zero in joints:
+                axes.append((i,T[:3,:3]@axis,T[:3,3]+T[:3,:3]@pivot))
+                A=self._joint_transform(i,axis,pivot,zero,q[i]);T=T@A
+        T=T@self.tcp_local;J=np.zeros((6,len(self.joint_names)))
+        if axes:
+            ids=[item[0] for item in axes];vectors=np.array([item[1] for item in axes]);pivots=np.array([item[2] for item in axes])
+            J[:3,ids]=np.cross(vectors,T[:3,3]-pivots).T;J[3:,ids]=vectors.T
+        return T,J
+
     def boxes(self,q):
         poses=self.fk(q);out=[]
         for b,geoms in self.geoms.items():
@@ -84,18 +137,26 @@ class RobotGeometry:
     def reach(self,target_base,q):
         from scipy.optimize import least_squares
         lo,hi=self.limits[:,0]+1e-5,self.limits[:,1]-1e-5
-        for tilt in (0.,math.pi/6,-math.pi/6,math.pi/3,-math.pi/3):
-            orientation=Rotation.from_euler('y',tilt).as_matrix()@np.diag([1.,-1.,-1.])
-            def residual(v):
-                T=self.fk(v)[self.tcp_body]@self.tcp_local
-                return np.r_[T[:3,3]-target_base,.2*Rotation.from_matrix(orientation@T[:3,:3].T).as_rotvec()]
-            r=least_squares(residual,np.clip(q,lo,hi),bounds=(lo,hi),max_nfev=100)
-            e=residual(r.x)
-            if np.linalg.norm(e[:3])<.01 and np.linalg.norm(e[3:])<.03:return r.x
+        # A carrying posture can sit in a poor numerical IK basin. Failure
+        # from that seed alone does not establish that a target is unreachable.
+        # These are optimizer seeds only; no posture command is executed here.
+        from cross_episode_sim.robot.profile import MOBILE_FRANKA
+        seeds=[np.clip(q,lo,hi),np.clip(np.asarray(MOBILE_FRANKA.travel_posture),lo,hi)]
+        for seed in seeds:
+            for tilt in (0.,math.pi/6,-math.pi/6,math.pi/3,-math.pi/3):
+                orientation=Rotation.from_euler('y',tilt).as_matrix()@np.diag([1.,-1.,-1.])
+                def residual(v):
+                    T=self.fk(v)[self.tcp_body]@self.tcp_local
+                    return np.r_[T[:3,3]-target_base,.2*Rotation.from_matrix(orientation@T[:3,:3].T).as_rotvec()]
+                r=least_squares(residual,seed,bounds=(lo,hi),max_nfev=100)
+                e=residual(r.x)
+                if np.linalg.norm(e[:3])<.01 and np.linalg.norm(e[3:])<.03:return r.x
         return None
 
 class ObservedShapeChecker:
-    def __init__(self,grid,boxes,initial_pose,margin=.035,support_poses=None):
+    def __init__(self,grid,boxes,initial_pose,margin=.035,support_poses=None,additional_points=None,require_observed_support=True):
+        self.require_observed_support=require_observed_support
+        self.additional_points=additional_points
         self.grid=grid;self.boxes=boxes;self.initial=np.asarray(initial_pose).copy();self.margin=margin
         # Floor support belongs to the physical base, not an enlarged collision
         # clearance square or the mast/arm projection. Keep full collision pads.
@@ -106,13 +167,28 @@ class ObservedShapeChecker:
         self.support_poses=[self.initial] if support_poses is None else [np.asarray(p).copy() for p in support_poses]
         self.detail=None;self.refresh()
     def refresh(self):
-        g=self.grid;ij=np.argwhere(g.evidence>=2)
-        self.points=np.column_stack((g.origin[0]+(ij[:,1]+.5)*g.config.resolution,g.origin[1]+(ij[:,0]+.5)*g.config.resolution,g.config.min_obstacle_height+(ij[:,2]+.5)*g.config.height_resolution))
+        g=self.grid
+        if hasattr(g,'fixed_obstacle_points'):
+            self.points=g.fixed_obstacle_points
+        else:
+            ij=np.argwhere(g.evidence>=2)
+            self.points=np.column_stack((g.origin[0]+(ij[:,1]+.5)*g.config.resolution,g.origin[1]+(ij[:,0]+.5)*g.config.resolution,g.config.min_obstacle_height+(ij[:,2]+.5)*g.config.height_resolution))
+        if self.additional_points is not None:
+            self.points=np.concatenate([self.points,np.asarray(self.additional_points).reshape(-1,3)])
         from scipy.spatial import cKDTree
         self.point_index=cKDTree(self.points[:,:2])
         self.spatial_index=cKDTree(self.points)
         self.support_mask=np.zeros(g.floor_views.shape,bool)
         for pose in self.support_poses:self.remember_support(pose)
+    def update_live_points(self,points):
+        """Refresh only immediate obstacles; retain the fixed map/support cache."""
+        if not hasattr(self.grid,'fixed_obstacle_points'):
+            raise ValueError('Live-only refresh requires a frozen navigation map')
+        from scipy.spatial import cKDTree
+        self.additional_points=np.asarray(points).reshape(-1,3)
+        self.points=np.concatenate([self.grid.fixed_obstacle_points,self.additional_points])
+        self.point_index=cKDTree(self.points[:,:2]);self.spatial_index=cKDTree(self.points)
+
     def remember_support(self,pose):
         """Cache only the footprint already occupied at an accepted SLAM pose."""
         col,row=self.grid.world_to_cell(self.support_local@rotation(pose[2]).T+pose[:2]).T
@@ -130,8 +206,14 @@ class ObservedShapeChecker:
             points=points[np.linalg.norm(points[:,:2]-xy,axis=1)<1.2]
             points[:,:2]=(points[:,:2]-xy)@R
             inside=np.all(np.abs((points-b.center)@b.axes)<=b.half+pad,axis=1)
+            if inside.any() and b.hull_planes is not None:
+                ids=np.flatnonzero(inside)
+                local=(points[ids]-b.center)@b.axes
+                planes=b.hull_planes
+                inside[ids]=np.all(local@planes[:,:3].T+planes[:,3]<=pad+b.hull_margin,axis=1)
             if inside.any():
                 self.detail={'reason':'observed_3d_collision','part':b.name,'points_base':points[inside][:8].tolist()};return False
+        if not self.require_observed_support:return True
         # Actual base support, not the mast/arm's projected radius.
         samples=self.support_local@R.T+xy;col,row=g.world_to_cell(samples).T
         valid=(row>=0)&(row<g.floor_views.shape[0])&(col>=0)&(col<g.floor_views.shape[1])
@@ -150,9 +232,10 @@ class ObservedShapeChecker:
         return all(self.clear(np.r_[np.asarray(a[:2])+(np.asarray(b[:2])-a[:2])*t,a[2]+d*t]) for t in np.linspace(0,1,n+1))
 
 class ShapedDocking:
-    """A* over base position AND heading; all execution is checked online."""
-    def __init__(self,grid,geometry,max_nodes=6000):
+    """Swept-checked base paths; lightweight following on a frozen map."""
+    def __init__(self,grid,geometry,max_nodes=6000,workspace_ranker=None):
         self.grid=grid;self.geometry=geometry;self.max_nodes=max_nodes
+        self.workspace_ranker=workspace_ranker
         self.support_poses=[]
         self.target=None;self.terminal=None;self.path=None;self.events=[];self.velocity=np.zeros(2);self.started=None;self.last_frame=None;self.reach_joints=None
     def make_checker(self,pose,q):
@@ -160,7 +243,7 @@ class ShapedDocking:
         # SLAM. Replanning must not forget the starting/previous support cells.
         # This never clears occupancy and does not extrapolate unseen floor.
         self.record_support(pose)
-        return ObservedShapeChecker(self.grid,self.geometry.boxes(q),pose,support_poses=list(getattr(self.grid,'inherited_support_poses',[]))+self.support_poses+[pose])
+        return ObservedShapeChecker(self.grid,self.geometry.boxes(q),pose,support_poses=list(getattr(self.grid,'inherited_support_poses',[]))+self.support_poses+[pose],additional_points=getattr(self,'live_points',None),require_observed_support=getattr(self,'require_observed_support',True))
     def record_support(self,pose):
         """Remember actual estimated footprints, including room-search motion."""
         pose=np.asarray(pose)
@@ -168,6 +251,8 @@ class ShapedDocking:
             self.support_poses.append(pose.copy())
     def reset(self,target):
         self.target=target;self.terminal=None;self.path=None;self.started=None;self.velocity[:]=0;self.approaching=False;self.curve=None;self.clearance_retries=0;self.reobserve=None;self.retreat_attempts=0;self.surface_outward=None;self.alignment_refinements=0
+        from cross_episode_sim.control.execution_monitor import PlannedMotionMonitor
+        self.execution_monitor=PlannedMotionMonitor()
     def plan(self,pose,q):
         self.checker=self.make_checker(pose,q)
         if not self.checker.clear(pose):
@@ -384,6 +469,11 @@ class ShapedDocking:
                 self.checker=self.make_checker(pose,packet.arm.position)
                 candidates=[];solutions={};candidate_rejections=[]
                 for candidate in frontal_surface_docks(self.target.position,lo,hi,outward):
+                    # Keep margin inside the unchanged .50-.72 m readiness band.
+                    # Small observed surface-centroid updates must not turn a
+                    # valid plan into an unnecessarily close final dock.
+                    gap=np.linalg.norm(candidate[:2]-self.target.position[:2])
+                    if not .55<=gap<=.67:continue
                     if not self.checker.clear(candidate):
                         candidate_rejections.append(dict(goal=candidate.tolist(),detail=self.checker.detail));continue
                     pregrasp=self.target.position.copy();pregrasp[2]+=.08
@@ -391,6 +481,13 @@ class ShapedDocking:
                     solution=self.geometry.reach(pregrasp,packet.arm.position)
                     if solution is not None:
                         candidates.append(candidate);solutions[tuple(candidate)]=solution
+                if self.workspace_ranker is not None and candidates:
+                    candidates,ranking=self.workspace_ranker.rank(self.target.position,candidates,pose)
+                    self.events.append(dict(event='workspace_dock_ranking',candidates=ranking,
+                        selection='IK perturbation margin, then sampled success, then base travel'))
+                    # Ranking uses representative grasp orientations. Retain
+                    # the execution backend's checked pregrasp solution rather
+                    # than treating a robot-only atlas sample as that solution.
                 if not candidates:self.events.append(dict(event='pickup_candidates_rejected',rejected=candidate_rejections))
                 accepted=self.plan_candidates(pose,packet.arm.position,candidates,source="frontal_pickup_candidate")
                 if accepted:
@@ -400,12 +497,21 @@ class ShapedDocking:
             except ValueError as exc:
                 self.events.append(dict(event='surface_unverified',reason=str(exc)));accepted=False
             self.approaching=False
+            if not accepted and hasattr(self.grid,'fixed_obstacle_points'):
+                from .coverage import exploration_request
+                details=[r.get('detail',{}) for e in self.events[-6:] for r in e.get('rejected',[])]
+                details.append(getattr(self.checker,'detail',None))
+                for detail in details:
+                    request=exploration_request(self.grid,detail,'docking')
+                    if request is not None:
+                        self.terminal='exploration_required';stop(self.terminal);return request
             if not accepted:accepted=self.plan_observe(pose,packet.arm.position)
             if not accepted:accepted=self.plan_advance(pose,packet.arm.position)
             if not accepted:accepted=self.plan_retreat(pose,packet.arm.position)
             if not accepted:self.terminal='shape_route_unverified';return stop(self.terminal)
         if packet.timestamp!=self.last_frame:
-            self.checker.refresh();self.checker.remember_support(pose);self.last_frame=packet.timestamp
+            if not hasattr(self.grid,'fixed_obstacle_points'):self.checker.refresh()
+            self.checker.remember_support(pose);self.last_frame=packet.timestamp
         while self.path and np.linalg.norm(self.path[0][:2]-pose[:2])<.025 and abs(wrap(self.path[0][2]-pose[2]))<(.015 if len(self.path)==1 else .045):self.path.pop(0)
         if not self.path and getattr(self,'approaching',False):
             self.path=None;self.curve=None;self.approaching=False
@@ -439,6 +545,16 @@ class ShapedDocking:
         if getattr(self,'curve',None) is not None:desired=self.curve_command(pose)
         limit=np.array([.4,.8])*.02
         nominal=self.velocity+np.clip(desired-self.velocity,-limit,limit)
+        if hasattr(self.grid,'fixed_obstacle_points'):
+            # Planning already checked this route and any smoothed curve.
+            # Do not rebuild a braking envelope against identical geometry
+            # at every 50-Hz control step. Reactive/non-frozen paths retain it.
+            if not self.execution_monitor.check(packet,tracking,now,*nominal):
+                self.events.append(dict(event='docking_execution_stop',detail=self.execution_monitor.detail))
+                self.terminal=self.execution_monitor.detail['reason']
+                return stop(self.terminal)
+            self.velocity=nominal
+            return dict(status='rolling_approach' if getattr(self,'approaching',False) else 'shape_docking',forward=float(nominal[0]),yaw=float(nominal[1]))
         # Select a slower reachable command if the nominal braking envelope
         # reaches newly observed geometry. Never weaken the clearance check.
         for scale in (1.,.75,.5,.25,0.):
@@ -457,6 +573,10 @@ class ShapedDocking:
                 self.velocity=cmd
                 return dict(status='rolling_approach' if getattr(self,'approaching',False) else 'shape_docking',forward=float(cmd[0]),yaw=float(cmd[1]))
         self.events.append(dict(event='shape_clearance_stop',detail=self.checker.detail,pose=pose.tolist(),predicted_pose=p.tolist(),command=cmd.tolist()))
+        from .coverage import exploration_request
+        request=exploration_request(self.grid,self.checker.detail,'docking')
+        if request is not None:
+            self.terminal='exploration_required';stop(self.terminal);return request
         if self.clearance_retries<3:
             self.clearance_retries+=1;self.reobserve=(packet.timestamp,pose.copy(),0)
             self.events.append(dict(event='clearance_replan',attempt=self.clearance_retries))

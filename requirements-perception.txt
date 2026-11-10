@@ -1,2 +1,9 @@
 # Install into the existing isolated sensor environment; retain its torch build.
 transformers==4.57.1
+
+# Local persistent model services (also install in the M2T2 worker environment).
+grpcio==1.85.1
+msgpack>=1.0,<2
+
+# Compiled exact collision predicate (validated runtime version).
+numba==0.68.0

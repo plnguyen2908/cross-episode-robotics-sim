@@ -35,3 +35,36 @@ def test_stationary_table_is_excluded_and_depth_motion_restarts_gate():
     c.depth_m[30:50,30:50]+=.002
     assert not gate.update(c,.4)
     assert gate.events[-1]['shape_change_m']>.001
+
+
+def test_navigation_can_verify_when_wrist_cannot_see_release():
+    from cross_episode_sim.control.release_stability import MultiViewReleaseStability
+    nav=camera();wrist=camera();wrist.T_base_optical=np.diag([1,-1,-1,1])
+    gate=MultiViewReleaseStability([0,0,1],.2,required_seconds=.3)
+    assert not gate.update(dict(navigation=nav,wrist=wrist),0.)
+    assert not gate.update(dict(navigation=nav,wrist=wrist),.1)
+    assert gate.update(dict(navigation=nav,wrist=wrist),.31)
+    assert not gate.gates['wrist'].events[-1]['ready']
+
+
+def test_lost_view_resets_stability_window():
+    c=camera();gate=ReleaseStability([0,0,1],.2,required_seconds=.3)
+    gate.update(c,0.);gate.update(c,.1)
+    c.T_base_optical=np.diag([1,-1,-1,1]);assert not gate.update(c,.2)
+    c.T_base_optical=np.eye(4)
+    assert not gate.update(c,.4)
+    assert not gate.update(c,.5)
+    assert gate.update(c,.71)
+
+
+def test_clear_wrist_motion_vetoes_stable_distant_view():
+    from cross_episode_sim.control.release_stability import MultiViewReleaseStability
+    nav=camera();wrist=camera()
+    gate=MultiViewReleaseStability([0,0,1],.2,required_seconds=.3)
+    gate.update(dict(navigation=nav,wrist=wrist),0.)
+    gate.update(dict(navigation=nav,wrist=wrist),.1)
+    wrist.rgb=np.roll(wrist.rgb,5,axis=1)
+    assert not gate.update(dict(navigation=nav,wrist=wrist),.31)
+    assert gate.gates['navigation'].events[-1]['ready']
+    assert not gate.gates['wrist'].events[-1]['ready']
+    assert gate.update(dict(navigation=nav,wrist=wrist),.62)

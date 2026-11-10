@@ -11,7 +11,7 @@ import imageio.v2 as imageio
 from PIL import Image,ImageDraw
 from tqdm import tqdm
 from cross_episode_sim.sensors import OnboardSensorInterface
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
 from cross_episode_sim.navigation.house_exploration import HouseExplorer,HouseExplorationConfig
 from cross_episode_sim.control.onboard_base import OnboardBaseActuator
@@ -57,7 +57,7 @@ def main():
     p.add_argument('--planner',choices=['custom','tare'],default='custom')
     a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False);cv2.setNumThreads(4)
     m,d,doors=setup(a.source);bridge=OnboardBaseActuator(m,d);audit=ContactAudit(m)
-    slam=RGBDMapper();grid=ObservedNavigationMap(MapConfig(pixel_stride=6));policy=HouseExplorer(grid,HouseExplorationConfig(max_seconds=a.seconds))
+    slam=create_mapper();grid=ObservedNavigationMap(MapConfig(pixel_stride=6));policy=HouseExplorer(grid,HouseExplorationConfig(max_seconds=a.seconds))
     planner_context=nullcontext()
     if a.planner=='tare':
         from cross_episode_sim.navigation.tare import TarePlanner
@@ -75,7 +75,7 @@ def main():
     with planner_context,OnboardSensorInterface(m,d) as sensors,imageio.get_writer(str(a.output/'exploration.mp4'),fps=10,codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart']) as video,open(a.output/'progress.jsonl','w',buffering=1) as progress:
         for tick in tqdm(range(round((a.seconds+2)*50)),desc=f'Whole-house exploration ({a.planner})'):
             if tick%5==0:
-                packet=sensors.capture();tracking=slam.update(packet.cameras['navigation'],packet.timestamp);grid.update(packet.cameras['navigation'],tracking)
+                packet=sensors.capture(include_robot_mask=False);tracking=slam.update(packet.cameras['navigation'],packet.timestamp);grid.update(packet.cameras['navigation'],tracking)
             if interrupted.value:policy.terminal='interrupted'
             try:
                 command=policy.step(packet,tracking,float(d.time))

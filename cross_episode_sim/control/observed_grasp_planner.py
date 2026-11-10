@@ -1,4 +1,5 @@
 """Robot-only IK and collision-validated motion for sensor-proposed grasp poses."""
+from cross_episode_sim.control.contact_retreat import tool_pose
 import time
 import numpy as np
 from scipy.spatial import cKDTree
@@ -40,13 +41,17 @@ class ObservedGraspPlanner:
     additional <=0.001-rad summed-joint intervals. Optional fallback: one cuRobo cspace attempt.
     No unsafe straight-line fallback is executed.
     """
-    def __init__(self,arm,geometry,boxes,allow_curobo_fallback=False, fixed_floor_support_spheres=None):
+    def __init__(self,arm,geometry,boxes,allow_curobo_fallback=False, fixed_floor_support_spheres=None, fast_ik=True):
         self.fixed_floor_support_spheres=np.asarray(fixed_floor_support_spheres if fixed_floor_support_spheres is not None else []).reshape(-1,4)
         self.allow_curobo_fallback=allow_curobo_fallback
+        self.fast_ik=fast_ik
         self.arm=arm;self.geometry=geometry;self.boxes=boxes;self.dt=.02;self.events=[]
-        self.centers=np.array([b.pose[:3] for b in boxes]);self.half=np.array([b.dims for b in boxes])/2
-        self.rotations=Rotation.from_quat(np.array([b.pose[3:] for b in boxes]),scalar_first=True).as_matrix()
-        self.tree=cKDTree(self.centers);self.max_diagonal=float(np.linalg.norm(self.half,axis=1).max())
+        self.centers=np.array([b.pose[:3] for b in boxes],dtype=float).reshape(-1,3)
+        self.half=np.array([b.dims for b in boxes],dtype=float).reshape(-1,3)/2
+        self.rotations=(Rotation.from_quat(np.array([b.pose[3:] for b in boxes]),scalar_first=True).as_matrix()
+                        if len(boxes) else np.empty((0,3,3)))
+        self.tree=cKDTree(self.centers);self.max_diagonal=float(np.linalg.norm(self.half,axis=1).max(initial=0.))
+        for array in (self.centers,self.half,self.rotations):array.setflags(write=False)
 
     def clear(self,positions,margin=.005):
         import torch
@@ -66,10 +71,48 @@ class ObservedGraspPlanner:
         return self.world_clear(spheres,margin)
 
     def world_clear(self,spheres,margin=.005):
+        # No static boxes says nothing about self collision or the moving panel;
+        # those are checked independently by clear()/ObservedHingedPlanner.
+        if not len(self.boxes):return True
         flat=spheres.reshape(-1,4);flat=flat[flat[:,3]>0]
         # Fixed base/link spheres repeat across trajectory samples. Exact
         # deduplication avoids rechecking them without changing swept coverage.
-        if len(flat)>256:flat=np.unique(flat,axis=0)
+        if len(flat)>256:
+            # Sort packed exact rows rather than four structured float fields.
+            # Signed-zero duplicates may remain; no distinct geometry is removed.
+            packed=np.ascontiguousarray(flat)
+            _,indices=np.unique(packed.view(np.dtype((np.void,packed.dtype.itemsize*4))).ravel(),return_index=True)
+            flat=packed[indices]
+        # Cache only exact sphere values against this immutable observed world.
+        # New planner/world or margin/support changes invalidate the cache.
+        geometry_signature=tuple((id(array),array.shape,None if not array.flags.writeable else array.tobytes())
+                                 for array in (self.centers,self.half,self.rotations))
+        if getattr(self,'_cached_geometry_signature',None)!=geometry_signature:
+            self._cached_geometry_signature=geometry_signature
+            self._world_half=np.einsum('nij,nj->ni',np.abs(self.rotations),self.half)
+            for name in ('_world_groups','_box_world_groups','_box_bvh'):
+                if hasattr(self,name):delattr(self,name)
+        signature=(geometry_signature,float(margin),getattr(self,'fixed_floor_support_spheres',np.empty((0,4))).tobytes())
+        if getattr(self,'_free_signature',None)!=signature:
+            self._free_signature=signature;self._free_spheres=set()
+            if hasattr(self,'_support_tree'):del self._support_tree
+        keys=[row.tobytes() for row in flat]
+        missing=np.array([key not in self._free_spheres for key in keys],dtype=bool)
+        new_keys=[key for key,needed in zip(keys,missing) if needed]
+        flat=flat[missing]
+        if getattr(self,'compiled_collision',True):
+            from .compiled_collision import build_box_bvh,sphere_box_bvh_collision
+            if not hasattr(self,'_box_bvh'):
+                self._box_bvh=build_box_bvh(self.centers,self.half,self.rotations)
+            i,j,gap=sphere_box_bvh_collision(np.ascontiguousarray(flat,dtype=np.float64),self.centers,self.half,
+                self.rotations,float(margin),
+                np.asarray(getattr(self,'fixed_floor_support_spheres',np.empty((0,4))),dtype=np.float64),*self._box_bvh)
+            if i>=0:
+                self.last_rejection={'kind':'observed_world_margin','gap':float(gap),'obstacle':self.boxes[j].name,'sphere':flat[i].tolist()}
+                return False
+            if len(self._free_spheres)+len(new_keys)>65536:self._free_spheres.clear()
+            self._free_spheres.update(new_keys)
+            return True
         for offset in range(0,len(flat),1024):
             block=flat[offset:offset+1024]
             # Size-bucket broad phase: a distant large wall must not inflate
@@ -105,14 +148,29 @@ class ObservedGraspPlanner:
             worst=int(distance.argmin())
             if distance[worst]<margin:
                 self.last_rejection={'kind':'observed_world_margin','gap':float(distance[worst]),'obstacle':self.boxes[box_ids[worst]].name,'sphere':block[sphere_ids[worst]].tolist()};return False
+        if len(self._free_spheres)+len(new_keys)>65536:self._free_spheres.clear()
+        self._free_spheres.update(new_keys)
         return True
 
     def world_clear_box(self,box,margin=.005):
         """Exact OBB separating-axis test; retain payload padding and margin."""
-        R=np.einsum('ij,njk->nik',box.axes.T,self.rotations)
+        if not len(self.boxes):return True
+        # Conservative bounding-sphere broad phase before exact OBB SAT.
+        if not hasattr(self,'_box_world_groups'):
+            radii=np.linalg.norm(self.half,axis=1)
+            bins=np.ceil(np.log2(np.maximum(radii,.025)/.025)).astype(int)
+            self._box_world_groups=[]
+            for key in np.unique(bins):
+                ids=np.flatnonzero(bins==key)
+                self._box_world_groups.append((ids,cKDTree(self.centers[ids]),float(radii[ids].max())))
+        parts=[ids[tree.query_ball_point(box.center,np.linalg.norm(box.half+margin)+radius)]
+               for ids,tree,radius in self._box_world_groups]
+        ids=np.concatenate(parts).astype(int)
+        if not len(ids):return True
+        R=np.einsum('ij,njk->nik',box.axes.T,self.rotations[ids])
         ab=np.abs(R)+1e-9
-        t=(self.centers-box.center)@box.axes
-        ha=box.half+margin;hb=self.half
+        t=(self.centers[ids]-box.center)@box.axes
+        ha=box.half+margin;hb=self.half[ids]
         separated=np.any(np.abs(t)>ha+np.einsum('nij,nj->ni',ab,hb),axis=1)
         separated |= np.any(np.abs(np.einsum('ni,nij->nj',t,R))>hb+np.einsum('nij,i->nj',ab,ha),axis=1)
         for i in range(3):
@@ -123,48 +181,89 @@ class ObservedGraspPlanner:
                 radius=ha[k]*ab[:,l,j]+ha[l]*ab[:,k,j]+hb[:,u]*ab[:,i,v]+hb[:,v]*ab[:,i,u]
                 separated |= lhs>radius
         if not separated.all():
-            self.last_rejection={'kind':'observed_payload_box','obstacle':self.boxes[int(np.flatnonzero(~separated)[0])].name}
+            j=int(ids[np.flatnonzero(~separated)[0]])
+            self.last_rejection={'kind':'observed_payload_box','obstacle':self.boxes[j].name,'obstacle_center':self.centers[j].tolist(),'obstacle_half':self.half[j].tolist()}
             return False
         return True
 
-    def solve(self,q,position,rotation):
+    def iter_solutions(self,q,position,rotation):
+        """Try seeds lazily; a validated path does not need five more IK solves."""
         lo,hi=self.geometry.limits[:,0]+.001,self.geometry.limits[:,1]-.001
         def residual(x):
-            T=self.geometry.fk(x)[self.geometry.tcp_body]@self.geometry.tcp_local
+            T=(tool_pose(self.geometry,x) if self.fast_ik else
+               self.geometry.fk(x)[self.geometry.tcp_body]@self.geometry.tcp_local)
             return np.r_[T[:3,3]-position,.2*Rotation.from_matrix(rotation@T[:3,:3].T).as_rotvec()]
-        rng=np.random.default_rng(0);solutions=[];self.ik_diagnostics=[]
-        for seed in [q]+[rng.uniform(lo,hi) for _ in range(5)]:
+        rng=np.random.default_rng(0);self.ik_diagnostics=[]
+        for seed in list(getattr(self,'preferred_ik_seeds',()))+[q]+[rng.uniform(lo,hi) for _ in range(5)]:
             fit=least_squares(residual,np.clip(seed,lo,hi),bounds=(lo,hi),max_nfev=100)
             error=residual(fit.x)
             if np.linalg.norm(error[:3])>.003 or np.linalg.norm(error[3:])>.01:continue
-            if self.clear(fit.x):solutions.append(fit.x)
+            if self.clear(fit.x):yield fit.x
             else:self.ik_diagnostics.append(self.last_rejection)
-        return sorted(solutions,key=lambda x:np.linalg.norm(x-q))
 
-    def plan(self,q,position,rotation):
-        start=time.monotonic();solutions=self.solve(q,position,rotation)
-        if not solutions:raise RuntimeError('No collision-clear IK solution: '+str(self.ik_diagnostics[:3]))
-        for goal in solutions:
-            path=smooth_joint_path(q,goal)
-            dense=np.linspace(q,goal,max(2,int(np.ceil(np.sum(np.abs(goal-q))/.001))+1))
-            if self.clear(path) and self.clear(dense):
-                self.events.append(dict(method='checked_quintic',wall_seconds=time.monotonic()-start,simulated_seconds=(len(path)-1)*self.dt))
-                return path
+    def solve(self,q,position,rotation):
+        return sorted(self.iter_solutions(q,position,rotation),key=lambda x:np.linalg.norm(x-q))
+
+    def cspace_search(self,goal,current):
+        return self.arm.planner.plan_cspace(goal,current,max_attempts=1,enable_graph_attempt=0)
+
+    def plan_joint_goal(self,q,goal):
+        """Reach an already qualified IK branch, as the oracle's plan_joints does."""
+        start=time.monotonic()
+        path=smooth_joint_path(q,goal)
+        dense=np.linspace(q,goal,max(2,int(np.ceil(np.sum(np.abs(goal-q))/.001))+1))
+        if self.clear(path) and self.clear(dense):
+            self.events.append(dict(method='checked_joint_goal',wall_seconds=time.monotonic()-start))
+            return path
         if not self.allow_curobo_fallback:
-            raise RuntimeError('Reachable IK, but no validated smooth joint path')
-        # Try one selected joint goal rather than five retries for every IK seed.
+            raise RuntimeError('No validated smooth path to selected joint goal')
+        return self._graph_joint_goal(q,goal,start)
+
+    def _graph_joint_goal(self,q,goal,start):
         import torch
         from curobo.types import JointState
+        from .curobo_scene import load_observed_cuboids
         def state(x):return JointState.from_position(torch.tensor(np.asarray(x)[None],device='cuda',dtype=torch.float32),joint_names=self.arm.names)
-        result=self.arm.planner.plan_cspace(state(solutions[0]),state(q),max_attempts=1)
+        upload_started=time.monotonic()
+        load_observed_cuboids(self.arm.planner,self.boxes)
+        upload=dict(method='native_cuboid_batch',boxes=len(self.boxes),wall_seconds=time.monotonic()-upload_started)
+        self.events.append(upload)
+        print('OBSERVED_WORLD_UPLOAD',upload,flush=True)
+        result=self.cspace_search(state(goal),state(q))
         if result is None or not result.success.any():raise RuntimeError('No collision-checked path to reachable pose')
         b,s=result.success.nonzero(as_tuple=True);end=int(result.interpolated_last_tstep[b[0],s[0]].item());tr=result.interpolated_trajectory
         indices=[tr.joint_names.index(n) for n in self.arm.names];raw=tr.position[b[0],s[0],:end,indices].cpu().numpy()
         old=np.arange(len(raw))*self.arm.dt;times=np.arange(0,old[-1]+.019,.02)
         path=np.column_stack([np.interp(times,old,raw[:,j]) for j in range(7)])
-        if not self.clear(path):raise RuntimeError('Interpolated cuRobo commands failed collision validation')
+        if not self.clear(path):raise RuntimeError('Interpolated cuRobo commands failed collision validation: '+str(self.last_rejection))
         self.events.append(dict(method='curobo_cspace',wall_seconds=time.monotonic()-start,simulated_seconds=(len(path)-1)*self.dt))
         return path
+
+    def plan(self,q,position,rotation):
+        start=time.monotonic()
+        from .local_ik import local_ik
+        target=np.eye(4);target[:3,3]=position;target[:3,:3]=rotation
+        local=local_ik(self.geometry,q,target) if self.fast_ik else None
+        if local is not None:
+            path=smooth_joint_path(q,local)
+            dense=np.linspace(q,local,max(2,int(np.ceil(np.sum(np.abs(local-q))/.001))+1))
+            if self.clear(path) and self.clear(dense):
+                self.events.append(dict(method='checked_local_ik',wall_seconds=time.monotonic()-start,simulated_seconds=(len(path)-1)*self.dt))
+                return path
+        candidates=self.iter_solutions(q,position,rotation) if self.fast_ik else self.solve(q,position,rotation)
+        solutions=[]
+        for goal in candidates:
+            solutions.append(goal)
+            path=smooth_joint_path(q,goal)
+            dense=np.linspace(q,goal,max(2,int(np.ceil(np.sum(np.abs(goal-q))/.001))+1))
+            if self.clear(path) and self.clear(dense):
+                self.events.append(dict(method='checked_quintic',wall_seconds=time.monotonic()-start,simulated_seconds=(len(path)-1)*self.dt))
+                return path
+        if not solutions:raise RuntimeError('No collision-clear IK solution: '+str(self.ik_diagnostics[:3]))
+        if not self.allow_curobo_fallback:
+            raise RuntimeError('Reachable IK, but no validated smooth joint path')
+        # Try one selected joint goal rather than five retries for every IK seed.
+        return self._graph_joint_goal(q,solutions[0],start)
 
 
 def observed_target_mask(points,target,support):
@@ -214,3 +313,22 @@ def build_observed_boxes(grid,T_map_base,points,target):
     for i,(lo,hi) in enumerate(merge_voxels(vox)):
         boxes.append(Cuboid(name=f'depth_{i}',pose=((lo+hi+1)*.025/2).tolist()+[1.,0.,0.,0.],dims=((hi-lo+1)*.025+.003).tolist()))
     return boxes,dict(fine_voxels=len(vox),coarse_voxels=int(keep.sum()),merged_boxes=len(boxes),support_z=support,target_surface_points=int(contact.sum()),target_surface_bounds=[points[contact].min(0).tolist(),points[contact].max(0).tolist()])
+
+
+def target_linkage_clearance(geometry, path, target_surface, margin=.003):
+    """Check sensed target points against the open gripper's rigid linkage.
+
+    Pads may contact the target; the palm and finger linkages may not sweep
+    through it. Geometry contains only robot calibration and finger encoders.
+    This complements the world planner, which excludes target points to permit
+    grasp contact. Returns the offending part for useful rejection diagnostics.
+    """
+    points=np.asarray(target_surface)
+    for q in path:
+        for box in geometry.boxes(q):
+            if '/gripper/' not in box.name:continue
+            if '/left_pad' in box.name or '/right_pad' in box.name:continue
+            local=(points-box.center)@box.axes
+            if np.any(np.all(np.abs(local)<=box.half+margin,axis=1)):
+                return False,box.name
+    return True,None

@@ -56,6 +56,7 @@ class HouseExplorer:
         self.last_sensor=None;self.last_plan=-np.inf;self.events=[];self.terminal=None
         self.last_progress=None;self.progress_time=0.;self.free=None;self.obstacles=None;self.near_points=np.empty((0,3))
         self.turn_recovery_active=False
+        self.frontier_priority=None;self.goal_leaves_covered_room=False
         self.scans=0;self.plans=0;self.traveled=0.;self.previous_xy=None;self.stop_detail=None
 
     def cell(self,xy):
@@ -71,6 +72,8 @@ class HouseExplorer:
             expanded[row:row+height,col:col+width]=self.support
             self.support=expanded;self.support_origin=self.grid.origin.copy()
     def layers(self,xy):
+        if hasattr(self.grid,'fixed_obstacle_points') and hasattr(self,'_fixed_layers'):
+            return self._fixed_layers
         self._sync_support()
         c=self.grid.config;row,col=self.cell(xy);r=int(np.ceil(self.config.ego_support_radius/c.resolution))+1
         r0,r1=max(0,row-r),min(self.support.shape[0],row+r+1);c0,c1=max(0,col-r),min(self.support.shape[1],col+r+1)
@@ -83,6 +86,7 @@ class HouseExplorer:
         distance=distance_transform_edt(np.pad(supported,1))[1:-1,1:-1]*c.resolution
         self.free=supported&(distance>self.config.center_clearance)
         frontier=floor&~self.obstacles&binary_dilation(~(floor|self.support|self.obstacles))
+        if hasattr(self.grid,'fixed_obstacle_points'):self._fixed_layers=(distance,frontier)
         return distance,frontier
 
     def _depth(self,c):
@@ -92,6 +96,8 @@ class HouseExplorer:
         v,u,z=v[good],u[good],z[good]
         p=np.column_stack(((u-c.K[0,2])*z/c.K[0,0],(v-c.K[1,2])*z/c.K[1,1],z))
         p=p@c.T_base_optical[:3,:3].T+c.T_base_optical[:3,3]
+        from cross_episode_sim.sensors.onboard import without_robot_points
+        p=without_robot_points(p,c)
         self.near_points=p[(p[:,2]>.05)&(p[:,2]<1.85)]
 
     def _line_free(self,a,b):
@@ -116,6 +122,7 @@ class HouseExplorer:
         return True
 
     def _plan(self,xy,now):
+        self.goal_leaves_covered_room=False
         old_goal=None if self.goal is None else self.goal.copy()
         distance,frontier=self.layers(xy);costs,parents=reachable_paths(self.free,self.cell(xy),distance)
         nodes=np.argwhere(np.isfinite(costs));self.last_plan=now;self.plans+=1
@@ -124,6 +131,8 @@ class HouseExplorer:
         for i in range(1,count+1):
             cells=np.argwhere(groups==i)
             if len(cells)<4:continue
+            frontier_filter=getattr(self,'frontier_filter',None)
+            if frontier_filter is not None and not np.any(frontier_filter(self.world(cells))):continue
             # Prefer a clear stand-off viewpoint rather than hugging the frontier.
             gap,_=cKDTree(cells).query(nodes)
             points=self.world(nodes)
@@ -132,13 +141,17 @@ class HouseExplorer:
                 eligible &= np.linalg.norm(points-visited,axis=1)>=self.config.scan_spacing
             indices=np.flatnonzero(eligible)
             if not len(indices):continue
+            if getattr(self,'frontier_priorities',None) is not None:
+                preferred=np.asarray(self.frontier_priorities(points[indices]),bool)
+                if preferred.any():indices=indices[preferred]
             merit=np.minimum(distance[nodes[indices,0],nodes[indices,1]],1.2)-.05*gap[indices]*self.grid.config.resolution-.03*costs[nodes[indices,0],nodes[indices,1]]*self.grid.config.resolution
             j=indices[int(np.argmax(merit))];node=tuple(nodes[j]);point=points[j]
             travel=costs[node]*self.grid.config.resolution
             score=min(len(cells),100)**.5/(1.+.35*travel)
-            choices.append((score,node,point))
+            priority=bool(self.frontier_priority(np.asarray([point]))) if self.frontier_priority is not None else False
+            choices.append((priority,score,node,point))
         if not choices:return 'no_reachable_frontier'
-        _,node,self.goal=max(choices,key=lambda x:x[0]);path=[node]
+        self.goal_leaves_covered_room,_,node,self.goal=max(choices,key=lambda x:(x[0],x[1]));path=[node]
         while node in parents:node=parents[node];path.append(node)
         remaining=list(self.world(path[::-1]));simplified=[xy.copy()]
         while remaining:
@@ -187,7 +200,22 @@ class HouseExplorer:
             error=self._plan(xy,now)
             if error:self.terminal=error;return self._stop(error)
         while self.path and np.linalg.norm(self.path[0]-xy)<self.config.waypoint_tolerance:
-            if len(self.path)>1 and not self._line_free(xy,self.path[1]):break
+            if len(self.path)>1 and not self._line_free(xy,self.path[1]):
+                # A corner can be within the ordinary arrival radius while
+                # still needed to get around an obstacle. Finish that corner
+                # instead of replanning the identical route at every tick.
+                # A 3 cm arrival radius can skip the required corner in a
+                # 5 cm grid. A* then returns the identical valid route and we
+                # reject it again at every tick. Keep following the checked
+                # corner until close on the map's own spatial scale.
+                corner_tolerance=min(.005,self.grid.config.resolution*.1)
+                if np.linalg.norm(self.path[0]-xy)>corner_tolerance:break
+                # The waypoint is reached, but fresh evidence invalidated its
+                # outgoing segment. Do not circle a millimetre-scale target.
+                self.events.append(dict(time=now,event='waypoint_route_changed',position=xy.tolist()))
+                self.path=[]
+                self.failed_goals.append(self.goal.copy())
+                return self._stop('waypoint_route_changed')
             if len(self.path)==1:
                 clearance=distance_transform_edt(~self.obstacles)[self.cell(self.goal)]*self.grid.config.resolution
                 tolerance=min(self.config.waypoint_tolerance,max(.03,clearance-self.config.center_clearance-.05))
@@ -197,13 +225,21 @@ class HouseExplorer:
             self.phase='scan';self.scanner=LocalScanSkill(ScanConfig(stowed_arm=self.config.arm_posture));return self._stop('arrived_frontier')
         if np.linalg.norm(xy-self.last_progress)>.15:self.last_progress=xy.copy();self.progress_time=now
         if now-self.progress_time>15.:
-            self.failed_goals.append(self.goal.copy());self.path=[];return self._stop('stalled_replan')
+            self.failed_goals.append(self.goal.copy());self.path=[]
+            self.last_progress=xy.copy();self.progress_time=now
+            return self._stop('stalled_replan')
         target=self.path[0];angle=math.atan2(target[1]-xy[1],target[0]-xy[0])-yaw;angle=math.atan2(math.sin(angle),math.cos(angle))
         desired=np.array([self.config.speed*max(0.,math.cos(angle))**2 if abs(angle)<.5 else 0.,np.clip(1.8*angle,-self.config.yaw_speed,self.config.yaw_speed)])
         # Complete a checked turn before retrying translation. Otherwise each
         # control tick retries a tiny forward arc and accumulates lateral drift
         # until the current cell itself leaves the safe corridor.
+        if getattr(self,'detour_turn_in_place',False) and abs(angle)>.08:
+            self.turn_recovery_active=True
         if self.turn_recovery_active:
+            if getattr(self,'detour_turn_in_place',False) and abs(self.velocity[0])>.01:
+                # Brake along the validated heading before rotating onto a
+                # tight detour; don't cut its inflated obstacle corner.
+                desired[1]=0.
             if abs(angle)<.03:self.turn_recovery_active=False
             else:desired[0]=0.
         desired[0]=min(desired[0],math.sqrt(2*self.config.acceleration*np.linalg.norm(target-xy)),self.config.approach_gain*np.linalg.norm(target-xy))

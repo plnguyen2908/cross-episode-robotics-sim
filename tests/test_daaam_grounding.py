@@ -14,6 +14,16 @@ def test_vlm_schema_rejects_prose_and_unrecognized_labels():
         with pytest.raises(ValueError):parse_label(text)
 
 
+def test_configured_semantic_targets_do_not_bypass_label_validation():
+    from cross_episode_sim.perception.daaam_grounding import category_prompt
+    target='packaged drink'
+    text='{"category":"packaged drink","description":"purple juice carton"}'
+    assert parse_label(text,(target,))['category']==target
+    with pytest.raises(ValueError):parse_label(text,('packaged snack',))
+    assert target in category_prompt((target,))
+    with pytest.raises(ValueError):parse_label('{"category":"cup","description":"cup"}',(target,))
+
+
 def test_mask_depth_excludes_background_inside_box():
     c=camera();c.depth_m[:]=4.;mask=np.zeros((20,20),bool);mask[5:10,5:10]=True;c.depth_m[mask]=1.
     result=locate_detection(c,Detection('other',.9,(0,0,20,20),mask),np.eye(4))

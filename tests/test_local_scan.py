@@ -50,3 +50,11 @@ def test_pose_jump_does_not_complete_scan():
     p,t=sample(.1,2.);r=skill.step(p,t,.1)
     assert r.status=='pose_jump' and not r.complete
     with pytest.raises(ValueError):skill.step(p,t,.1)
+
+
+def test_scan_without_image_mask_filters_robot_but_keeps_external_obstacles():
+    p,t=sample(depth=.4);c=p.cameras['navigation'];c.robot_mask=None
+    c.robot_bounds_base=((np.eye(4),np.array([.4,0,1.]),np.array([.1,.1,.1])),)
+    assert LocalScanSkill().step(p,t,0.).status=='scanning'
+    c.robot_bounds_base=()
+    assert LocalScanSkill().step(p,t,0.).status=='obstacle_near_scan_envelope'

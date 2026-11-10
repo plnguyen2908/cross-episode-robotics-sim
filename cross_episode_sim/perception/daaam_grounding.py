@@ -8,7 +8,7 @@ from pathlib import Path
 import json
 import numpy as np
 from PIL import Image, ImageDraw
-from .visual_targets import Detection, GroundingDinoDetector, box_iou
+from .visual_targets import Detection, box_iou
 
 PROMPT = '''Identify ONLY the red-highlighted object in the first image. The second image shows the same object's isolated crop on gray. Use the scene context to distinguish a shallow, wide bowl from a tall drinking vessel. A bowl has a wide open mouth and no stem; a wine glass has a narrow stem. Do not invent a handle.
 First describe its shape and what object it is. Do not guess a hidden object.
@@ -26,12 +26,22 @@ Choose one category value. Keep the description under 20 words.
 Use unknown if the highlighted region does not provide enough evidence."""
 
 
-def parse_label(text):
+def category_prompt(categories):
+    """Describe only the requested semantic classes, retaining rejection labels."""
+    choices=sorted(set(categories)|{'other','unknown'})
+    return ('Identify ONLY the red-highlighted region using the full image and its crop. '
+            'Return JSON with category and a brief description of visible evidence. '
+            'Choose exactly one category from '+json.dumps(choices)+'. '
+            'Use other for a different visible item, or unknown for an ambiguous region. '
+            'Do not infer hidden objects. Match location and color qualifiers only when visible.')
+
+
+def parse_label(text, categories=('cup','bowl','dining table')):
     text=text.strip()
     if text.startswith('```'):
         text=text.split('\n',1)[-1].rsplit('```',1)[0].strip()
     value=json.loads(text)
-    if not isinstance(value,dict) or value.get('category') not in {'cup','bowl','dining table','other','unknown'}:
+    if not isinstance(value,dict) or value.get('category') not in set(categories)|{'other','unknown'}:
         raise ValueError('Invalid VLM category')
     if not isinstance(value.get('description'),str):raise ValueError('Missing description')
     return value
@@ -51,6 +61,9 @@ def masked_views(rgb, mask):
 
 class LocalVLM:
     def __init__(self,model='Qwen/Qwen3-VL-8B-Instruct',device='cuda'):
+        from .rpc import configured_client
+        self.remote=configured_client('qwen');self.model_name=model;self.device=device
+        if self.remote is not None:return
         import torch
         from transformers import AutoProcessor,AutoModelForImageTextToText
         self.torch=torch;self.device=device;self.model_name=model
@@ -61,6 +74,8 @@ class LocalVLM:
         return self.label_with_prompt(images,PROMPT)
 
     def label_with_prompt(self, images, prompt, max_new_tokens=100):
+        if self.remote is not None:
+            return self.remote.call(images=[np.asarray(x) for x in images],prompt=prompt,max_new_tokens=max_new_tokens)
         images=list(images)  # Marked context plus isolated crop; both are actual RGB.
         messages=[{'role':'user','content':[{'type':'image'} for _ in images]+[{'type':'text','text':prompt}]}]
         text=self.processor.apply_chat_template(messages,add_generation_prompt=True)
@@ -98,21 +113,25 @@ class TrackView:
 
 
 class DaaamGrounder:
-    def __init__(self,vlm,checkpoint,output=None,device='cuda',min_observations=2,max_queries_per_frame=2,hybrid=True,categories=('cup','bowl'),detector_model='IDEA-Research/grounding-dino-tiny'):
+    def __init__(self,vlm,checkpoint,output=None,device='cuda',min_observations=2,max_queries_per_frame=2,hybrid=True,categories=('cup','bowl')):
         self.categories=frozenset(categories)
-        if not self.categories or not self.categories <= {'cup','bowl','dining table'}:
-            raise ValueError('Unsupported perception categories')
+        if not self.categories or any(not isinstance(c,str) or not c.strip() for c in self.categories):
+            raise ValueError('Perception categories must be nonempty semantic descriptions')
         from daaam.config import SegmentationConfig,TrackingConfig
         from daaam.segmentation.services import SegmentationService
         from daaam.tracking.services import TrackingService
-        self.segmenter=SegmentationService(SegmentationConfig(model_name=str(Path(checkpoint).resolve()),model_config_path=None,device=device,min_mask_region_area=100))
+        from .rpc import configured_client,RemoteSegmenter
+        segmentation_client=configured_client('fastsam')
+        self.segmenter=RemoteSegmenter(segmentation_client) if segmentation_client else SegmentationService(SegmentationConfig(model_name=str(Path(checkpoint).resolve()),model_config_path=None,device=device,min_mask_region_area=100))
         self.make_tracker=lambda:TrackingService(TrackingConfig(device=device,with_reid=False))
-        self.proposer=GroundingDinoDetector(device=device,model=detector_model,verify_tables=False) if hybrid else None
+        from .point_masks import PointMaskDetector
+        self.proposer=PointMaskDetector(categories=categories,segmenter=self.segmenter,device=device) if hybrid else None
         self.map_targets=[];self.map_pose=None;self.guided_proposal_count=0
         self.needs_confirmation=False
         self.trackers={};self.views={};self.vlm=vlm;self.min_observations=min_observations
         self.max_queries=max_queries_per_frame;self.query_count=0;self.errors=[]
-        self.output=Path(output) if output else None
+        from cross_episode_sim.runtime import artifacts
+        self.output=Path(output) if output and artifacts.owner(output) is None else None
         if self.output:self.output.mkdir(parents=True,exist_ok=True)
 
     def set_map_targets(self,targets,tracking):
@@ -125,9 +144,7 @@ class DaaamGrounder:
         boxes,masks=self.segmenter.segment(camera.rgb[:,:,::-1].copy())
         proposal_labels={}
         if self.proposer is not None:
-            proposals=[p for p in self.proposer.detect(camera.rgb) if p.label in self.categories]
-            if 'dining table' in self.categories and not any(p.label=='dining table' for p in proposals):
-                proposals.extend(p for p in self.proposer.detect(camera.rgb,text='a dining table. a chair. a kitchen counter.') if p.label=='dining table')
+            proposals=[p for p in self.proposer.detect(camera.rgb,masks=masks) if p.label in self.categories]
             if self.map_pose is not None:
                 guided=map_guided_proposals(camera,self.map_targets,self.map_pose,boxes,masks)
                 proposals.extend(guided);self.guided_proposal_count+=len(guided)
@@ -161,9 +178,10 @@ class DaaamGrounder:
             output.append((row,mask,view))
         for key,view in sorted(pending,key=lambda item:-item[1].area)[:self.max_queries]:
             view.last_query=timestamp;self.query_count+=1
-            prompt=TABLE_PROMPT if view.proposal_label=='dining table' else PROMPT
+            prompt=(TABLE_PROMPT if view.proposal_label=='dining table' else
+                    PROMPT if self.categories <= {'cup','bowl','dining table'} else category_prompt(self.categories))
             raw=self.vlm.label_with_prompt(view.images,prompt) if hasattr(self.vlm,'label_with_prompt') else self.vlm.label(view.images)
-            try:view.label=parse_label(raw)
+            try:view.label=parse_label(raw,self.categories)
             except (ValueError,TypeError):
                 view.label={'category':'unknown','description':'Invalid model response'};self.errors.append({'track':key,'response':raw})
             if self.output:
@@ -176,6 +194,9 @@ class DaaamGrounder:
         self.needs_confirmation=bool(len(boxes)) and (
             not output or any(view.label is None or view.label['category']=='unknown'
                               for _,_,view in output))
+        # Preserve proposal evidence before BotSort activates a track.
+        confirmed={view.proposal_label for _,_,view in output if view.label and view.label['category']==view.proposal_label}
+        self.pending_categories=set(proposal_labels.values())-confirmed
         detections=[]
         for row,mask,view in output:
             if view.label and view.label['category'] in self.categories and (self.proposer is None or view.label['category']==view.proposal_label):
@@ -192,9 +213,12 @@ def match_proposals(boxes,masks,proposals,min_iou=.35):
     selected={}
     for proposal in sorted(proposals,key=lambda p:-p.score):
         if not len(boxes):break
-        overlaps=np.array([box_iou(row[:4],proposal.box) for row in boxes])
-        best=int(np.argmax(overlaps))
-        if overlaps[best]<min_iou:continue
+        exact=[i for i,mask in enumerate(masks) if proposal.mask is not None and np.array_equal(mask,proposal.mask)]
+        if exact:best=exact[0]
+        else:
+            overlaps=np.array([box_iou(row[:4],proposal.box) for row in boxes])
+            best=int(np.argmax(overlaps))
+            if overlaps[best]<min_iou:continue
         if best in selected and selected[best]!=proposal.label:
             selected[best]=None  # conflicting categories remain unconfirmed
         elif best not in selected:selected[best]=proposal.label

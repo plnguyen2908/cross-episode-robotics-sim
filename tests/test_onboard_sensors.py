@@ -93,3 +93,44 @@ def test_depth_edges_do_not_create_unmasked_robot_top_plate():
             assert camera.robot_mask[v,u] or not camera.valid_depth[v,u]
         assert m.vis.quality.offsamples==0
         assert np.array_equal(d.qpos,before)
+
+
+def test_navigation_only_capture_preserves_pixels_and_physics(scene):
+    m,d,s=scene;full=s.capture();before=d.qpos.copy();time=d.time
+    selected=s.capture(camera_keys=('navigation',))
+    assert set(selected.cameras)=={'navigation'}
+    for field in ('rgb','depth_m','valid_depth','K','T_base_optical','robot_mask'):
+        np.testing.assert_equal(getattr(full.cameras['navigation'],field),getattr(selected.cameras['navigation'],field))
+    np.testing.assert_equal(d.qpos,before);assert d.time==time
+    assert set(s.capture().cameras)=={'navigation','wrist'}
+    for keys in [(),('room',),('navigation','navigation')]:
+        with pytest.raises(ValueError):s.capture(camera_keys=keys)
+
+
+def test_depth_culling_matches_full_image_robot_box_test(scene):
+    m,d,s=scene
+    for angle in (0.,.3,-.2):
+        d.qpos[m.jnt_qposadr[m.joint('robot_0/fr3_joint2').id]]=angle
+        mujoco.mj_forward(m,d)
+        packet=s.capture()
+        for key,frame in packet.cameras.items():
+            v,u=np.indices(frame.depth_m.shape);K=frame.K;z=frame.depth_m
+            points=np.stack([(u-K[0,2])*z/K[0,0],(v-K[1,2])*z/K[1,1],z],axis=-1)
+            reference=np.zeros(z.shape,bool);optical=np.linalg.inv(frame.T_base_optical)
+            for base_T,center,half in s._robot_bounds_base():
+                T=optical@base_T;local=(points-T[:3,3])@T[:3,:3]
+                reference |= np.all(np.abs(local-center)<=half,axis=-1)
+            np.testing.assert_array_equal(frame.robot_mask,reference)
+
+
+def test_finger_link_visual_is_not_a_stationary_scene_obstacle():
+    import h5py
+    source=Path('runs/fixture_cycle_work/cabinet_08/state_recording')
+    if not source.exists():pytest.skip('Saved finger-mask regression scene unavailable')
+    m=mujoco.MjModel.from_binary_path(str(source/'model.mjb'));d=mujoco.MjData(m)
+    with h5py.File(source/'states.h5') as f:mujoco.mj_setState(m,d,f['states'][-1],mujoco.mjtState.mjSTATE_INTEGRATION)
+    mujoco.mj_forward(m,d)
+    with OnboardSensorInterface(m,d) as s:
+        packet=s.capture()
+        assert packet.cameras['wrist'].robot_mask[310,274]
+        assert all((m.joint(j).name or '').startswith('robot_0/') for j in s._allowed)

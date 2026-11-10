@@ -21,7 +21,7 @@ from cross_episode_sim.navigation.observed_map import MapConfig, ObservedNavigat
 from cross_episode_sim.navigation.tare_exploration import TareExplorer
 from cross_episode_sim.robot.observations import depth_rgb
 from cross_episode_sim.sensors import OnboardSensorInterface
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from scripts.demo_local_scan import setup, ContactAudit
 
 
@@ -63,7 +63,7 @@ def main():
     policy.phase='scan' if a.scan_first else 'travel';policy.response=dict(waypoint=list(goal)+[0.],sequence=1)
     # The goal is already a recorded base goal; no sensor-offset conversion.
     policy.sensor_offset[:]=0.
-    slam=RGBDMapper();start=float(data.time);wall=time.monotonic();records=[];reached=False
+    slam=create_mapper();start=float(data.time);wall=time.monotonic();records=[];reached=False
     (a.output/'inputs.json').write_text(json.dumps(dict(kind='local_follower_regression_not_whole_house',
         source=str(a.source),failed_run=str(a.failed_run),recorded_base_goal=goal,scan_first=a.scan_first),indent=2))
     with OnboardSensorInterface(model,data) as sensors, imageio.get_writer(str(a.output/'recovery.mp4'),fps=10,codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart']) as video, open(a.output/'progress.jsonl','w',buffering=1) as progress:

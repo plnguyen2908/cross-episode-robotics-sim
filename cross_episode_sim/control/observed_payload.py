@@ -32,9 +32,15 @@ class ObservedPayload:
         self.center=(lo+hi)/2;self.half=(hi-lo)/2+.02
         self.points_tool=p
         self.hull_equations=None
+        # Convex support retains every observed point (including the refinement
+        # union); box-only empty corners are not object material. Degenerate
+        # observations retain the conservative box fallback.
+        from scipy.spatial import ConvexHull,QhullError
+        try:self.centered_hull=ConvexHull(p-self.center).equations
+        except QhullError:self.centered_hull=None
     def box(self,q):
         T=self.geometry.fk(q)[self.geometry.tcp_body]@self.geometry.tcp_local
-        return RobotBox('observed_payload',T[:3,:3]@self.center+T[:3,3],T[:3,:3],self.half)
+        return RobotBox('observed_payload',T[:3,:3]@self.center+T[:3,3],T[:3,:3],self.half,hull_planes=self.centered_hull,hull_margin=.02)
     def filter_packet(self,packet):
         box=self.box(packet.arm.position);cameras={}
         for name,c in packet.cameras.items():

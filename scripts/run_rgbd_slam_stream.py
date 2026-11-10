@@ -15,6 +15,9 @@ from scripts.demo_rgbd_slam import plot_map
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--stream',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--cv-threads',type=int,default=4)
+    p.add_argument('--feature-backend',choices=['opencv','cuda_sift'],default='opencv')
+    p.add_argument('--feature-width',type=int,help='Experimental SIFT-only resize; depth fusion remains native resolution')
     p.add_argument('--diagnostics',type=Path);p.add_argument('--device',default='CPU:0')
     p.add_argument('--backend',choices=['hybrid','odometry'],default='hybrid')
     p.add_argument('--dropout',type=int,nargs=2,metavar=('START_FRAME','END_FRAME'))
@@ -23,7 +26,7 @@ def main():
     p.add_argument('--vggt-recovery',action='store_true')
     p.add_argument('--vggt-upstream',type=Path,default=Path('external/vggt-slam'))
     p.add_argument('--vggt-weights',type=Path,default=Path('.venv-vggt-cache/hub/checkpoints/model.pt'))
-    a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False);cv2.setNumThreads(4)
+    a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False);cv2.setNumThreads(a.cv_threads)
     meta=json.loads((a.stream/'calibration.json').read_text());K=np.array(meta['K']);mount=np.array(meta['T_base_optical'])
     rgb=np.load(a.stream/'rgb.npy',mmap_mode='r');depth=np.load(a.stream/'depth.npy',mmap_mode='r');times=np.load(a.stream/'timestamps.npy')
     masks=np.load(a.stream/'robot_mask.npy',mmap_mode='r') if (a.stream/'robot_mask.npy').exists() else None
@@ -33,7 +36,7 @@ def main():
         from cross_episode_sim.slam.recovery import VGGTProposal,VerifiedRGBDRecovery
         proposer=VGGTProposal(a.vggt_upstream,a.vggt_weights)
         factory=lambda K,mount:VerifiedRGBDRecovery(K,mount,proposer)
-    mapper=RGBDMapper(device=a.device,tracking_backend=a.backend,recovery_factory=factory)
+    mapper=RGBDMapper(device=a.device,tracking_backend=a.backend,recovery_factory=factory,feature_width=a.feature_width,feature_backend=a.feature_backend)
     records=[];poses=[];start=time.monotonic();map_image=np.full((500,900,3),255,np.uint8)
     writer=None if a.no_video else imageio.get_writer(str(a.output/'slam_demo.mp4'),fps=fps/4,codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart'])
     try:

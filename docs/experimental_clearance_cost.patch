@@ -1,0 +1,112 @@
+--- a/cross_episode_sim/navigation/semantic_navigation.py
++++ b/cross_episode_sim/navigation/semantic_navigation.py
+@@ -14,7 +14,7 @@
+ from .object_view import visible_object_heading
+ 
+ 
+-def astar_observed(free, start, goal):
++def astar_observed(free, start, goal, traversal_cost=None):
+     """Eight-connected A* over observed free cells, without diagonal cuts."""
+     if not free[start] or not free[goal]:return []
+     queue=[(math.dist(start,goal),0.,start)];cost={start:0.};parent={}
+@@ -29,7 +29,8 @@
+             nxt=node[0]+dr,node[1]+dc
+             if not(0<=nxt[0]<free.shape[0] and 0<=nxt[1]<free.shape[1]) or not free[nxt]:continue
+             if dr and dc and not(free[node[0]+dr,node[1]] and free[node[0],node[1]+dc]):continue
+-            ng=g+math.hypot(dr,dc)
++            weight=1. if traversal_cost is None else max(1.,float(traversal_cost[nxt]))
++            ng=g+math.hypot(dr,dc)*weight
+             if ng>=cost.get(nxt,float('inf')):continue
+             cost[nxt]=ng;parent[nxt]=node;heapq.heappush(queue,(ng+math.dist(nxt,goal),ng,nxt))
+     return []
+--- a/cross_episode_sim/navigation/route_memory.py
++++ b/cross_episode_sim/navigation/route_memory.py
+@@ -37,7 +37,7 @@
+         self.record(poses,anchor,station,station)
+         self.stations[station][-1]['kind']='successful_dock'
+ 
+-    def plan(self, xy, destination, anchor, segment_clear, connector, join_radius=1.5):
++    def plan(self, xy, destination, anchor, segment_clear, connector, join_radius=1.5, segment_cost=None):
+         """Shortest checked graph route, including the local A* connector cost.
+ 
+         Nearby route samples are connected only after an explicit clearance
+@@ -50,7 +50,7 @@
+         adjacency=[[] for _ in points]
+         def add(a,b,route):
+             if segment_clear(points[a],points[b]):
+-                cost=float(np.linalg.norm(points[a]-points[b]))
++                cost=float(np.linalg.norm(points[a]-points[b])) if segment_cost is None else segment_cost(points[a],points[b])
+                 adjacency[a].append((b,cost,route));adjacency[b].append((a,cost,route))
+         for a,b,route in self.edges:add(a,b,route)
+         # Join recorded paths at nearby crossings, without mutating the frozen map.
+@@ -66,7 +66,8 @@
+             path=connector(xy,points[index])
+             if path is None or not len(path):continue
+             path=np.asarray(path)
+-            cost=float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
++            cost=(float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum()) if segment_cost is None
++                  else sum(segment_cost(a,b) for a,b in zip(path,path[1:])))
+             costs[index]=cost;connectors[index]=path
+             heapq.heappush(queue,(cost,index))
+         goals={s['node'] for s in self.stations[destination]}
+--- a/cross_episode_sim/navigation/fixed_map.py
++++ b/cross_episode_sim/navigation/fixed_map.py
+@@ -230,6 +230,25 @@
+                     valid.add(int(components[tuple(nodes[i])]))
+         return self.free & np.isin(components, list(valid))
+ 
++    def _route_costs(self):
++        # Prefer room inside the already-inflated free region. This changes
++        # route ranking only: no obstacle/support cell or guard is relaxed.
++        from scipy.ndimage import distance_transform_edt
++        free=self.free
++        cached=getattr(self,'_route_cost_cache',None)
++        if cached is None or cached[0] is not free:
++            clearance=distance_transform_edt(np.pad(free,1))[1:-1,1:-1]*self.grid.config.resolution
++            costs=1.+(.15/np.maximum(clearance,.025))**2
++            self._route_cost_cache=(free,costs)
++        return self._route_cost_cache[1]
++
++    def _segment_cost(self,a,b):
++        a=np.asarray(a);b=np.asarray(b);length=float(np.linalg.norm(b-a))
++        if length<1e-12:return 0.
++        samples=a+(b-a)*np.linspace(0.,1.,max(2,int(np.ceil(length/self.grid.config.resolution))+1))[:,None]
++        cells=np.array([self.cell(p) for p in samples]);costs=self._route_costs()
++        return length*float(costs[cells[:,0],cells[:,1]].mean())
++
+     def _cached_route(self, xy, now):
+         memory = getattr(self, 'route_memory', None)
+         if memory is None:
+@@ -237,12 +256,12 @@
+         def connector(start, goal):
+             cells=[self.cell(start),self.cell(goal)]
+             if any(not (0<=r<self.free.shape[0] and 0<=c<self.free.shape[1]) for r,c in cells):return None
+-            path=astar_observed(self._search_free(start),*cells)
++            path=astar_observed(self._search_free(start),*cells,traversal_cost=self._route_costs())
+             if not path:return None
+             points=np.vstack((start,self.world(path),goal))
+             if any(not self._line_free(a,b) for a,b in zip(points,points[1:])):return None
+             return points
+-        result=memory.plan(xy,self.route_destination,self.route_anchor,self._line_free,connector)
++        result=memory.plan(xy,self.route_destination,self.route_anchor,self._line_free,connector,segment_cost=self._segment_cost)
+         if result is None:return False
+         self.path=list(result.pop('path'))[1:]
+         if not self.path:self.path=[xy.copy()]
+@@ -251,7 +270,7 @@
+         # a local A* repair. Cached-only followers have no explicit destinations.
+         self._recovery_destination=self.goal.copy()
+         self.last_progress=xy.copy();self.progress_time=now
+-        self.events.append(dict(event='reuse_successful_route',strategy='shortest_successful_route_graph',
++        self.events.append(dict(event='reuse_successful_route',strategy='clearance_aware_successful_route_graph',
+                                 destination=self.route_destination,**result))
+         return True
+ 
+@@ -275,7 +294,7 @@
+             choices=np.argsort(distances)
+             for index in choices[:32]:
+                 if distances[index]>1.:break
+-                goal=tuple(nodes[index]);path=astar_observed(search_free,self.cell(xy),goal)
++                goal=tuple(nodes[index]);path=astar_observed(search_free,self.cell(xy),goal,traversal_cost=self._route_costs())
+                 if not path:continue
+                 route=np.vstack((xy,self.world(path)[1:]))
+                 if any(not self._line_free(a,b) for a,b in zip(route,route[1:])):continue

@@ -18,7 +18,7 @@ assert d and all(v=='open' for v in d.values()), 'This test requires already-ope
 print('EPISODE='+str(p));print('PROMPT='+c['instruction'])
 PY
 printf 'OUTPUT=%s\n' "$output_run"
-.venv-slam/bin/python scripts/demo_semantic_navigation.py \
+"${SENSOR_PYTHON:-.venv-sift/bin/python}" scripts/demo_semantic_navigation.py \
  --source "$source_episode" --output "$output_run/navigation" --preserve-initial-state \
  --target bowl --navigation-mode hybrid --object-map hydra --perception daaam \
  --explorer frontier --goal-room "${GOAL_ROOM:-}" --vlm-device "${VLM_DEVICE:-cuda:1}" \

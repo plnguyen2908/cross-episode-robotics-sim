@@ -1,9 +1,11 @@
 """Physically orient the held arm for wrist-floor sensing, using observed obstacles."""
+from cross_episode_sim.runtime import artifacts
+from cross_episode_sim.recording.deferred import StateVideoRecorder
 import argparse,json,shutil
 import faulthandler,signal
 faulthandler.register(signal.SIGUSR1)
 from pathlib import Path
-import numpy as np,mujoco,imageio.v2 as imageio
+import numpy as np,mujoco
 from scipy.spatial.transform import Rotation
 from curobo._src.geom.types import SceneCfg,Cuboid
 from cross_episode_sim.control.observed_arm import robot_calibration
@@ -11,15 +13,14 @@ from cross_episode_sim.control.observed_grasp_planner import ObservedGraspPlanne
 from cross_episode_sim.control.observed_payload import ObservedPayload
 from cross_episode_sim.navigation.shaped_docking import RobotGeometry
 from cross_episode_sim.robot.arm_planner import RobotArmPlanner
-from cross_episode_sim.sensors import OnboardSensorInterface
+from cross_episode_sim.runtime.episode import episode_sensors as OnboardSensorInterface,load_checkpoint
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
-from cross_episode_sim.robot.observations import depth_rgb
 from cross_episode_sim.evaluation.grasp_contact import contact_root_lookup
 p=argparse.ArgumentParser();p.add_argument('--pick',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--perception',type=Path,required=True);p.add_argument('--empty-hand',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
-m=mujoco.MjModel.from_binary_path(str(a.pick/'private_checkpoint/model.mjb'));d=mujoco.MjData(m);mujoco.mj_setState(m,d,np.load(a.pick/'private_checkpoint/state.npy'),mujoco.mjtState.mjSTATE_INTEGRATION);mujoco.mj_forward(m,d)
+m,d=load_checkpoint(a.pick)
 c=MolmoSpacesController(m,d);hold={g:c.robot_view.get_move_group(g).noop_ctrl.copy() for g in ('base','arm','gripper')};q=c.robot_view.get_move_group('arm').joint_pos.copy();geo=RobotGeometry(m)
 if a.empty_hand and np.max(hold['gripper'])>5:raise ValueError('Empty-hand scan requires an open gripper command')
-tool=None if a.empty_hand else np.load(a.perception/'observed_payload_tool.npy');payload=None if a.empty_hand else ObservedPayload(geo,tool);x=np.load(a.perception/'input.npz')
+tool=None if a.empty_hand else artifacts.load_array(a.perception/'observed_payload_tool.npy');payload=None if a.empty_hand else ObservedPayload(geo,tool);x=artifacts.load_array(a.perception/'input.npz')
 roots=[int(m.jnt_bodyid[j]) for j in range(m.njnt) if m.jnt_type[j]==mujoco.mjtJoint.mjJNT_FREE];lookup=contact_root_lookup(m.body_parentid,roots);pads={m.body(n).id for n in ('robot_0/gripper/left_pad','robot_0/gripper/right_pad')};held=set()
 for contact in d.contact:
  b1,b2=map(int,m.geom_bodyid[[contact.geom1,contact.geom2]])
@@ -33,14 +34,14 @@ calibration=robot_calibration(m,d,a.output/'robot');fixed_support=[[*v['center']
 arm=RobotArmPlanner(None,{},kinematics=calibration,collision_cache={'cuboid':max(16,len(boxes)),'mesh':2});arm.planner.update_world(SceneCfg(cuboid=boxes));planner=ObservedGraspPlanner(arm,geo,boxes,fixed_floor_support_spheres=fixed_support)
 
 
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
-grid=ObservedNavigationMap(MapConfig(resolution=.05,height_resolution=.025,pixel_stride=4,extent_m=12.));slam=RGBDMapper()
-if (a.pick/'navigation_map.npz').exists():
+grid=ObservedNavigationMap(MapConfig(resolution=.05,height_resolution=.025,pixel_stride=4,extent_m=12.));slam=create_mapper()
+if artifacts.exists(a.pick/'navigation_map.npz'):
  from cross_episode_sim.navigation.map_continuation import restore_observed_map
  restore_observed_map(grid,a.pick)
 start=d.time;events=[];success=True;counter=0;last_stamp=None
-with OnboardSensorInterface(m,d) as sensors,imageio.get_writer(str(a.output/'rollout.mp4'),fps=10,codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart']) as video:
+with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'state_recording') as recording:
  def record():
   global last_stamp
   raw=sensors.capture()
@@ -48,7 +49,7 @@ with OnboardSensorInterface(m,d) as sensors,imageio.get_writer(str(a.output/'rol
   last_stamp=raw.timestamp
   packet=raw if payload is None else payload.filter_packet(raw);tracking=slam.update(packet.cameras['navigation'],packet.timestamp)
   grid.update(packet.cameras['navigation'],tracking);grid.update_support(packet.cameras['wrist'],tracking)
-  video.append_data(np.concatenate([np.concatenate([v.rgb,depth_rgb(v.depth_m)],axis=1) for v in raw.cameras.values()]))
+  recording.record_map(grid,tracking,'floor_scan')
   return raw
  def command(joints):
   global counter
@@ -101,11 +102,11 @@ with OnboardSensorInterface(m,d) as sensors,imageio.get_writer(str(a.output/'rol
   events.append(dict(view_side=side,returned=True,seconds=float(d.time-start)))
   print('SCAN_VIEW_DONE',side,flush=True)
  record()
-cp=a.output/'private_checkpoint';cp.mkdir();mujoco.mj_saveModel(m,str(cp/'model.mjb'),None);spec=mujoco.mjtState.mjSTATE_INTEGRATION;state=np.empty(mujoco.mj_stateSize(m,spec));mujoco.mj_getState(m,d,state,spec);np.save(cp/'state.npy',state)
-if tool is not None:np.save(a.output/'observed_payload_tool.npy',tool)
+cp=a.output/'private_checkpoint';cp.mkdir();artifacts.save_model(m,str(cp/'model.mjb'),None);spec=mujoco.mjtState.mjSTATE_INTEGRATION;state=np.empty(mujoco.mj_stateSize(m,spec));mujoco.mj_getState(m,d,state,spec);artifacts.save_array(cp/'state.npy',state)
+if tool is not None:artifacts.save_array(a.output/'observed_payload_tool.npy',tool)
 grid.save(a.output);slam.save(a.output/'slam')
 from cross_episode_sim.mapping.continuity import load_memory,save_memory
 save_memory(a.output,load_memory(a.pick) if a.pick else dict(rooms=[],tables=[]))
 success=success and any(isinstance(e,dict) and e.get('returned') for e in events)
 r.update(success=success,scan_events=events,simulated_seconds=float(d.time-start),scope='Physical wrist scan and return; no docking/placement success claim.',empty_hand=a.empty_hand)
-(a.output/'report.json').write_text(json.dumps(r,indent=2));print('SCAN_SUCCESS',success,flush=True)
+artifacts.write_text(a.output/'report.json',json.dumps(r,indent=2));print('SCAN_SUCCESS',success,flush=True)

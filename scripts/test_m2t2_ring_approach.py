@@ -6,7 +6,7 @@ import argparse,json
 from pathlib import Path
 import numpy as np,mujoco,imageio.v2 as imageio
 from cross_episode_sim.sensors import OnboardSensorInterface
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
 from cross_episode_sim.navigation.shaped_docking import RobotGeometry
 from cross_episode_sim.navigation.house_exploration import HouseExplorationConfig
@@ -18,7 +18,7 @@ from scripts.demo_local_scan import ContactAudit
 p=argparse.ArgumentParser();p.add_argument('--start',type=Path,required=True);p.add_argument('--payload',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--observed-map',type=Path);p.add_argument('--seconds',type=float,default=60);p.add_argument('--target',default='dining table');p.add_argument('--checkpoint',type=Path,required=True);a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 m=mujoco.MjModel.from_binary_path(str(a.start/'private_checkpoint/model.mjb'));d=mujoco.MjData(m);spec=mujoco.mjtState.mjSTATE_INTEGRATION;mujoco.mj_setState(m,d,np.load(a.start/'private_checkpoint/state.npy'),spec);mujoco.mj_forward(m,d)
 geo=RobotGeometry(m);tool=np.load(a.payload);payload=ObservedPayload(geo,tool);np.save(a.output/'observed_payload_tool.npy',tool)
-grid=ObservedNavigationMap(MapConfig(resolution=.05,height_resolution=.025,pixel_stride=4,extent_m=12.));slam=RGBDMapper();supports=[np.zeros(3)];packet=tracking=None;local=None;checker=None;audit=ContactAudit(m)
+grid=ObservedNavigationMap(MapConfig(resolution=.05,height_resolution=.025,pixel_stride=4,extent_m=12.));slam=create_mapper();supports=[np.zeros(3)];packet=tracking=None;local=None;checker=None;audit=ContactAudit(m)
 if a.observed_map is not None:
  from cross_episode_sim.navigation.map_continuation import restore_observed_map
  supports=restore_observed_map(grid,a.observed_map)+supports
@@ -30,8 +30,9 @@ base=OnboardBaseActuator(m,d,motion_guard=guard);q=base.controller.robot_view.ge
 with OneRingProcess(a.checkpoint,a.output/'onering') as ring,OnboardSensorInterface(m,d) as sensors,imageio.get_writer(str(a.output/'rollout.mp4'),fps=10,codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart']) as video,open(a.output/'progress.jsonl','w',buffering=1) as log:
  local=OneRingLocalNavigator(grid,ring,'Find a '+a.target,HouseExplorationConfig(arm_posture=tuple(q)))
  local.shape_checker_factory=lambda pose,arm:checker
- from cross_episode_sim.perception.visual_targets import GroundingDinoDetector,table_points
- detector=GroundingDinoDetector(verify_tables=False) if a.target=='dining table' else None
+ from cross_episode_sim.perception.visual_targets import table_points
+ from cross_episode_sim.perception.point_masks import PointMaskDetector
+ detector=PointMaskDetector(categories=('dining table',)) if a.target=='dining table' else None
  close_observations=0
  try:
   stopping=False;blocked=0
@@ -46,7 +47,7 @@ with OneRingProcess(a.checkpoint,a.output/'onering') as ring,OnboardSensorInterf
    if detector is not None and tick>0 and tick%50==0 and tracking.accepted:
     surfaces=[]
     for camera in packet.cameras.values():
-     for detection in detector.detect(camera.rgb,text='a dining table. a chair. a kitchen counter.'):
+     for detection in detector.detect(camera.rgb):
       if detection.label=='dining table':
        surface=table_points(camera,detection,np.eye(4))
        if len(surface)>=30:surfaces.append(surface)

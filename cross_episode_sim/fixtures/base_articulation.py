@@ -6,6 +6,7 @@ scratch data only; execution writes robot actuator controls, never fixture state
 import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
+from cross_episode_sim.control.coordinated_contact import CoordinatedContactSegment, contact_blend
 
 
 def project_slide_contents(c, probe, reference):
@@ -88,11 +89,13 @@ def move_contact(c, stage, pose, hinge_target, speed=.24, follow_arm=True,
             c.data = live
     live = c.data
     probe = mujoco.MjData(c.model)
+    segment = CoordinatedContactSegment(q0, q1, delta)
     # Check the combined base/arm/hinge sweep before executing it.
     for u in np.linspace(0., 1., count+1):
         probe.qpos[:] = live.qpos
-        probe.qpos[base_addresses] += u*delta[:2]
-        probe.qpos[addresses] = q0+u*(q1-q0)
+        offset, joints, _ = segment.sample(u)
+        probe.qpos[base_addresses] += offset[:2]
+        probe.qpos[addresses] = joints
         probe.qpos[c.door_address] = c.angle()+u*(hinge_target-c.angle())
         mujoco.mj_forward(c.model, probe)
         project_slide_contents(c, probe, live)
@@ -101,10 +104,11 @@ def move_contact(c, stage, pose, hinge_target, speed=.24, follow_arm=True,
             raise RuntimeError(f'Coordinated push sweep collision: {bad}')
     for u in np.linspace(0., 1., count+1)[1:]:
         # Smooth position ramp; no fixture state assignment or mask changes.
-        blend = u*u*(3.-2.*u)
-        c.data.ctrl[aids] = origin + blend*delta[:2]
+        blend = contact_blend(u)
+        offset, joints, _ = segment.sample(blend)
+        c.data.ctrl[aids] = origin + offset[:2]
         if follow_arm:
-            c.data.ctrl[c.arm_aids] = c.bounded_arm_command(q0+blend*(q1-q0))
+            c.data.ctrl[c.arm_aids] = c.bounded_arm_command(joints)
         c.tick(duration/count)
         bad = c.door_collision(c.data)
         if bad:

@@ -1,2 +1,5 @@
-from .visual_targets import Detection, ObjectDetector, GroundingDinoDetector, VisualTargetMap
-__all__ = ['Detection', 'ObjectDetector', 'GroundingDinoDetector', 'VisualTargetMap']
+from .visual_targets import Detection, ObjectDetector, VisualTargetMap
+__all__ = ['Detection', 'ObjectDetector', 'VisualTargetMap']
+
+from .point_masks import PointMaskDetector
+__all__.append("PointMaskDetector")

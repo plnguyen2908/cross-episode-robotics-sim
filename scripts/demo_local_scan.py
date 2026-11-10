@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image,ImageDraw
 from tqdm import tqdm
 from cross_episode_sim.sensors import OnboardSensorInterface
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation import ObservedNavigationMap,LocalScanSkill,ScanConfig
 from cross_episode_sim.robot.profile import MOBILE_FRANKA
 from cross_episode_sim.robot.observations import depth_rgb
@@ -91,7 +91,7 @@ def main():
     p.add_argument('--seconds',type=float,default=30.);p.add_argument('--yaw-speed',type=float,default=.5);p.add_argument('--initial-backoff',type=float,default=0.,help='Standalone reset offset from saved manipulation spawn, before evaluation')
     a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False);cv2.setNumThreads(4)
     m,d,doors=setup(a.source,a.initial_backoff);bridge=OnboardBaseActuator(m,d);audit=ContactAudit(m)
-    slam=RGBDMapper();grid=ObservedNavigationMap();skill=LocalScanSkill(ScanConfig(max_seconds=a.seconds,yaw_speed=a.yaw_speed))
+    slam=create_mapper();grid=ObservedNavigationMap();skill=LocalScanSkill(ScanConfig(max_seconds=a.seconds,yaw_speed=a.yaw_speed))
     rows=[];poses=[];truth=[];start=float(d.time);wall=time.monotonic();complete_at=None;stable_ticks=0
     mounts=(m.cam_pos.copy(),m.cam_quat.copy(),m.cam_fovy.copy())
     with OnboardSensorInterface(m,d) as sensor,imageio.get_writer(str(a.output/'scan.mp4'),fps=10,codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart']) as video:

@@ -7,6 +7,11 @@ from .local_scan import ScanConfig
 
 class OneRingProcess:
     def __init__(self,checkpoint,output,device='cuda:0',seed=0,max_steps=600,root=None):
+        from cross_episode_sim.perception.rpc import configured_client
+        self.remote=configured_client('onering')
+        if self.remote is not None:
+            self.output=Path(output).resolve();self.output.mkdir(parents=True,exist_ok=False)
+            self.count=0;self.metadata={'transport':'grpc'};self.reset();return
         root=Path(root or Path(__file__).resolve().parents[2]).resolve()
         self.output=Path(output).resolve();self.output.mkdir(parents=True,exist_ok=False)
         self.log=open(self.output/'worker.log','w');self.count=0
@@ -25,14 +30,22 @@ class OneRingProcess:
         raise RuntimeError(f'OneRING worker exited; see {self.output}/worker.log')
     def _request(self,value):
         self.process.stdin.write(json.dumps(value)+'\n');self.process.stdin.flush();return self._read()
-    def reset(self):return self._request(dict(reset=True))
+    def reset(self):
+        if self.remote is not None:return self.remote.call(operation='reset')
+        return self._request(dict(reset=True))
     def predict(self,packet,goal):
+        if self.remote is not None:
+            action=self.remote.call(timestamp=packet.timestamp,goal=goal,navigation=packet.cameras['navigation'].rgb,wrist=packet.cameras['wrist'].rgb)
+            self.count+=1
+            with open(self.output/'predictions.jsonl','a') as f:f.write(json.dumps(dict(timestamp=packet.timestamp,goal=goal,action=action,transport='grpc'))+'\n')
+            return action
         path=self.output/'current_rgb.npz'
         np.savez(path,navigation=packet.cameras['navigation'].rgb,wrist=packet.cameras['wrist'].rgb)
         result=self._request(dict(frame=str(path),goal=goal));self.count+=1
         with open(self.output/'predictions.jsonl','a') as f:f.write(json.dumps(dict(timestamp=packet.timestamp,goal=goal,**result))+'\n')
         return result['action']
     def close(self):
+        if getattr(self,'remote',None) is not None:self.remote.close();return
         if hasattr(self,'process'):
             if self.process.poll() is None:
                 try:self.process.stdin.write('{"close":true}\n');self.process.stdin.flush();self.process.wait(timeout=10)
@@ -112,7 +125,9 @@ class OneRingLocalNavigator:
         if not np.allclose(packet.arm.position,self.guard.config.arm_posture,atol=.05):return stop('arm_not_stowed')
         if self.shape_checker_factory is None and not np.allclose(packet.arm.position,ScanConfig().stowed_arm,atol=.05):return stop('carrying_requires_shape_checker')
         T=tracking.T_map_base;xy=T[:2,3];yaw=math.atan2(T[1,0],T[0,0])
-        self.guard.layers(xy);self.guard._depth(packet.cameras['navigation'])
+        if packet.timestamp!=getattr(self,'last_guard_frame',None):
+            self.guard.layers(xy);self.guard._depth(packet.cameras['navigation'])
+            self.last_guard_frame=packet.timestamp
         dt=.02 if self.last_time is None else min(.02,max(0.,now-self.last_time));self.last_time=now
         if self.active is None:
             if self.last_prediction_stamp==packet.timestamp:return stop('await_fresh_ring_observation')
@@ -135,6 +150,11 @@ class OneRingLocalNavigator:
         if not clear:
             self.active=None
             self.events.append(dict(time=now,event='blocked',detail=self.guard.stop_detail))
+            from .coverage import exploration_request
+            request=exploration_request(self.guard.grid,self.guard.stop_detail,'one_ring')
+            if request is not None:
+                stop('exploration_required')
+                return request
             result=stop('ring_collision_stop');result['detail']=self.guard.stop_detail
             return result
         self.guard.velocity=command
@@ -152,7 +172,9 @@ class OneRingLocalNavigator:
         error=math.atan2(delta[1],delta[0])-yaw
         error=math.atan2(math.sin(error),math.cos(error))
         if abs(error)<.04:return stop('viewpoint_facing_ready')
-        self.guard.layers(xy);self.guard._depth(packet.cameras['navigation'])
+        if packet.timestamp!=getattr(self,'last_guard_frame',None):
+            self.guard.layers(xy);self.guard._depth(packet.cameras['navigation'])
+            self.last_guard_frame=packet.timestamp
         dt=.02 if self.last_time is None else min(.02,max(0.,now-self.last_time));self.last_time=now
         desired=np.array([0.,np.clip(1.8*error,-cfg.yaw_speed,cfg.yaw_speed)])
         limits=np.array([cfg.acceleration,cfg.yaw_acceleration])*dt
@@ -169,7 +191,11 @@ class OneRingLocalNavigator:
         Height-aware checks avoid treating a countertop as a floor-level wall.
         Both translation and rotation include sensor latency and braking travel.
         """
-        checker=self.shape_checker_factory(np.r_[xy,yaw],packet.arm.position)
+        key=(packet.timestamp,tuple(packet.arm.position),tuple(xy),float(yaw))
+        if key!=getattr(self,'shape_cache_key',None):
+            self.shape_cache=self.shape_checker_factory(np.r_[xy,yaw],packet.arm.position)
+            self.shape_cache_key=key
+        checker=self.shape_cache
         cfg=self.guard.config;p=np.r_[xy,yaw]
         horizon=cfg.sensor_timeout+max(abs(command[0])/cfg.acceleration,abs(command[1])/cfg.yaw_acceleration)
         previous=p.copy()

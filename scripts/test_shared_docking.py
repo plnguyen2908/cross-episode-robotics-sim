@@ -9,7 +9,7 @@ from tqdm import tqdm
 from cross_episode_sim.navigation.shaped_docking import RobotGeometry,ShapedDocking
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
 from cross_episode_sim.sensors import OnboardSensorInterface
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.control.onboard_base import OnboardBaseActuator
 from cross_episode_sim.robot.observations import depth_rgb
 from scripts.demo_local_scan import ContactAudit
@@ -19,7 +19,7 @@ r=json.loads((a.source/'report.json').read_text());anchor=np.load(a.source/'slam
 g=ObservedNavigationMap(MapConfig(**json.loads((a.source/'summary.json').read_text())['config']));x=np.load(a.source/'navigation_map.npz');g.origin=x['origin_xy'];g.evidence=x['evidence'];g.floor_views=x['floor_views']
 if a.local_resolution:g=ObservedNavigationMap(MapConfig(resolution=a.local_resolution,height_resolution=a.local_resolution,extent_m=10.,pixel_stride=2))
 nav=ShapedDocking(g,RobotGeometry(m),max_nodes=1000);nav.reset(SimpleNamespace(position=np.array(r['selected_object']['position'])))
-slam=RGBDMapper();base=OnboardBaseActuator(m,d);audit=ContactAudit(m);start=d.time;poses=[];commands=[]
+slam=create_mapper();base=OnboardBaseActuator(m,d);audit=ContactAudit(m);start=d.time;poses=[];commands=[]
 with OnboardSensorInterface(m,d) as sensors,imageio.get_writer(str(a.output/'docking.mp4'),fps=10,codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart']) as video:
  if a.history_frames:
   calibration=sensors.capture().cameras['navigation']

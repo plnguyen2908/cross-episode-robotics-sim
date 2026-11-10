@@ -81,3 +81,67 @@ Do not interpret excluded semantic labels as free space. Native Hydra's estimate
 place/room regions may support routing when linked to repeated visual room labels
 and observed free-space routes. They are estimates, not simulator room truth.
 Never use simulator object identities, true poses, or room graphs as perception inputs.
+
+## Sensor SLAM default — November 3, 2026
+
+Use the shared `create_mapper()` factory for sensor execution: CUDA SIFT, CUDA
+RGB-D fusion, eight OpenCV CPU threads, no added frame subsampling. Runtime is
+`.venv-sift/bin/python` (setup: `scripts/setup_gpu_slam.sh`). Preserve explicit
+backend/device/thread overrides; never silently fall back to CPU or DA3. See
+`docs/rgbd_slam_optimization.md` for measured quality and remaining validation.
+
+## Door-state invariant execution — November 8, 2026
+
+The closed-door baseline is the open-door pipeline plus the shared door-opening
+backend when exploration needs passage to an unexplored room. Do not introduce a
+separate closed-door transit, carry, docking, or placement policy. Initial door
+configuration belongs only to test reset; onboard observations decide whether
+opening is needed. After nested door motion, refresh the sensor packet and SLAM
+pose, refresh the affected doorway map, and resume the same exploration engine.
+Retain its semantic memory and traveled-route graph. Qualify both initially open
+and closed full episodes; a successful opening or crossing alone is insufficient.
+
+## Contact tracking diagnostics — November 8, 2026
+
+User decision: arm/base tracking deviation and progress-monitor thresholds must
+not abort an otherwise executable door command. Log these as diagnostics and
+continue the command sequence; do not require a 5 mm endpoint match after a
+completed command chunk. Preserve collision-aware planning, physical collisions,
+grasp/release verification and unchanged private task scoring. Do not interpret
+removing tracking aborts as physical success. Standalone continuations must
+restore available observed map context, without simulator-derived geometry.
+
+## Frozen-map transit — November 8, 2026
+
+User decision: cross-room transit and carry must execute the graph/A* route on
+the frozen observed map without a second live-depth obstacle veto, temporary
+live-obstacle inflation, or a live-depth detour rejection. Keep localization,
+the planner's frozen-map obstacle/footprint handling, physical collisions and
+semantic scoring. This applies to both cached routes and target-route fallback.
+Local manipulation/docking perception is a separate skill, not a transit gate.
+
+## Preserve the qualified set-table baseline — November 10, 2026
+
+User decision: use `set_table_workspace_full07` as the working baseline and do
+not modify its execution behavior while qualifying the other household tasks.
+It passed 33/33 stages and final semantic scoring. The source snapshot and
+SHA-256 manifest are in `runs/five_task_sensor_20261110_baseline`.
+Fix added fixture/appliance/generic-receptacle skills and non-set-table recipe
+integration separately. Preserve the qualified exploration, object approach,
+pick, frozen-map carry, free-space placement and set-table dispatch. Do not
+hot-edit a running pipeline's implementations. A component pass is not a full
+composite pass; report each task's physical result independently.
+
+## Household evaluation continuation — November 10, 2026
+
+User decision: added sensor household recipes attempt every planned call rather
+than aborting the whole episode on a failed skill or diagnostic. Preserve failed
+outcomes; final task success comes exclusively from the unchanged private
+semantic scorer. Do not fabricate observations, successful grasps, IK solutions,
+or missing handoff outputs. Keep the live physical state after partial execution.
+Remove extra held-target/empty-hand orchestration vetoes in these recipes; required
+sensor acquisition and executable planner outputs still constrain individual
+motions. Fixture-return docking uses frozen-map base-footprint planning without
+a second arm/gripper 3D veto. Preserve physical collisions and native A*/cuRobo
+planning. This is evaluation behavior, not weaker datagen acceptance. Preserve
+the qualified set-table implementation. `--fail-fast` restores legacy recipe aborts.

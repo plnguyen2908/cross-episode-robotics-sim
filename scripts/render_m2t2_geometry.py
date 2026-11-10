@@ -14,6 +14,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     group=p.add_mutually_exclusive_group(required=True)
     group.add_argument('--pick',type=Path);group.add_argument('--place',type=Path)
+    p.add_argument('--video',type=Path,help='Offline map/camera video; defaults to legacy slam_m2t2.mp4')
     a=p.parse_args();physics=a.pick/'physics' if a.pick else a.place
     stage='grasp' if a.pick else 'place'
     data=np.load((a.pick or a.place)/'input.npz')
@@ -40,7 +41,7 @@ def main():
     ax.legend(loc='upper left',fontsize=8);fig.tight_layout()
     path=physics/'m2t2_point_cloud.png';fig.savefig(path);plt.close(fig)
     cloud=Image.open(path).convert('RGB').resize((640,480))
-    reader=imageio.get_reader(physics/'slam_m2t2.mp4')
+    reader=imageio.get_reader(a.video or physics/'slam_m2t2.mp4')
     with imageio.get_writer(physics/'slam_m2t2_geometry.mp4',fps=reader.get_meta_data()['fps'],codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart']) as writer:
         for frame in reader:
             canvas=Image.fromarray(frame)

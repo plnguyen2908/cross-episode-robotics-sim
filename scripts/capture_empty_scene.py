@@ -1,14 +1,14 @@
 """Capture current onboard depth for a collision-checked empty-hand floor scan."""
+from cross_episode_sim.runtime import artifacts
 import argparse
 from pathlib import Path
 import mujoco,numpy as np
-from cross_episode_sim.sensors import OnboardSensorInterface
+from cross_episode_sim.runtime.episode import episode_sensors as OnboardSensorInterface,load_checkpoint
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--start',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
 a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
-m=mujoco.MjModel.from_binary_path(str(a.start/'private_checkpoint/model.mjb'));d=mujoco.MjData(m)
-mujoco.mj_setState(m,d,np.load(a.start/'private_checkpoint/state.npy'),mujoco.mjtState.mjSTATE_INTEGRATION);mujoco.mj_forward(m,d)
+m,d=load_checkpoint(a.start)
 points=[];colors=[]
 with OnboardSensorInterface(m,d) as sensors:
     packet=sensors.capture()
@@ -20,4 +20,4 @@ with OnboardSensorInterface(m,d) as sensors:
         xyz=xyz@camera.T_base_optical[:3,:3].T+camera.T_base_optical[:3,3]
         keep=np.linalg.norm(xyz[:,:2],axis=1)<1.4
         points.append(xyz[keep]);colors.append(camera.rgb[v,u][keep])
-np.savez_compressed(a.output/'input.npz',points=np.concatenate(points),rgb=np.concatenate(colors))
+artifacts.save_archive(a.output/'input.npz',points=np.concatenate(points),rgb=np.concatenate(colors))

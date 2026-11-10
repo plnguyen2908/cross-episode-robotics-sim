@@ -341,6 +341,90 @@ def room_entry_navigator():
     return HybridNavigator(semantic,local,rooms,ManipulationReadiness())
 
 
+def test_frozen_search_recovery_moves_to_observed_station_viewpoint():
+    from cross_episode_sim.navigation.fixed_map import freeze_map,map_digest
+    nav=room_entry_navigator();nav.goal_room=''
+    nav.semantic.search_station='kitchen'
+    nav.semantic.remembered_furniture=[dict(label='kitchen',position=[2.,0.,1.],viewpoints=[[1.,0.,0.]])]
+    before=freeze_map(nav.semantic.grid)
+    nav._start_search_recovery(np.zeros(2),20.)
+    assert nav.search_recovery.path
+    command=nav.step(packet(20.),tracking(),20.)
+    assert command['status']!='exploration_required'
+    assert nav.terminal is None and not nav.object_search_success
+    assert map_digest(nav.semantic.grid)==before
+    # At the observed viewpoint, face the station rather than restarting a
+    # blind local search. A remembered station must not become a grasp target.
+    nav.search_recovery.step=lambda *args:dict(status='arrived_frontier',forward=0.,yaw=0.)
+    nav.step(packet(20.1),tracking(),20.1)
+    assert nav.mode=='view_align'
+    np.testing.assert_allclose(nav.view_hint,[2.,0.,1.])
+    assert nav._target(np.zeros(2),20.1) is None
+
+
+def test_frozen_search_requests_exploration_only_when_no_observed_route_exists():
+    from cross_episode_sim.navigation.fixed_map import freeze_map,map_digest
+    nav=room_entry_navigator();nav.goal_room=''
+    nav.semantic.search_station='kitchen'
+    nav.semantic.remembered_furniture=[dict(label='kitchen',position=[2.,0.,1.],viewpoints=[])]
+    nav.semantic.grid.floor_views[:]=0
+    before=freeze_map(nav.semantic.grid)
+    nav._start_search_recovery(np.zeros(2),20.)
+    command=nav.step(packet(20.),tracking(),20.)
+    assert command['status']=='exploration_required'
+    assert map_digest(nav.semantic.grid)==before
+    assert not nav.object_search_success
+
+
+def test_frozen_search_uses_shared_departure_when_close_dock_is_outside_transit():
+    from cross_episode_sim.navigation.fixed_map import freeze_map,map_digest
+    nav=room_entry_navigator();nav.goal_room=''
+    nav.semantic.search_station='kitchen'
+    nav.semantic.remembered_furniture=[dict(label='kitchen',position=[2.,0.,1.],viewpoints=[[1.5,0.,0.]])]
+    grid=nav.semantic.grid
+    # The robot's current narrow dock has no circular transit certificate;
+    # free floor is available farther from the fixture.
+    grid.floor_views[:]=0
+    y,x=np.indices(grid.floor_views.shape)
+    world_x=grid.origin[0]+(x+.5)*grid.config.resolution
+    grid.floor_views[world_x>.5]=2
+    before=freeze_map(grid)
+    nav.docking=NS()
+    nav._start_search_recovery(np.zeros(2),20.)
+    assert nav.mode=='search_departure' and nav.undock is not None
+    assert nav.terminal is None and map_digest(grid)==before
+    assert not nav.undock.runtime_collision_stop
+
+
+def test_unknown_ring_step_tries_mapped_viewpoint_before_requesting_exploration():
+    from cross_episode_sim.navigation.fixed_map import freeze_map
+    nav=room_entry_navigator();nav.goal_room=''
+    nav.semantic.search_station='kitchen'
+    nav.semantic.remembered_furniture=[dict(label='kitchen',position=[2.,0.,1.],viewpoints=[[1.,0.,0.]])]
+    nav.local.step=lambda *args:dict(status='exploration_required',forward=0.,yaw=0.)
+    freeze_map(nav.semantic.grid)
+    result=nav.step(packet(),tracking(),0.)
+    assert result['status']=='local_step_requires_viewpoint_recovery'
+    assert nav.mode=='search_recovery' and nav.search_recovery.path
+    assert nav.terminal is None
+
+
+def test_frozen_dock_reuses_target_without_semantic_inference():
+    from cross_episode_sim.navigation.fixed_map import freeze_map
+    nav=room_entry_navigator();freeze_map(nav.semantic.grid)
+    target=NS(position=np.array([.6,0,1]),label='cup',observations=2,last_seen=0.)
+    nav.goal_room='';nav.mode='redock';nav.found_target=target
+    nav.docking=NS(target=target,path=[np.array([.1,0,0])],terminal=None,
+                   step=lambda *args:dict(status='shape_docking',forward=.1,yaw=0))
+    def forbidden(*args):raise AssertionError('Repeated semantic inference while docking')
+    nav.semantic.observe=forbidden;nav.pointing=NS(observe=forbidden)
+    for t in (0.,1.,3.):
+        assert nav.step(packet(t),tracking(),t)['status']=='shape_docking'
+    assert target.last_seen==0.  # Do not fabricate fresh detection evidence.
+    nav.mode='local'
+    assert not nav._reuse_docking_target()
+
+
 def test_room_label_approaches_deeper_observed_viewpoint_before_ring():
     nav=room_entry_navigator()
     result=nav.step(packet(),tracking(),0.)
@@ -382,3 +466,46 @@ def test_single_sighting_pauses_but_never_authorizes_grasp():
     assert nav.step(packet(2.3),tracking(),2.3)['status']=='ring_m'
     assert not nav.object_search_success
 
+
+
+def test_raw_proposal_holds_before_tracker_confirmation_but_is_bounded():
+    nav=room_entry_navigator();nav.goal_room='';nav.semantic.pending_categories={'cup'}
+    assert nav.step(packet(),tracking(),0.)['status']=='confirm_raw_target_proposal'
+    assert not nav.object_search_success and nav.found_target is None
+    assert nav.step(packet(2),tracking(),2.)['status']=='confirm_raw_target_proposal'
+    nav.local.step=lambda *args:dict(status='ring_m',forward=.1,yaw=0.)
+    assert nav.step(packet(3.3),tracking(),3.3)['status']=='ring_m'
+    nav.semantic.pending_categories=set()
+    nav.step(packet(3.4),tracking(),3.4)
+    nav.semantic.pending_categories={'cup'}
+    assert nav.step(packet(3.5),tracking(),3.5)['status']=='confirm_raw_target_proposal'
+
+
+def test_frozen_ring_unknown_support_stops_without_mutating_map():
+    from cross_episode_sim.navigation.fixed_map import freeze_map,map_digest
+    grid=ObservedNavigationMap(MapConfig(extent_m=6));grid.floor_views[:]=2
+    digest=freeze_map(grid)
+    nav=OneRingLocalNavigator(grid,NS(predict=lambda *args:'m'),'bowl')
+    def blocked(*args):
+        nav.guard.stop_detail={'reason':'unobserved_base_support'}
+        return False
+    nav.guard._command_clear=blocked
+    command=nav.step(packet(),tracking(),0.)
+    assert command['status']=='exploration_required'
+    assert command['forward']==command['yaw']==0.
+    assert nav.active is None
+    assert map_digest(grid)==digest
+
+
+def test_shape_cache_reuses_same_observation_but_rechecks_each_motion():
+    calls=[];sweeps=[]
+    grid=ObservedNavigationMap(MapConfig(extent_m=6));grid.floor_views[:]=2
+    nav=OneRingLocalNavigator(grid,NS(predict=lambda *args:'m'),'bowl')
+    def factory(*args):
+        calls.append(1)
+        return NS(swept=lambda a,b:sweeps.append(1) or True)
+    nav.shape_checker_factory=factory
+    for _ in range(3):assert nav._shape_command_clear(packet(),np.zeros(2),0.,np.array([.1,0.]))
+    assert len(calls)==1 and len(sweeps)>3
+    nav._shape_command_clear(packet(.1),np.zeros(2),0.,np.array([.1,0.]))
+    assert len(calls)==2

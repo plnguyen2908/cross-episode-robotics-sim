@@ -67,6 +67,11 @@ class LocalScanSkill:
         p=np.column_stack(((u-c.K[0,2])*depth/c.K[0,0],(v-c.K[1,2])*depth/c.K[1,1],depth))
         T=c.T_base_optical; p=p@T[:3,:3].T+T[:3,3]
         p=p[(p[:,2]>.05)&(p[:,2]<self.config.height)]
+        if c.robot_mask is None and getattr(c,'robot_bounds_base',()):
+            from cross_episode_sim.sensors.onboard import without_robot_points
+            # Only points capable of triggering this guard need self-filtering.
+            near=np.linalg.norm(p[:,:2],axis=1)<self.config.radius+self.config.margin
+            p=np.concatenate([p[~near],without_robot_points(p[near],c)])
         radial=np.linalg.norm(p[:,:2],axis=1)
         self.nearest=float(radial.min()) if len(radial) else None
         self.nearest_point=p[int(radial.argmin())].tolist() if len(radial) else None

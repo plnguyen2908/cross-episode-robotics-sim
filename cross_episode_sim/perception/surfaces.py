@@ -9,7 +9,7 @@ def project_mask(depth, mask, K, T):
     return optical@T[:3,:3].T+T[:3,3]
 
 
-def table_surface_mask(depth,mask,K,T,min_surface_fraction=.2):
+def table_surface_mask(depth,mask,K,T,min_surface_fraction=.2,*,min_height=.35,max_height=1.5,min_span=.20,min_area=.025):
     """Keep an observed tabletop, not legs or background behind its silhouette.
 
     A semantic table proposal is required upstream. Fit the dominant elevated,
@@ -22,10 +22,10 @@ def table_surface_mask(depth,mask,K,T,min_surface_fraction=.2):
     result=np.zeros_like(valid)
     if valid.sum()<30:return result
     points=project_mask(depth,valid,K,T)
-    eligible=(points[:,2]>.35)&(points[:,2]<1.5)
+    eligible=(points[:,2]>min_height)&(points[:,2]<max_height)
     if eligible.sum()<30:return result
     heights=points[eligible,2]
-    edges=np.arange(.35,1.526,.025)
+    edges=np.arange(min_height,max_height+.026,.025)
     hist,_=np.histogram(heights,edges)
     peak=int(np.argmax(hist));height=.5*(edges[peak]+edges[peak+1])
     seed=eligible&(np.abs(points[:,2]-height)<.04)
@@ -47,7 +47,7 @@ def table_surface_mask(depth,mask,K,T,min_surface_fraction=.2):
     if seed.sum()<min_surface_fraction*len(points):return result
     xy=points[seed,:2]
     span=np.percentile(xy,95,axis=0)-np.percentile(xy,5,axis=0)
-    if np.max(span)<.20 or np.prod(span)<.025:return result
+    if np.max(span)<min_span or np.prod(span)<min_area:return result
     result[np.where(valid)]=seed
     return result
 

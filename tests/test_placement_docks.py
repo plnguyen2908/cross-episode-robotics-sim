@@ -22,6 +22,17 @@ def test_multiple_interior_targets_are_not_bound_to_one_destination():
         placement_docks(np.array([[np.nan,0,.8]]),np.zeros(3))
 
 
+def test_preferred_free_patch_guides_dock_and_keeps_alternatives():
+    targets=np.array([[.6,0,.8],[1.,.4,.8]])
+    candidates=placement_docks(targets,np.zeros(3),preferred_targets=[targets[1]])
+    np.testing.assert_allclose(candidates[0].target,targets[1])
+    assert len({tuple(c.target) for c in candidates})==2
+    for candidate in candidates:
+        delta=candidate.target[:2]-candidate.pose[:2]
+        np.testing.assert_allclose(delta/candidate.distance,
+                                   [np.cos(candidate.pose[2]),np.sin(candidate.pose[2])],atol=1e-12)
+
+
 def test_search_can_choose_another_dock_and_keeps_final_facing():
     from types import SimpleNamespace
     from cross_episode_sim.navigation.placement_docks import plan_to_any_dock

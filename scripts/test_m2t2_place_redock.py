@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np,mujoco,imageio.v2 as imageio
 from scipy.spatial import cKDTree
 from cross_episode_sim.sensors import OnboardSensorInterface
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
 from cross_episode_sim.navigation.shaped_docking import RobotGeometry
 from cross_episode_sim.control.observed_payload import ObservedPayload
@@ -22,7 +22,7 @@ target=np.array(min(rows,key=lambda r:np.linalg.norm(np.array(r['tcp'])[:2,3]))[
 advance=float(target[0]-np.sqrt(max(0.,.58**2-target[1]**2)))
 if not 0<advance<=.30:raise RuntimeError('Target needs a different docking route')
 heading=float(np.arctan2(target[1],target[0]-advance))
-grid=ObservedNavigationMap(MapConfig(resolution=.05,height_resolution=.025,pixel_stride=4));slam=RGBDMapper();packet=None;tracking=None;detail=None;supports=[np.zeros(3)];checker=None
+grid=ObservedNavigationMap(MapConfig(resolution=.05,height_resolution=.025,pixel_stride=4));slam=create_mapper();packet=None;tracking=None;detail=None;supports=[np.zeros(3)];checker=None
 def guard(forward,yaw,dt):
  global detail
  if tracking is None or not tracking.accepted:return False

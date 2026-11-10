@@ -4,6 +4,11 @@ from .house_exploration import HouseExplorer
 from .semantic_navigation import astar_observed
 
 class RoomWaypointFollower(HouseExplorer):
+    def _depth(self,camera):
+        if hasattr(self.grid,'fixed_obstacle_points'):
+            self.near_points=np.empty((0,3))
+        else:super()._depth(camera)
+
     def set_destinations(self,points):
         self.destinations=[np.asarray(p,float) for p in points]
         self.phase='travel';self.path=[];self.goal=None;self.terminal=None
@@ -37,7 +42,7 @@ class HybridNavigator:
         self.undock=None;self.visited_room_waypoints=[]
         self.search_window=[];self.search_recovery=None;self.search_recovery_started=None
         self.searched_viewpoints=[];self.room_approach=False
-        self.tentative_attempted=set();self.tentative_until=None
+        self.tentative_attempted=set();self.tentative_until=None;self.proposal_inspection_started=None
         self.confirmation_since=None;self.done_at=None;self.found_target=None;self.object_search_success=False
     def _switch(self,mode,now):
         if mode==self.mode:return
@@ -105,19 +110,56 @@ class HybridNavigator:
     def _start_search_recovery(self,xy,now):
         # Old observations are search hints only, never fresh grasp targets.
         hints=getattr(self.semantic,'remembered_object_hypotheses',[])
-        points=[]
+        points=[];look_hints=[]
         for hint in hints:
             if hint.label!=self.semantic.target_label:continue
+            look_hints.append(hint.position)
             for radius in (1.,1.4):
                 for angle in np.linspace(-np.pi,np.pi,16,endpoint=False):
                     point=hint.position[:2]+radius*np.array([np.cos(angle),np.sin(angle)])
                     if np.linalg.norm(point-xy)<.6:continue
                     if any(np.linalg.norm(point-v)<.6 for v in self.searched_viewpoints):continue
                     points.append(point)
+        # A missing object detection does not mean the floor map is missing.
+        # Search from already mapped viewpoints around the requested station.
+        # These landmarks were observed during exploration, not scene truth.
+        station=getattr(self.semantic,'search_station',None)
+        for landmark in getattr(self.semantic,'remembered_furniture',[]):
+            if not station or landmark['label']!=station:continue
+            center=np.asarray(landmark['position'],float)
+            look_hints.append(center)
+            station_points=[np.asarray(p,float)[:2] for p in landmark.get('viewpoints',[])]
+            for radius in (.8,1.2,1.6,2.):
+                station_points.extend(center[:2]+radius*np.array([np.cos(a),np.sin(a)])
+                    for a in np.linspace(-np.pi,np.pi,16,endpoint=False))
+            for point in station_points:
+                if np.linalg.norm(point-xy)<.6:continue
+                if any(np.linalg.norm(point-v)<.6 for v in self.searched_viewpoints):continue
+                points.append(point)
+        self.recovery_look_hint=(min(look_hints,key=lambda p:np.linalg.norm(p[:2]-xy)).copy()
+                                 if look_hints else None)
         points.sort(key=lambda p:np.linalg.norm(p-xy))
         follower=RoomWaypointFollower(self.semantic.grid,self.semantic.explorer.config)
         follower.set_destinations(points)
         if not points or follower._plan(xy,now) is not None:
+            if hasattr(self.semantic.grid,'fixed_obstacle_points'):
+                # A valid close dock can lie outside the circular transit
+                # footprint. Use the existing shape-checked departure first;
+                # do not misclassify that as an unexplored room.
+                follower.layers(xy)
+                row,col=follower.cell(xy)
+                inside=0<=row<follower.free.shape[0] and 0<=col<follower.free.shape[1]
+                if points and inside and not follower.free[row,col] and self.docking is not None:
+                    from .observed_undock import ObservedUndock
+                    self.search_recovery=follower
+                    self.undock=ObservedUndock(self.docking,runtime_collision_stop=False)
+                    self.events.append(dict(time=now,event='search_departure_required'))
+                    self._switch('search_departure',now)
+                    return
+                self.search_recovery=None
+                self.events.append(dict(time=now,event='search_viewpoints_unreachable',candidates=len(points)))
+                self._switch('search_recovery',now)
+                return
             # The shared frontier planner selects only observed-free routes.
             follower=HouseExplorer(self.semantic.grid,self.semantic.explorer.config)
             follower.phase='travel'
@@ -129,8 +171,14 @@ class HybridNavigator:
         self._switch('search_recovery',now)
 
     def _target(self,xy,now):
-        candidates=[t for t in self.semantic.targets.targets if t.label==self.semantic.target_label and t.observations>=2 and 0<=now-t.last_seen<=self.readiness.max_age]
+        candidates=[t for t in (self.semantic.targets.targets+getattr(getattr(getattr(self,'pointing',None),'targets',None),'targets',[])) if t.label==self.semantic.target_label and t.observations>=2 and 0<=now-t.last_seen<=self.readiness.max_age]
         return min(candidates,key=lambda t:np.linalg.norm(t.position[:2]-xy)) if candidates else None
+
+    def _reuse_docking_target(self):
+        return (hasattr(self.semantic.grid,'fixed_obstacle_points')
+                and self.mode=='redock' and self.docking is not None
+                and getattr(self.docking,'target',None) is not None)
+
     def step(self,packet,tracking,now):
         stop=self.semantic.follower._stop
         if self.started is None:self.started=now
@@ -141,19 +189,47 @@ class HybridNavigator:
         if self.docking is not None and hasattr(self.docking,'record_support'):
             T=tracking.T_map_base
             self.docking.record_support(np.r_[T[:2,3],np.arctan2(T[1,0],T[0,0])])
-        self.semantic.observe(packet,tracking)
+        reuse_target=self._reuse_docking_target()
+        if (hasattr(self.semantic.grid,'fixed_obstacle_points') and self.docking is not None
+                and not (reuse_target and self.docking.path is not None)
+                and packet.timestamp!=getattr(self,'last_live_points_stamp',None)):
+            from .fixed_map import live_obstacle_points
+            self.docking.live_points=live_obstacle_points(packet,tracking)
+            self.last_live_points_stamp=packet.timestamp
+        # The target was visually confirmed before this handoff. Frozen-map
+        # docking follows that estimate; manipulation obtains a fresh view.
+        # Resume semantic perception when returning to search/recovery.
+        if not reuse_target:
+            if getattr(self,'pointing',None) is not None:self.pointing.observe(packet,tracking)
+            self.semantic.observe(packet,tracking)
         if self.semantic.detection_rounds<3:
             return stop('confirm_initial_observations')
         mapped=self.semantic.last_mapping or {}
-        self.rooms.update(packet,tracking,mapped.get('rooms',[]))
+        if self.goal_room:
+            self.rooms.update(packet,tracking,mapped.get('rooms',[]))
         xy=tracking.T_map_base[:2,3];target=self._target(xy,packet.timestamp)
         current=self.rooms.current_label
+        if self.mode=='search_departure':
+            result=self.undock.step(packet,tracking,self.search_recovery.free,now)
+            if result['status']=='undock_complete':
+                self.undock=None
+                self._start_search_recovery(xy,now)
+                return stop('search_departure_complete')
+            if self.undock.error:
+                self.terminal=self.undock.error
+            return result
         if self.mode in {'room_search','room_transit'} and (not self.goal_room or current==self.goal_room):
             if not self.goal_room or target is not None:
                 self._switch('local',now)
             else:
                 self._start_room_approach(xy,now)
                 return stop('room_viewpoint_approach_requested')
+        known_viewpoint_route=(self.mode=='search_recovery' and
+            isinstance(self.search_recovery,RoomWaypointFollower) and bool(self.search_recovery.path))
+        if (self.mode in {'room_search','search_recovery'} and
+                hasattr(self.semantic.grid,'fixed_obstacle_points') and not known_viewpoint_route):
+            self.terminal='exploration_required'
+            return dict(status=self.terminal,forward=0.,yaw=0.,exploration_request=dict(resume_skill='local_navigation',detail=dict(reason='search_requires_exploration')))
         if self.mode=='room_search':
             self.transit.layers(xy)
             row,col=self.transit.cell(xy)
@@ -210,6 +286,9 @@ class HybridNavigator:
                         self.view_hint=min(hints,key=lambda h:np.linalg.norm(h.position[:2]-xy)).position.copy()
                         self.view_align_started=now
                         self._switch('view_align',now)
+                    elif getattr(self,'recovery_look_hint',None) is not None:
+                        self.view_hint=self.recovery_look_hint.copy();self.view_align_started=now
+                        self._switch('view_align',now)
                     else:self._switch('local',now)
                     return stop('search_viewpoint_observed')
                 return result
@@ -223,6 +302,17 @@ class HybridNavigator:
                     return stop(result['status'])
                 return result
         if self.mode=='local':
+            # Hold a newly seen raw target proposal long enough for BotSort and
+            # the VLM to inspect distinct frames. This is not a confirmed target
+            # and must never authorize docking or grasping. Bound the hold so a
+            # persistent false proposal cannot freeze search indefinitely.
+            pending=self.semantic.target_label in getattr(self.semantic,'pending_categories',set())
+            if target is None and pending:
+                if self.proposal_inspection_started is None:
+                    self.proposal_inspection_started=now;self.local.reset_motion()
+                if now-self.proposal_inspection_started<3.2:
+                    return stop('confirm_raw_target_proposal')
+            else:self.proposal_inspection_started=None
             if target is None:
                 tentative=[t for t in self.semantic.targets.targets if t.label==self.semantic.target_label
                            and t.observations==1 and 0<=packet.timestamp-t.last_seen<=self.readiness.max_age]
@@ -247,6 +337,14 @@ class HybridNavigator:
                 self.done_at=now;self.confirmation_since=now-self.readiness.max_age;self._switch('confirm_found',now)
                 return stop('confirm_visible_target')
             result=self.local.step(packet,tracking,now)
+            if result['status']=='exploration_required':
+                # One suggested local step may leave observed support while
+                # another viewing position is reachable on the frozen map.
+                # Try that route before escalating to new-space exploration.
+                if hasattr(self.semantic.grid,'fixed_obstacle_points'):
+                    self._start_search_recovery(xy,now)
+                    return stop('local_step_requires_viewpoint_recovery')
+                self.terminal='exploration_required';return result
             if result['status']=='ring_collision_stop':
                 self.blocked_predictions+=1
                 if self.blocked_predictions>=3 and target is not None:
@@ -259,7 +357,7 @@ class HybridNavigator:
                 return stop('confirm_found_object')
             return result
         if self.mode=='confirm_found':
-            fresh=[t for t in self.semantic.targets.targets
+            fresh=[t for t in (self.semantic.targets.targets+getattr(getattr(getattr(self,'pointing',None),'targets',None),'targets',[]))
                    if t.label==self.semantic.target_label and t.observations>=2
                    and 0<=packet.timestamp-t.last_seen<=self.readiness.max_age
                    and len({h['timestamp'] for h in getattr(t,'history',[])
@@ -279,7 +377,7 @@ class HybridNavigator:
             # Category search may discover a better instance in the wrist view.
             # Change only while stopped, with fresh repeated visual evidence.
             current=getattr(self.docking,"target",None)
-            alternate=self._target(xy,packet.timestamp)
+            alternate=None if reuse_target else self._target(xy,packet.timestamp)
             if current is not None and alternate is not None and alternate is not current and np.linalg.norm(getattr(self.docking,'velocity',np.zeros(2)))<.01:
                 recent={h['timestamp'] for h in getattr(alternate,'history',[]) if packet.timestamp-self.readiness.max_age<=h['timestamp']<=packet.timestamp}
                 if len(recent)>=2 and np.linalg.norm(alternate.position[:2]-xy)+.12<np.linalg.norm(current.position[:2]-xy):
@@ -287,6 +385,8 @@ class HybridNavigator:
                     self.events.append(dict(time=now,event='prefer_closer_observed_instance',track_id=getattr(alternate,'track_id',None)))
                     return self._request_redock(now)
             result=self.docking.step(packet,tracking,now)
+            if result['status']=='exploration_required':
+                self.terminal='exploration_required';return result
             if self.docking.terminal=='shape_route_unverified':
                 # Do not ask the image navigator to repeat blocked turns when
                 # the geometric planner explicitly needs floor observations.

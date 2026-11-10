@@ -2,6 +2,32 @@ import numpy as np
 from cross_episode_sim.control.m2t2_policy import grasp_to_tcp
 
 
+def test_empty_target_proposals_retry_without_accepting_neighbor():
+    from cross_episode_sim.control.m2t2_policy import propose_pick_grasps
+    class Policy:
+        calls=0
+        def predict(self,points,rgb):
+            contact=np.array([1.,0.,0.]) if self.calls<3 else np.zeros(3)
+            self.calls+=1
+            return dict(grasps=[np.eye(4)[None]],grasp_confidence=[np.array([.9])],grasp_contacts=[contact[None]])
+    policy=Policy();r=propose_pick_grasps(policy,np.zeros((32,3)),np.zeros((32,3)),np.zeros(3))
+    assert policy.calls==4 and len(r['candidates'])==1 and r['empty_target_retry']
+    assert r['candidates'][0]['sampling_pass']==3
+
+
+def test_pick_proposal_retry_preserves_normal_budget_and_stops_on_empty():
+    from cross_episode_sim.control.m2t2_policy import propose_pick_grasps
+    class Policy:
+        def __init__(self,near):self.calls=0;self.near=near
+        def predict(self,points,rgb):
+            self.calls+=1
+            return dict(grasps=[np.eye(4)[None]],grasp_confidence=[np.array([.9])],grasp_contacts=[np.array([[0. if self.near else 1.,0,0]])])
+    for near,budget in ((True,3),(False,8)):
+        policy=Policy(near);r=propose_pick_grasps(policy,np.zeros((32,3)),np.zeros((32,3)),np.zeros(3))
+        assert policy.calls==budget
+        assert len(r['candidates'])==(3 if near else 0)
+
+
 def test_grasp_contact_filter_rejects_neighbor_inside_centroid_radius():
     from cross_episode_sim.control.m2t2_policy import filter_observed_contacts
     points=np.array([[.4,0,.95],[.4,0,1.],[.4,.02,1.]])
@@ -115,3 +141,19 @@ def test_payload_box_does_not_use_oversized_bounding_sphere():
     assert not p.world_clear_box(turned)
     p.centers[0]=[.225,0.,0.]
     assert not p.world_clear_box(box,margin=.01)
+
+
+def test_cached_sphere_clearance_rechecks_changed_sphere_margin_and_world():
+    from types import SimpleNamespace
+    from cross_episode_sim.control.observed_grasp_planner import ObservedGraspPlanner
+    box=SimpleNamespace(name='box',pose=[0,0,0,1,0,0,0],dims=[.2,.2,.2])
+    planner=ObservedGraspPlanner(None,None,[box])
+    safe=np.array([[.13,0,0,.02]])
+    assert planner.world_clear(safe)
+    assert planner.world_clear(safe.copy())
+    assert not planner.world_clear(safe,margin=.02)
+    moved=safe.copy();moved[0,0]=.11
+    assert not planner.world_clear(moved)
+    box.pose[0]=.03
+    updated=ObservedGraspPlanner(None,None,[box])
+    assert not updated.world_clear(safe)

@@ -32,8 +32,14 @@ def accumulate_duration(storage, rules, time, snapshot):
         raise ValueError('Restore duration state together with simulator checkpoints')
     elapsed = time - previous
     totals = storage.setdefault('heated_seconds', {})
+    by_support = storage.setdefault('heated_seconds_by_support', {})
     for target, rule in rules.items():
         totals[target] = totals.get(target, 0.) + (elapsed if storage.get('qualifying', {}).get(target, False) else 0.)
+        if storage.get('qualifying', {}).get(target, False):
+            support = storage.get('qualifying_supports', {}).get(target)
+            if support is not None:
+                row = by_support.setdefault(target, {})
+                row[support] = row.get(support, 0.) + elapsed
     qualifying = {}
     for target, rule in rules.items():
         obj = snapshot.get('objects', {}).get(target, {})
@@ -53,4 +59,6 @@ def accumulate_duration(storage, rules, time, snapshot):
         if 'closed_fixture' in rule:
             qualifies = qualifies and fixtures.get(rule['closed_fixture'], {}).get('closed') is True
         qualifying[target] = bool(qualifies)
-    storage.update(time=time, qualifying=qualifying)
+    storage.update(time=time, qualifying=qualifying,
+                   qualifying_supports={target: snapshot.get('objects', {}).get(target, {}).get('support')
+                                        for target in rules})

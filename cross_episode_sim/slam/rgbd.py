@@ -4,6 +4,7 @@ No simulator, poses, action recordings or object labels are accepted here.
 Map coordinates are the initial robot base frame. No loop closure is provided.
 """
 from dataclasses import dataclass
+from contextlib import contextmanager
 import numpy as np
 import open3d as o3d
 
@@ -19,10 +20,12 @@ class TrackingResult:
 
 
 class RGBDMapper:
-    def __init__(self, device='CPU:0', voxel_size=.04, depth_max=6., min_fitness=.15, planar_base=True, tracking_backend='hybrid', recovery_factory=None):
+    def __init__(self, device='CPU:0', voxel_size=.04, depth_max=6., min_fitness=.15, planar_base=True, tracking_backend='hybrid', recovery_factory=None, feature_width=None, feature_backend='opencv', fuse_dense=True):
         if tracking_backend not in ('hybrid','odometry'):raise ValueError('Unknown tracking backend')
+        self.fuse_dense=fuse_dense
+        if not fuse_dense and tracking_backend!='hybrid':raise ValueError('Localization-only requires hybrid tracking')
         self.tracking_backend=tracking_backend;self.tracker=None;self.timestamps=[]
-        self.recovery_factory=recovery_factory
+        self.recovery_factory=recovery_factory;self.feature_width=feature_width;self.feature_backend=feature_backend
         self.device = o3d.core.Device(device)
         self.voxel_size, self.depth_max, self.min_fitness = voxel_size, depth_max, min_fitness
         self.planar_base = planar_base
@@ -31,6 +34,42 @@ class RGBDMapper:
         self.last_timestamp = None
         self.trajectory = []
         self.lost = False
+
+    def _tensor_rgbd(self,rgb,depth):
+        return o3d.t.geometry.RGBDImage(
+            o3d.t.geometry.Image(o3d.core.Tensor(np.ascontiguousarray(rgb),device=self.device)),
+            o3d.t.geometry.Image(o3d.core.Tensor(np.ascontiguousarray(depth,dtype=np.float32),device=self.device)))
+
+    @contextmanager
+    def fixed_reference(self, min_depth=.65):
+        if self.tracker is None or self.tracker.previous_raw is None or self.lost:
+            raise RuntimeError('Verified tracking is required for local alignment')
+        if getattr(self,'_precision_reference',None) is not None:raise RuntimeError('Nested precision reference')
+        rgb,depth=self.tracker.previous_raw;depth=depth.copy();depth[depth<min_depth]=0.
+        self._precision_reference=(self._tensor_rgbd(rgb,depth),self.tracker.pose.copy(),min_depth)
+        try:yield
+        finally:
+            self._precision_reference=None
+            if not self.lost:
+                self.tracker.keys.accept_odometry(self.tracker.pose,*self.tracker.previous_raw)
+
+    def _precision_update(self,rgb,depth):
+        reference,anchor,min_depth=self._precision_reference
+        depth=depth.copy();depth[depth<min_depth]=0.
+        initial=np.linalg.inv(self.tracker.pose)@anchor
+        result=o3d.t.pipelines.odometry.rgbd_odometry_multi_scale(
+            reference,self._tensor_rgbd(rgb,depth),o3d.core.Tensor(self.K,o3d.core.Dtype.Float64),
+            o3d.core.Tensor(initial,o3d.core.Dtype.Float64),depth_scale=1.,depth_max=self.depth_max)
+        delta=result.transformation.cpu().numpy()
+        fitness=float(result.fitness);rmse=float(result.inlier_rmse)
+        if not np.isfinite(delta).all() or fitness<self.min_fitness or rmse>.03:
+            return None,fitness,rmse,'precision alignment rejected'
+        pose=anchor@np.linalg.inv(delta)
+        if self.planar_base:
+            base=pose@np.linalg.inv(self.mount);yaw=np.arctan2(base[1,0],base[0,0]);co,si=np.cos(yaw),np.sin(yaw)
+            base[:3,:3]=[[co,-si,0],[si,co,0],[0,0,1]];base[2,3]=0.;pose=base@self.mount
+        self.tracker.pose=pose.copy();self.tracker.previous_raw=(rgb.copy(),depth.copy())
+        return pose,fitness,rmse,'precision RGB-D alignment'
 
     def update(self, camera, timestamp):
         """Accept one RGBDCamera and timestamp; fail closed on lost tracking."""
@@ -58,25 +97,29 @@ class RGBDMapper:
                 if self.tracker.recovery:self.tracker.recovery.pending=None
             return TrackingResult(timestamp, False, 'insufficient depth', None, 0., float('inf'))
         intrinsic = o3d.core.Tensor(camera.K, o3d.core.Dtype.Float64)
-        if self.model is None:
+        if not hasattr(self,'K'):
             self.K = camera.K.copy()
             self.shape = depth.shape
             self.mount = camera.T_base_optical.copy()
             self.pose = o3d.core.Tensor(self.mount, o3d.core.Dtype.Float64)
-            self.model = o3d.t.pipelines.slam.Model(self.voxel_size, 16, 20000, self.pose, self.device)
-            self.input = o3d.t.pipelines.slam.Frame(h,w,intrinsic,self.device)
+            if self.fuse_dense:
+                self.model = o3d.t.pipelines.slam.Model(self.voxel_size, 16, 20000, self.pose, self.device)
+                self.input = o3d.t.pipelines.slam.Frame(h,w,intrinsic,self.device)
             if self.tracking_backend=='hybrid':
                 from .hybrid import HybridRGBDTracker
                 recovery=self.recovery_factory(self.K,self.mount) if self.recovery_factory else None
-                self.tracker=HybridRGBDTracker(self.K,self.mount,planar_base=self.planar_base,recovery=recovery)
+                self.tracker=HybridRGBDTracker(self.K,self.mount,planar_base=self.planar_base,recovery=recovery,feature_width=self.feature_width,feature_backend=self.feature_backend)
         if depth.shape != self.shape or not np.allclose(camera.K, self.K) or not np.allclose(camera.T_base_optical, self.mount):
             raise ValueError('Navigation calibration changed; create a new mapper')
-        self.input.set_data_from_image('depth',o3d.t.geometry.Image(o3d.core.Tensor(np.round(np.clip(depth,0,65)*1000).astype(np.uint16),device=self.device)))
-        self.input.set_data_from_image('color',o3d.t.geometry.Image(o3d.core.Tensor(np.ascontiguousarray(camera.rgb),device=self.device)))
+        if self.fuse_dense:
+            self.input.set_data_from_image('depth',o3d.t.geometry.Image(o3d.core.Tensor(np.round(np.clip(depth,0,65)*1000).astype(np.uint16),device=self.device)))
+            self.input.set_data_from_image('color',o3d.t.geometry.Image(o3d.core.Tensor(np.ascontiguousarray(camera.rgb),device=self.device)))
         status='tracking'
         if self.tracker is not None:
             event_count=len(self.tracker.keys.events)
-            estimate,n,rmse,status=self.tracker.update(camera.rgb,depth)
+            if getattr(self,'_precision_reference',None) is not None:
+                estimate,n,rmse,status=self._precision_update(camera.rgb,depth)
+            else:estimate,n,rmse,status=self.tracker.update(camera.rgb,depth)
             for event in self.tracker.keys.events[event_count:]:event["timestamp"]=timestamp
             if estimate is None:
                 self.lost=True
@@ -128,8 +171,9 @@ class RGBDMapper:
         if self.tracker is None:
             self.previous = rgbd
             self.previous_depth = depth.copy()
-        self.model.update_frame_pose(self.index,self.pose)
-        self.model.integrate(self.input,1000.,self.depth_max,8.)
+        if self.fuse_dense:
+            self.model.update_frame_pose(self.index,self.pose)
+            self.model.integrate(self.input,1000.,self.depth_max,8.)
         base = self.pose.cpu().numpy() @ np.linalg.inv(self.mount)
         self.trajectory.append(base.copy());self.timestamps.append(timestamp)
         self.index += 1
@@ -147,7 +191,9 @@ class RGBDMapper:
         np.save(out/'estimated_base_poses.npy',np.asarray(self.trajectory))
         np.save(out/'estimated_timestamps.npy',np.asarray(self.timestamps))
         import json
-        (out/'mapper.json').write_text(json.dumps(dict(backend=self.tracking_backend,
+        (out/'mapper.json').write_text(json.dumps(dict(backend=self.tracking_backend, device=str(self.device), fuse_dense=self.fuse_dense,
+            feature_backend=self.feature_backend, feature_width=self.feature_width,
+            opencv_threads=__import__("cv2").getNumThreads(),
             odometry_bridges=self.tracker.bridges if self.tracker else None,
             keyframe_events=self.tracker.keys.events if self.tracker else []),indent=2))
         if self.tracker and self.tracker.recovery:

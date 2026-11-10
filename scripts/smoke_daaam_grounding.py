@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from cross_episode_sim.perception.daaam_grounding import DaaamGrounder,LocalVLM
 from cross_episode_sim.sensors import OnboardSensorInterface
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.mapping.hydra_mapping import HydraFrameWriter
 from cross_episode_sim.perception.visual_targets import VisualTargetMap
 from cross_episode_sim.control.onboard_base import OnboardBaseActuator
@@ -16,7 +16,7 @@ p.add_argument('--frames',type=int,default=10)
 p.add_argument('--native-hydra',action='store_true')
 a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 grounder=DaaamGrounder(LocalVLM(),'external/DAAAM/checkpoints/fastsam/FastSAM-s.pt',a.output/'queries')
-m,d,_=setup(a.source);base=OnboardBaseActuator(m,d);results=[];slam=RGBDMapper();targets=VisualTargetMap();hydra_frames=HydraFrameWriter(a.output/'hydra_frames')
+m,d,_=setup(a.source);base=OnboardBaseActuator(m,d);results=[];slam=create_mapper();targets=VisualTargetMap();hydra_frames=HydraFrameWriter(a.output/'hydra_frames')
 from cross_episode_sim.mapping.hydra_process import NativeHydraProcess
 live_hydra=NativeHydraProcess(a.output/'native_hydra') if a.native_hydra else nullcontext()
 hydra_updates=[]

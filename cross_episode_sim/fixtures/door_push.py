@@ -8,6 +8,8 @@ from contextlib import contextmanager
 import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
+from cross_episode_sim.control.coordinated_contact import (
+    panel_contact_pose, next_hinge_angle, prepare_panel_push, panel_arc_geometry)
 
 
 class PushApproachError(RuntimeError):
@@ -131,13 +133,8 @@ def pushing_pose(c, surface, direction, tilt, rotation=None):
     if not vertices:
         raise RuntimeError('No physical gripper pads for pushing')
     tcp = c.tcp()
-    offsets = (np.asarray(vertices)-tcp[:3, 3])@tcp[:3, :3]@rotation.T
-    projections = offsets@direction
-    tip = offsets[projections > projections.max()-1e-5].mean(axis=0)
-    pose = np.eye(4)
-    pose[:3, :3] = rotation
-    pose[:3, 3] = surface-tip+.0005*direction
-    return pose
+    vertices_tcp = (np.asarray(vertices)-tcp[:3, 3])@tcp[:3, :3]
+    return panel_contact_pose(surface, direction, rotation, vertices_tcp)
 
 
 def preflight_push(c, pose, joints, target, addresses, surface=None, direction=None):
@@ -208,20 +205,17 @@ def push_open_door(c, target):
         errors = []
         for tilt in getattr(c, 'panel_push_tilts', (-75., -70., -60., -90., -45., 90., 60., 0., -30., 30.)):
             contact = pushing_pose(c, surface, direction, tilt)
-            pre = contact.copy(); pre[:3, 3] -= .06*direction
-            try:
-                q = c.nearby_ik(contact, np.array([0., .25, 0., -1.5, 0., 3.35, 0.]),
-                               trust_radius=6., preserve_self_clearance=True)
+            def check_contact(q):
                 c.validate_door_path([q], q)
                 if assisted:
                     from cross_episode_sim.fixtures.base_articulation import preflight_panel
                     preflight_panel(c, contact, q, target, addresses, surface, direction)
                 else:
                     preflight_push(c, contact, q, target, addresses, surface, direction)
-                pre_q = c.nearby_ik(pre, q, trust_radius=1., preserve_self_clearance=True)
-                approach = c.local_contact_path(pre_q, q)
+            def check_approach(approach, pre_q):
                 initial = c.data.qpos.copy(); initial[addresses] = pre_q
                 c.validate_door_path(approach, pre_q, initial_qpos=initial)
+            def plan_reach(pre_q):
                 c.handles_are_obstacles = True
                 try:
                     c.load_world()
@@ -230,6 +224,18 @@ def push_open_door(c, target):
                     c.handles_are_obstacles = False
                     c.load_world()
                 c.validate_door_path(reach, current)
+                return reach
+            try:
+                pre, reach, approach = prepare_panel_push(contact,
+                    direction=direction,
+                    solve_contact=lambda pose: c.nearby_ik(pose,
+                        np.array([0., .25, 0., -1.5, 0., 3.35, 0.]),
+                        trust_radius=6., preserve_self_clearance=True),
+                    check_contact=check_contact,
+                    solve_precontact=lambda pose, q: c.nearby_ik(pose, q,
+                        trust_radius=1., preserve_self_clearance=True),
+                    plan_contact=c.local_contact_path,
+                    check_approach=check_approach, plan_reach=plan_reach)
             except RuntimeError as exc:
                 errors.append(str(exc)); continue
             break
@@ -265,12 +271,14 @@ def push_open_door(c, target):
             if abs(c.angle()-target) < min(opening_tolerance(), np.radians(.75)):
                 break
             measured = c.angle()
-            goal_angle = measured+np.sign(target-measured)*min(np.radians(3), abs(target-measured))
-            turn = Rotation.from_rotvec(axis*(goal_angle-reference_angle)).as_matrix()
+            goal_angle = next_hinge_angle(measured, target)
             # A push does not lock the wrist to the door as a grasp does.
             # Turn gently to keep the fingertip ahead of the gripper linkage.
-            pose = pushing_pose(c, anchor+turn@(surface-anchor), turn@direction,
-                                0., rotation=contact[:3, :3] if assisted and getattr(c, 'fixed_arm_panel_push', False) else Rotation.from_rotvec(axis*(goal_angle-reference_angle)*getattr(c, 'panel_wrist_rotation_fraction', .5)).as_matrix()@contact[:3, :3])
+            patch, normal, wrist = panel_arc_geometry(surface, direction,
+                anchor, axis, goal_angle-reference_angle, contact[:3, :3],
+                0. if assisted and getattr(c, 'fixed_arm_panel_push', False)
+                else getattr(c, 'panel_wrist_rotation_fraction', .5))
+            pose = pushing_pose(c, patch, normal, 0., rotation=wrist)
             # Decelerate near the physical stop. A fixed-speed last stroke
             # can drive the linkage into a panel that has already stopped.
             saved_speed = getattr(c, 'contact_base_speed', None)

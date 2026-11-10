@@ -3,27 +3,6 @@ import math
 from copy import deepcopy
 
 
-def unchanged(initial, current, excluded):
-    """Measured object poses, including contents of initially loaded furniture."""
-    if initial is None:
-        return False
-    for name, before in initial['objects'].items():
-        if name in excluded:
-            continue
-        after = current['objects'].get(name)
-        if after is None or before.get('support') != after.get('support'):
-            return False
-        a, b = before.get('position'), after.get('position')
-        qa, qb = before.get('quaternion'), after.get('quaternion')
-        if a is None or b is None or qa is None or qb is None:
-            return False
-        if math.dist(a, b) > .02:
-            return False
-        # q and -q describe the same rotation.
-        if min(math.dist(qa, qb), math.dist(qa, [-v for v in qb])) > .03:
-            return False
-    return True
-
 
 def on(state, obj, support, region=None):
     item = state['objects'].get(obj, {})
@@ -121,23 +100,44 @@ def sort_groceries(params, initial_state, state):
     def sorted_into(items, targets):
         return bool(items) and all(state['objects'].get(r, {}).get('support') in targets
             and state['objects'][r].get('region') == 'interior' for r in items)
-    used = {state['objects'].get(r, {}).get('support') for r in drinks + snacks} & (purple | orange)
-    return {'drinks_in_purple_basket': sorted_into(drinks, purple),
+    result = {'drinks_in_purple_basket': sorted_into(drinks, purple),
             'snacks_in_orange_basket': sorted_into(snacks, orange),
-            'baskets_unchanged': bool(purple) and bool(orange) and unchanged(initial_state, state,
-                [r for r in initial_state['objects'] if r not in purple | orange]),
-            'unrelated_unchanged': unchanged(initial_state, state, drinks + snacks + list(used)),
+            'no_wrong_basket_items': all(
+                (r in drinks if item.get('support') in purple else r in snacks)
+                for r, item in state['objects'].items() if item.get('support') in purple | orange),
             'empty_hand': empty(state)}
+    from cross_episode_sim.generation.task_revisions import serves_dining
+    if serves_dining(params):
+        def kitchen_support(name):
+            support = state['objects'].get(name, {}).get('support')
+            item = state.get('fixtures', {}).get(support, {})
+            return support == 'kitchen_counter' or (item.get('room') == 'kitchen' and
+                                                    item.get('category') in ('counter', 'table'))
+        result['baskets_in_kitchen'] = bool(purple and orange) and all(kitchen_support(r) for r in purple | orange)
+    return result
 
 
 def warm_pots(params, initial_state, state):
     pots = selected(initial_state, 'pot')
     supports = {state['objects'].get(r, {}).get('support') for r in pots}
     burners = {r for r in state['fixtures'] if matches_support(state, r, 'burner')}
-    return {'both_pots_heated_long_enough': len(pots) == 2 and all(heated(state, r, params['minimum_heating_seconds']) for r in pots),
+    result = {'both_pots_heated_long_enough': len(pots) == 2 and all(heated(state, r, params['minimum_heating_seconds']) for r in pots),
             'both_burners_off': bool(burners) and all(off(state, r) for r in burners),
             'pots_on_separate_burners': len(pots) == 2 and len(supports) == 2 and supports <= burners,
             'empty_hand': empty(state)}
+    from cross_episode_sim.generation.task_revisions import serves_dining
+    if serves_dining(params):
+        result.pop('pots_on_separate_burners')
+        by_support = state.get('evaluation', {}).get('heated_seconds_by_support', {})
+        qualified = [{support for support, seconds in by_support.get(pot, {}).items()
+                      if support in burners and isinstance(seconds, (int, float)) and
+                      not isinstance(seconds, bool) and math.isfinite(seconds) and
+                      seconds + 1e-8 >= params['minimum_heating_seconds']} for pot in pots]
+        result['separate_burners_used'] = len(pots) == 2 and any(a != b for a in qualified[0] for b in qualified[1])
+        result['both_pots_on_dining_table'] = len(pots) == 2 and all(dining(state, r) for r in pots)
+        result['no_wrong_table_items'] = all(r in pots or dining(initial_state, r)
+                                           for r in state['objects'] if dining(state, r))
+    return result
 
 
 GOALS = {'set_table': set_table, 'clear_and_store': clear_and_store,

@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from tqdm import tqdm
 from cross_episode_sim.sensors import OnboardSensorInterface
-from cross_episode_sim.slam import RGBDMapper
+from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation import ObservedNavigationMap, ExplorationSkill, ExplorationConfig
 from cross_episode_sim.robot.observations import depth_rgb
 
@@ -39,12 +39,12 @@ def main():
             doors.append(dict(name=name,angle=angle))
     mujoco.mj_forward(model,data)
     bridge=OnboardBaseActuator(model,data)
-    mapper=RGBDMapper();grid=ObservedNavigationMap();skill=ExplorationSkill(ExplorationConfig(max_seconds=a.seconds))
+    mapper=create_mapper();grid=ObservedNavigationMap();skill=ExplorationSkill(ExplorationConfig(max_seconds=a.seconds))
     rows=[];poses=[];start=float(data.time);wall=time.monotonic();decision=None;layers=None
     with OnboardSensorInterface(model,data) as sensors, imageio.get_writer(str(a.output/'exploration.mp4'),fps=10,codec='libx264',pixelformat='yuv420p',output_params=['-movflags','+faststart']) as video:
         for tick in tqdm(range(round(a.seconds*50)),desc='Onboard exploration'):
             if tick%5==0:
-                packet=sensors.capture();result=mapper.update(packet.cameras['navigation'],packet.timestamp)
+                packet=sensors.capture(include_robot_mask=False);result=mapper.update(packet.cameras['navigation'],packet.timestamp)
                 grid.update(packet.cameras['navigation'],result);layers=grid.layers()
             decision=skill.step(layers,result,float(data.time))
             if tick%5==0:

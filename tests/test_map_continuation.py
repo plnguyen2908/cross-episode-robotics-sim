@@ -69,3 +69,51 @@ def test_floor_ray_density_is_not_independent_views():
     grid=ObservedNavigationMap(MapConfig(extent_m=4))
     grid.record_floor_samples(np.tile([[.2,.2,0]],(100,1)))
     assert list(grid.floor_samples.values())[0][1]==1
+
+
+def test_repeated_handoffs_do_not_expand_original_obstacle(tmp_path):
+    cfg=MapConfig(extent_m=4,resolution=.1,height_resolution=.1)
+    original=ObservedNavigationMap(cfg);original.evidence[20,20,2]=3
+    current=original
+    for i in range(5):
+        p=tmp_path/str(i);current.save(p);(p/'slam').mkdir()
+        pose=np.eye(4);pose[0,3]=.013
+        np.save(p/'slam/estimated_base_poses.npy',pose[None])
+        current=ObservedNavigationMap(cfg);restore_observed_map(current,p)
+        assert np.count_nonzero(current.evidence>=2)<=2
+    # No identity inflation at all, including exact cell boundaries.
+    p=tmp_path/'identity';original.save(p);(p/'slam').mkdir();np.save(p/'slam/estimated_base_poses.npy',np.eye(4)[None])
+    same=ObservedNavigationMap(cfg);restore_observed_map(same,p)
+    assert np.array_equal(same.evidence>=2,original.evidence>=2)
+
+
+def test_new_obstacle_and_cleared_source_survive_handoff(tmp_path):
+    cfg=MapConfig(extent_m=4,resolution=.1,height_resolution=.1)
+    first=ObservedNavigationMap(cfg);first.evidence[20,20,2]=2
+    a=tmp_path/'a';first.save(a);(a/'slam').mkdir();np.save(a/'slam/estimated_base_poses.npy',np.eye(4)[None])
+    second=ObservedNavigationMap(cfg);restore_observed_map(second,a)
+    second.evidence[20,20,2]=0;second.evidence[22,22,2]=2
+    b=tmp_path/'b';second.save(b);(b/'slam').mkdir();np.save(b/'slam/estimated_base_poses.npy',np.eye(4)[None])
+    third=ObservedNavigationMap(cfg);restore_observed_map(third,b)
+    assert third.evidence[20,20,2]==0 and third.evidence[22,22,2]>=2
+
+
+def test_rotation_roundtrips_do_not_close_a_doorway(tmp_path):
+    cfg=MapConfig(extent_m=4,resolution=.1,height_resolution=.1)
+    original=ObservedNavigationMap(cfg)
+    original.evidence[20,:14,2]=2
+    original.evidence[20,27:,2]=2
+    current=original
+    pose=np.eye(4)
+    angle=.17
+    pose[:2,:2]=[[np.cos(angle),-np.sin(angle)],[np.sin(angle),np.cos(angle)]]
+    pose[:2,3]=[.13,-.07]
+    for i in range(8):
+        path=tmp_path/str(i);current.save(path);(path/'slam').mkdir()
+        np.save(path/'slam/estimated_base_poses.npy',(pose if i%2==0 else np.linalg.inv(pose))[None])
+        current=ObservedNavigationMap(cfg);restore_observed_map(current,path)
+        if i%2:
+            rows,cols,z=np.where(original.evidence>=2)
+            cells=current.world_to_cell(original.cell_to_world(np.c_[cols,rows]))
+            assert (current.evidence[cells[:,1],cells[:,0],z]>=2).all()
+            assert np.count_nonzero(current.evidence>=2)==len(rows)

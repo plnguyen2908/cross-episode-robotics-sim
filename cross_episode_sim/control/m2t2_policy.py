@@ -18,8 +18,46 @@ def filter_observed_contacts(candidates, target_surface, tolerance=.015):
     return [row for row,gap in zip(candidates,distance) if gap<=tolerance]
 
 
+def propose_pick_grasps(policy, points, rgb, target, samples=3, max_samples=8):
+    """Retain the normal samples; retry empty target proposals before motion.
+
+    Small objects can be missed by M2T2's random scene-point subsampling.
+    Extra samples reuse the same observations and loaded model. They do not
+    widen target acceptance, relax collisions, or synthesize oracle grasps.
+    """
+    import torch
+    if samples < 1 or max_samples < samples:
+        raise ValueError('Require 1 <= samples <= max_samples')
+    rows=[]; diagnostics=[]
+    for sample in range(max_samples):
+        if sample >= samples and rows:
+            break
+        if sample:
+            torch.manual_seed(sample)
+        out=policy.predict(points,rgb)
+        before=len(rows)
+        for group,(poses,scores,contacts) in enumerate(zip(out['grasps'],out['grasp_confidence'],out['grasp_contacts'])):
+            for pose,score,contact in zip(poses,scores,contacts):
+                if np.linalg.norm(contact-target)<.16:
+                    rows.append(dict(group=sample*10000+group,sampling_pass=sample,
+                        confidence=float(score),contact=contact.tolist(),grasp=pose.tolist(),
+                        tcp=grasp_to_tcp(pose).tolist()))
+        diagnostics.append(dict(sample=sample,total_grasps=sum(map(len,out['grasps'])),
+                                target_candidates=len(rows)-before))
+    rows.sort(key=lambda row:-row['confidence'])
+    return dict(candidates=rows,total_grasps=sum(row['total_grasps'] for row in diagnostics),
+                sampling_passes=len(diagnostics),sampling_diagnostics=diagnostics,
+                empty_target_retry=len(diagnostics)>samples)
+
+
 class M2T2Policy:
     def __init__(self, checkpoint, repository, device='cuda:0', seed=0):
+        from cross_episode_sim.perception.rpc import configured_client
+        self.remote=configured_client('m2t2');self.seed=seed;self.remote_first=True
+        if self.remote is not None:
+            import torch
+            torch.manual_seed(seed)
+            return
         import sys
         sys.path.insert(0,str(Path(repository).resolve()))
         import torch
@@ -39,6 +77,10 @@ class M2T2Policy:
         held_points must be perceived object points, never mesh/pose ground truth.
         Returns M2T2 gripper-root poses (NOT our robot's TCP poses).
         """
+        if self.remote is not None:
+            import torch
+            first=self.remote_first;self.remote_first=False
+            return self.remote.call(points=np.asarray(points),rgb=np.asarray(rgb),held_points=held_points,ee_pose=ee_pose,seed=int(torch.initial_seed()),initial_sample=first)
         t=self.torch
         from m2t2.dataset_utils import sample_points
         p=t.as_tensor(points,dtype=t.float32)

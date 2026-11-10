@@ -5,9 +5,10 @@ from .keyframes import KeyframeTracker
 
 
 class HybridRGBDTracker:
-    def __init__(self,K,mount,planar_base=True,recovery=None):
-        self.K=K.copy();self.mount=mount.copy();self.keys=KeyframeTracker(K,mount,planar_base=planar_base);self.planar_base=planar_base
+    def __init__(self,K,mount,planar_base=True,recovery=None,feature_width=None,feature_backend='opencv'):
+        self.K=K.copy();self.mount=mount.copy();self.keys=KeyframeTracker(K,mount,planar_base=planar_base,feature_width=feature_width,feature_backend=feature_backend);self.planar_base=planar_base
         self.pose=mount.copy();self.previous=None;self.lost=False;self.status='initialized'
+        self.previous_raw=None
         self.bridges=0;self.recovery_candidate=None
         self.recovery=recovery
 
@@ -16,7 +17,6 @@ class HybridRGBDTracker:
             if self.recovery:self.recovery.pending=None
             self.lost=True;self.keys.lost=True;self.keys.recovery_candidate=None;self.recovery_candidate=None
             return None,0.,float('inf'),'insufficient depth'
-        rgbd=o3d.geometry.RGBDImage.create_from_color_and_depth(o3d.geometry.Image(np.ascontiguousarray(rgb)),o3d.geometry.Image(depth.astype(np.float32)),depth_scale=1.,depth_trunc=6.,convert_rgb_to_intensity=True)
         pose,n,rmse,status=self.keys.update(rgb,depth)
         if pose is None and self.lost and self.recovery is not None:
             pose,n,rmse,status=self.recovery.recover(rgb,depth)
@@ -24,12 +24,20 @@ class HybridRGBDTracker:
                 self.keys.accept_odometry(pose,rgb,depth)
                 self.keys.events.append(dict(index=self.keys.index,event='verified learned recovery'))
         if pose is None:
-            if self.previous is None or self.lost:return None,0.,rmse,status
+            if self.previous_raw is None or self.lost:return None,0.,rmse,status
+            # Build intensity RGB-D only when the keyframe tracker needs a bridge.
+            def odometry_image(color, metric_depth):
+                return o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    o3d.geometry.Image(np.ascontiguousarray(color)),
+                    o3d.geometry.Image(metric_depth.astype(np.float32)),
+                    depth_scale=1.,depth_trunc=6.,convert_rgb_to_intensity=True)
+            previous=odometry_image(*self.previous_raw)
+            rgbd=odometry_image(rgb,depth)
             h,w=depth.shape;K=self.K
             intr=o3d.camera.PinholeCameraIntrinsic(w,h,K[0,0],K[1,1],K[0,2],K[1,2])
             opts=o3d.pipelines.odometry.OdometryOption();opts.depth_max=6.;opts.depth_diff_max=.1
             try:
-                ok,delta,info=o3d.pipelines.odometry.compute_rgbd_odometry(self.previous,rgbd,intr,np.eye(4),o3d.pipelines.odometry.RGBDOdometryJacobianFromHybridTerm(),opts)
+                ok,delta,info=o3d.pipelines.odometry.compute_rgbd_odometry(previous,rgbd,intr,np.eye(4),o3d.pipelines.odometry.RGBDOdometryJacobianFromHybridTerm(),opts)
             except RuntimeError:ok=False;delta=np.eye(4);info=np.zeros((6,6))
             overlap=float(info[5,5])/(h*w)
             if not ok or not np.isfinite(delta).all() or overlap<.15 or np.linalg.norm(delta[:3,3])>.2:
@@ -44,7 +52,7 @@ class HybridRGBDTracker:
             self.keys.accept_odometry(pose,rgb,depth);self.bridges+=1
             # Upstream legacy odometry does not report RMSE; do not fabricate it.
             rmse=float('nan');n=0
-        self.pose=pose.copy();self.previous=rgbd;self.lost=False;self.recovery_candidate=None
+        self.pose=pose.copy();self.previous_raw=(rgb.copy(),depth.copy());self.lost=False;self.recovery_candidate=None
         if self.recovery:
             self.recovery.pending=None
             self.recovery.remember(rgb,depth,pose)
