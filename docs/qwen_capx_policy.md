@@ -1,5 +1,8 @@
 # Qwen code-as-policy trial
 
+Update: [optional redocking for all non-navigation skills and the successful
+farther-start navigation/redock/pick test](qwen_redocking.md).
+
 This experiment lives on `codex/qwen-capx-policy`, in the isolated worktree
 `/nobackup/le/cross-episode-qwen-capx`. It uses **Qwen3-VL-8B-Instruct** to
 generate Python, executed by upstream **CaP-X** against our sensor-based pickup
