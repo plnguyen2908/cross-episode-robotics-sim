@@ -157,3 +157,9 @@ PYTHONPATH=. .venv-sift/bin/python -m pytest \
 every non-nav/explore skill, unchanged default dispatch, correct placement
 receptacle/loaded mode, unavailable-handler rejection before movement, failed
 redock handling, and excluding future mapping frames from fixture context.
+
+## Household extension
+
+See [household skill interface](qwen_household_skills.md) for loaded placement,
+fixture contact, and appliance controls, and [measured results](qwen_household_results.md)
+for the current physical qualification limits.

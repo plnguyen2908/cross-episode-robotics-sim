@@ -124,12 +124,17 @@ if chosen:
   for _ in range(100):
    execute(contact[-1],255.);finger=np.array([d.joint(n).qpos[0] for n in ['robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint']]);stable=stable+1 if last is not None and np.max(abs(finger-last))<.0002 else 0;last=finger
    if stable>=10:break
+  # Do not begin a drawer pull with fingers already closed empty. This is
+  # robot encoder feedback, identical to the fixture adapter's grasp check;
+  # checking only after the entire pull wastes motion and loses the cause.
+  grasp_present=bool(np.min(finger)<=.79)
+  report['observed_grasp_present']=grasp_present
   phase='pull'
-  for segment in pull:
+  for segment in (pull if grasp_present else []):
    for cmd in segment:execute(cmd,255.)
-  verify_q=pull[-1][-1] if pull else contact[-1]
-  stop_reason=None;pull_events=[]
-  if a.open_to_stop:
+  verify_q=pull[-1][-1] if pull and grasp_present else contact[-1]
+  stop_reason=None if grasp_present else 'empty_gripper';pull_events=[]
+  if a.open_to_stop and grasp_present:
    phase='incremental_pull';T=np.asarray(r['executed_tcp']);last_progress=0.;last_safe_q=q().copy()
    planner.fast_ik=True  # Grasp selection is fixed; follow the held handle locally.
    for distance in np.arange(a.open_step,1.001,a.open_step):
@@ -156,11 +161,16 @@ if chosen:
     progress=float(np.dot(tcp-T[:3,3],normal));lag=float(np.dot(goal-tcp,normal))
     pull_events.append(dict(commanded_distance=float(distance),encoder_progress=progress,tracking_lag=lag,resisted=resisted))
     print('PULL',pull_events[-1],flush=True)
+    finger=np.array([d.joint(n).qpos[0] for n in ['robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint']])
+    if np.min(finger)>.79:
+     stop_reason='grasp_lost';verify_q=q().copy();break
     if resisted:
      stop_reason='resisted_motion';verify_q=q().copy();break
     last_progress=progress;last_safe_q=q().copy();verify_q=segment[-1].copy()
    else:stop_reason='travel_budget_exhausted'
    report.update(stop_reason=stop_reason,pull_events=pull_events)
+  elif a.open_to_stop:
+   report.update(stop_reason=stop_reason,pull_events=[])
 
   # Settle using robot encoders, never simulator contacts.
   phase='settle';last=q().copy();stable_count=0

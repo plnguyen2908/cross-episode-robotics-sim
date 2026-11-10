@@ -29,7 +29,7 @@ class QwenSkillInterface:
                 redock=dict(type='boolean', default=False,
                     description='Request fresh sensor-based local base alignment before this call.'),
                 redock_target=dict(type='string', description='Optional semantic docking target. Defaults to receptacle for place, target otherwise.'),
-                redock_distance=dict(type='number', exclusiveMinimum=0, maximum=1.5,
+                redock_distance=dict(type='number', minimum=.35, maximum=1.5,
                     description='Optional base-to-observed-target horizontal standoff in meters; planning still checks feasibility.'))
             row['description'] += ' Optional redock happens before manipulation, in the same live scene; it does not execute the manipulation itself.'
         return rows

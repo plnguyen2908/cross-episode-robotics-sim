@@ -14,9 +14,9 @@ from cross_episode_sim.control.observed_arm import robot_calibration
 from cross_episode_sim.control.observed_payload import ObservedPayload,reconstruct_held_points
 from cross_episode_sim.control.planner_cache import sensor_arm_planner
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
-p=argparse.ArgumentParser();p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+p=argparse.ArgumentParser();p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--max-candidates',type=int,default=0,help='Optional bounded candidate batch; zero preserves the existing exhaustive policy');p.add_argument('--current-pose',action='store_true',help='Attempt sensor-planned placement from the live pose without claiming a completed base dock');p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 r=json.loads(artifacts.read_text(a.dock/'report.json'))
-if not r.get('docking_success',False) and not (a.isolated_initial_state and r.get('isolated_placement_reset')) and not (a.observe_only and (r.get('transit_success') is True or r.get('initialization_valid') or r.get('approach_complete') or r.get('status') in ('needs_floor_observation','budget_exhausted'))):raise ValueError('Require sensor docking or explicit isolated reset')
+if not (a.current_pose and r.get('initialization_valid')) and not r.get('docking_success',False) and not (a.isolated_initial_state and r.get('isolated_placement_reset')) and not (a.observe_only and (r.get('transit_success') is True or r.get('initialization_valid') or r.get('approach_complete') or r.get('status') in ('needs_floor_observation','budget_exhausted'))):raise ValueError('Require sensor docking or explicit isolated reset')
 m,d=load_checkpoint(a.dock)
 c=MolmoSpacesController(m,d);hold={g:c.robot_view.get_move_group(g).noop_ctrl.copy() for g in ('base','arm','gripper')};geo=RobotGeometry(m);q=c.robot_view.get_move_group('arm').joint_pos.copy();tool_points=artifacts.load_array(a.dock/'observed_payload_tool.npy') if artifacts.exists(a.dock/'observed_payload_tool.npy') else None;payload=ObservedPayload(geo,tool_points) if tool_points is not None else None;tcp=geo.fk(q)[geo.tcp_body]@geo.tcp_local
 # Private scoring remembers only the initially held bowl, never a destination pose.
@@ -199,6 +199,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     candidate=dict(row);goal=np.array(row['tcp']);goal[2,3]+=clearance
     candidate.update(model_tcp=row['tcp'],tcp=goal.tolist(),release_clearance_m=clearance)
     release_candidates.append(candidate)
+  if a.max_candidates>0:release_candidates=release_candidates[:a.max_candidates]
   for candidate_index,row in enumerate(release_candidates,1):
    print('PLACE_ATTEMPT',candidate_index,'of',len(release_candidates),'clearance_m',row['release_clearance_m'],'contact',row['contact'],flush=True)
    goal=np.array(row['tcp'])
