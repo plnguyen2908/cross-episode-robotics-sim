@@ -35,7 +35,7 @@ def test_location_qualified_food_targets_use_verifier(monkeypatch):
 def test_grocery_query_distinguishes_bottles_and_boxes_without_changing_target_label():
     calls=[]
     pointer=NS(point=lambda image,target: calls.append(target) or {'points': []})
-    for label,word in [('packaged drink','drink bottles'),('packaged snack','snack boxes')]:
+    for label,word in [('packaged drink','drink bottles'),('packaged snack','rectangular blocks')]:
         supervisor=household_pointing_supervisor(pointer,None,label)
         supervisor.pointer.point(Image.new('RGB',(100,100)), label+'s')
         assert word in calls[-1]

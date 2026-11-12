@@ -29,8 +29,30 @@ def surface_description(receptacle,region):
 
 
 class SensorHouseholdPipeline(SensorSetTablePipeline):
+    def _finish_component_place(self,ctx,outcome,placed,progress):
+        """Only a completed release can hand off to empty-hand navigation."""
+        if not outcome['success']:
+            # A failed planning call can still provide a valid live checkpoint.
+            # Retain the actual held state; never run an empty-hand retreat.
+            if placed is not None and artifacts.exists(placed/'private_checkpoint/state.npy'):
+                ctx['continuation']=placed
+            progress('observe_dock_place','failed')
+            return SkillOutcome(False,outcome.get('reason','placement_failed'))
+        if placed is None:raise RuntimeError('Placement returned no live handoff')
+        ctx.update(held=None,continuation=placed)
+        continuation=ctx['root']/'return'
+        self.stage(f"{ctx['number']}_return",[sys.executable,'scripts/prepare_m2t2_return.py',
+            '--place',str(placed),'--observed-map',str(placed),
+            '--output',str(continuation)],continuation/'report.json')
+        ctx.update(held=None,continuation=continuation)
+        progress('observe_dock_place','completed')
+        return SkillOutcome(True,outcome.get('reason','release_commands_completed'))
+
     def _pick_object(self,number,object_dock,pick):
-        label=json.loads(artifacts.read_text(object_dock/'report.json'))['selected_object']['label']
+        observed=json.loads(artifacts.read_text(object_dock/'report.json')).get('selected_object')
+        if not observed:
+            return dict(execution_success=False,reason='No fresh observed pickup target after redocking')
+        label=observed['label']
         if self.config['task']=='set_table':
             return super()._pick_object(number,object_dock,pick)
         if label in ('cup','bowl'):
@@ -93,13 +115,14 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             print(f'STAGE DIAGNOSTIC: {name} failed; continuing with recorded output',flush=True)
             return json.loads(artifacts.read_text(Path(report)))
 
-    def __init__(self,source,output,*,continue_on_failure=True,**kwargs):
+    def __init__(self,source,output,*,continue_on_failure=True,qwen_interface=True,**kwargs):
         config=json.loads((Path(source)/'config.json').read_text())
         if config['scene'].get('base_layout',{}).get('room_count')!=2:
             raise ValueError('This qualification requires a two-room scene')
         super().__init__(source,output,expected_task=config['task'],initial_doors='open',**kwargs)
         self.config=config
         self.continue_on_failure=continue_on_failure
+        self.qwen_interface=qwen_interface
         self.fixture_views={};self.current_station=None
         self.plan=household_plan(config['task'],counts=config['scene']['object_counts'],
             heating_seconds=config['scene'].get('minimum_heating_seconds') or 30.)
@@ -129,7 +152,8 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
     def _run(self,**unused):
         # Set-table remains the qualified implementation, including its exact
         # transfer-stage dispatch. Additional recipes extend the same primitives.
-        if self.config['task']=='set_table':return super()._run(**unused)
+        if self.config['task']=='set_table' and not self.qwen_interface:return super()._run(**unused)
+        self.runtime.qwen_docking=self.qwen_interface
         self.output.mkdir(parents=True,exist_ok=False);started=time.monotonic()
         artifacts.write_text(self.output/'semantic_plan.json',json.dumps([c.to_dict() for c in self.plan],indent=2))
         ctx=dict(continuation=None,held=None,station=None,number=0);fixtures=None;appliances=None
@@ -158,6 +182,11 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             ctx['number']+=1;n=ctx['number'];root=self.output/f'transfer_{n:03d}';root.mkdir()
             progress('navigation','running')
             if destination is None:
+                if ctx.get('held') is not None:
+                    # A failed place cannot authorize empty-hand posture or
+                    # another pickup. Keep the actual grasp for place recovery.
+                    progress('navigation','failed')
+                    return SkillOutcome(False,'placement_pending_retained_grasp')
                 ctx.update(root=root,dock=None,target=target)
                 # Intent/state disagreements are diagnostic, not recipe vetoes.
                 from ..navigation.local_scan import ScanConfig
@@ -166,8 +195,8 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     # Knob/button manipulation also leaves an extended empty
                     # arm. Satisfy the existing navigation contract physically.
                     if fixtures is None:
-                        from ..runtime.fixture_controls import LiveFixtureControls
-                        fixtures=LiveFixtureControls(self.runtime,self.output/'fixture_controls')
+                        from ..code_policy.fixture_profiles import HouseholdFixtureControls
+                        fixtures=HouseholdFixtureControls(self.runtime,self.output/'fixture_controls',interactive_panel=False)
                     fixtures.navigation_posture(root,progress)
                     ctx['continuation']=self.checkpoint(root/'posture_handoff',ctx['continuation'])
                 station=search_at or 'kitchen'
@@ -198,7 +227,10 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 from ..navigation.household_map_handoff import bind_observed_map
                 bind_observed_map(self.runtime,carry)
                 ctx.update(root=root,carry=carry,continuation=carry,receptacle=destination,station=station)
-                if destination in self.fixture_views:
+                if destination in self.fixture_views and destination!='microwave':
+                    # Microwave placement owns a loaded, centered aperture
+                    # redock. The earlier empty-hand handle view is not a
+                    # placement dock and must not run before that component.
                     from ..navigation.fixture_return import return_fixture_view
                     progress('remembered_fixture_view','running')
                     return_fixture_view(self.runtime,self.fixture_views[destination],root/'fixture_view')
@@ -211,18 +243,42 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             self.current_station=ctx['station']
             progress('navigation','completed');return SkillOutcome(True,'navigation_commands_completed')
         def pick(*,target,progress):
-
-
+            if ctx.get('held') is not None:
+                return SkillOutcome(False,'placement_pending_retained_grasp')
             progress('grasp','running');out=ctx['root']/'pick'
+            # A new attempt owns its pickup reference even when perception
+            # fails before creating a physics handoff. Never carry a previous
+            # object's successful pickup after a failed current attempt.
+            ctx.update(pick=out,held=None,carry=None)
+            from ..runtime.household_components import confined_pick_options, pick_confined
+            if confined_pick_options(target) is not None:
+                outcome,physics=pick_confined(self.runtime,out,ctx['dock'],fixtures,target,
+                                              redock=not self.qwen_interface)
+                if physics is not None:
+                    ctx.update(pick=physics.parent,continuation=physics,
+                               held=target if outcome['success'] else None)
+                progress('grasp','completed' if outcome['success'] else 'failed')
+                return SkillOutcome(outcome['success'],outcome.get('reason',''))
             result=self._pick_object(ctx['number'],ctx['dock'],out)
-            ctx.update(pick=out,held=target if result.get('execution_success') else None,continuation=out/'physics')
-            progress('grasp','completed');return SkillOutcome(True,'grasp_commands_completed')
+            success=bool(result.get('execution_success'))
+            ctx.update(pick=out,held=target if success else None)
+            if artifacts.exists(out/'physics/private_checkpoint/state.npy'):
+                ctx['continuation']=out/'physics'
+            progress('grasp','completed' if success else 'failed')
+            return SkillOutcome(success,result.get('reason','grasp_commands_completed' if success else 'pickup_failed'))
         def place(*,receptacle,region='default',progress):
-
-
+            prepared_session=ctx.pop('qwen_prepared_session',None)
+            if prepared_session is not None:
+                outcome=prepared_session.execute_skill('place',dict(receptacle=receptacle,region=region))
+                placed=getattr(prepared_session,'last_placement_output',None)
+                return self._finish_component_place(ctx,outcome,placed,progress)
             progress('observe_dock_place','running');n=ctx['number'];root=ctx['root'];carry=ctx['carry']
             perception=root/'receptacle_perception';dock=root/'place_dock';placed=root/'place'
             description=surface_description(receptacle,region)
+            if receptacle=='microwave' and region=='interior':
+                from ..runtime.household_components import place_microwave
+                outcome,placed=place_microwave(self.runtime,root/'microwave_component',carry,fixtures,ctx['held'])
+                return self._finish_component_place(ctx,outcome,placed,progress)
             from ..runtime.household_placement import support_backend,prepare_support_view
             aperture=(fixtures.aperture_observation(receptacle,map_frame=True)
                       if fixtures is not None and region=='interior' and 'cabinet' in receptacle else None)
@@ -230,6 +286,13 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             if region=='interior' and 'basket' in receptacle:
                 from ..runtime.basket_placement import place_in_basket
                 placed,dock=place_in_basket(self,root,carry,receptacle,description,ctx['station'],n,progress)
+                outcome=json.loads(artifacts.read_text(placed/'report.json'))
+                if not outcome.get('execution_success'):
+                    # Failed arm planning has not released the payload. Preserve
+                    # the live grasp and return a failure, not empty-hand stow.
+                    ctx.update(continuation=placed,carry=placed)
+                    progress('observe_dock_place','failed')
+                    return SkillOutcome(False,outcome.get('error') or 'placement_failed')
                 continuation=root/'return'
                 self.stage(f'{n}_return',[sys.executable,'scripts/prepare_m2t2_return.py','--place',str(placed),
                     '--observed-map',str(dock),'--output',str(continuation)],continuation/'report.json')
@@ -271,6 +334,11 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     '--output',str(dock)]+(['--interior-view-approach'] if region=='interior' else []),dock/'report.json','docking_success')
             self.stage(f'{n}_place',[sys.executable,placement_script,'--dock',str(dock),
                 '--output',str(placed),'--receptacle',description,'--semantic-receptacle',receptacle]+aperture_arguments('place'),placed/'report.json','execution_success')
+            outcome=json.loads(artifacts.read_text(placed/'report.json'))
+            if not outcome.get('execution_success'):
+                ctx.update(continuation=placed,carry=placed)
+                progress('observe_dock_place','failed')
+                return SkillOutcome(False,outcome.get('error') or 'placement_failed')
             continuation=root/'return'
             self.stage(f'{n}_return',[sys.executable,'scripts/prepare_m2t2_return.py','--place',str(placed),
                 '--observed-map',str(dock),'--output',str(continuation)],continuation/'report.json')
@@ -280,17 +348,24 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             nonlocal fixtures
 
             if fixtures is None:
-                from ..runtime.fixture_controls import LiveFixtureControls
-                fixtures=LiveFixtureControls(self.runtime,self.output/'fixture_controls')
+                from ..code_policy.fixture_profiles import HouseholdFixtureControls
+                fixtures=HouseholdFixtureControls(self.runtime,self.output/'fixture_controls',interactive_panel=False)
             # Keep the handle identity selected by navigation. A second
             # independent pointing call can otherwise select a nearby drawer.
-            observed=json.loads(artifacts.read_text(ctx['dock']/'report.json')).get('selected_object')
+            dock=ctx.get('dock')
+            observed=(json.loads(artifacts.read_text(dock/'report.json')).get('selected_object')
+                      if dock is not None and artifacts.exists(dock/'report.json') else None)
             if observed is not None:
-                T=artifacts.load_array(ctx['dock']/'slam/estimated_base_poses.npy')[-1]
+                dock_poses=artifacts.load_array(dock/'slam/estimated_base_poses.npy')
+                T=dock_poses[-1]
                 fixtures.target_observation=(kw['target'],T[:3,:3].T@(np.asarray(observed['position'])-T[:3,3]))
-            # Preserve the successful frontal view before articulation moves the base.
-            dock_poses=artifacts.load_array(ctx['dock']/'slam/estimated_base_poses.npy')
-            view=dock_poses[-1]
+                # Preserve only an actually observed successful docking view.
+                view=dock_poses[-1]
+            else:
+                # A previous navigate can fail while recipes keep going. The
+                # fixture backend can reacquire from current images; do not
+                # dereference a nonexistent dock or reuse stale handle hints.
+                fixtures.target_observation=None
             result=fixtures.execute(name,**kw)
             ctx['continuation']=self.checkpoint(self.output/f'fixture_handoff_{len(interface.history):03d}',ctx['continuation'])
             if name.startswith('open') and observed is not None:
@@ -341,7 +416,9 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 before=len(self.stages)
                 try:
                     outcome=handler(**kw)
-                    if any(not stage['success'] for stage in self.stages[before:]):
+                    attempted=self.stages[before:]
+                    recovered={stage['name'] for stage in attempted if stage['success']}
+                    if any(not stage['success'] and stage.get('recovered_by') not in recovered for stage in attempted):
                         return SkillOutcome(False,'backend_stage_failed_continued')
                     return outcome
                 except Exception:
@@ -364,6 +441,15 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     raise
             return call
         interface=M2T2SkillInterface({k:diagnostic(v) for k,v in handlers.items()},output=self.output,progress=progress)
+        if self.qwen_interface:
+            from ..runtime.qwen_pipeline import full_task_interface
+            interface=full_task_interface(interface,self,ctx,lambda:fixtures)
+        print('SKILL_INTERFACE',type(interface).__name__,flush=True)
+        artifacts.write_text(self.output/'interface_dispatch.json',json.dumps(dict(
+            interface=type(interface).__name__,task=self.config['task'],
+            navigation='existing full-task SLAM / graph-A* / One-Ring handlers',
+            default_redock=sorted(getattr(interface,'default_redock',())),
+            placement='loaded docking/refinement owned by placement backend'),indent=2))
         error=None;checks={};success=False;timings=[];failures=[]
         try:
             mujoco.mj_step=scored_step

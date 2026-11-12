@@ -170,12 +170,17 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   artifacts.save_archive(a.output/'validated_paths.npz',approach=approach,grasp=descend,lift=lift)
   phase='approach';run_path(approach,0.)
   phase='grasp_pose';run_path(descend,0.)
-  phase='close_gripper';q=measured();last=None;stable=0;gripstart=d.time
+  from cross_episode_sim.control.gripper_readiness import FingerStabilityWindow
+  phase='close_gripper';q=measured();readiness=FingerStabilityWindow();settled=False;gripstart=d.time
   for _ in range(100):
-   execute(q,255.);angles=np.array([d.joint(n).qpos[0] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')]);stable=stable+1 if last is not None and np.max(np.abs(angles-last))<.0002 else 0;last=angles
-   if stable>=10:break
-  events.append(dict(phase=phase,seconds=float(d.time-gripstart),reason='sustained measured finger stability'))
-  if stable<10:raise RuntimeError('Gripper did not settle')
+   execute(q,255.)
+   angles=np.array([d.joint(n).qpos[0] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')])
+   settled=readiness.update(angles)
+   if settled:break
+  events.append(dict(phase=phase,seconds=float(d.time-gripstart),
+      reason='sustained measured finger window range and drift',window_samples=10,
+      range_rad=readiness.range_rad,drift_rad=readiness.drift_rad))
+  if not settled:raise RuntimeError('Gripper did not settle')
   phase='lift';run_path(lift,255.)
   phase='verify_hold';q=measured()
   padids=[m.body(n).id for n in ('robot_0/gripper/left_pad','robot_0/gripper/right_pad')]

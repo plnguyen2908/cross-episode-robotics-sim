@@ -34,7 +34,13 @@ x=artifacts.load_array(a.perception/'input.npz');radius=json.loads(artifacts.rea
 surface=x['table_surface'];fused_map=surface.copy();fused_rgb=x['rgb'][cKDTree(x['points']).query(surface)[1]]
 if a.interior_view_approach:
  from cross_episode_sim.control.observed_placement import interior_view_approach_targets as free_approach_targets
-targets,observation_approach_only=free_approach_targets(surface,radius,x['points'],float(np.ptp(x['held_points'][:,2])+.05))
+from cross_episode_sim.runtime.episode import current_runtime
+guided=bool(getattr(current_runtime(),'qwen_docking',False))
+if guided:
+ from cross_episode_sim.navigation.qwen_docks import observed_approach_targets
+ targets=observed_approach_targets(surface,x.get('preferred_contacts',[]));observation_approach_only=True
+else:
+ targets,observation_approach_only=free_approach_targets(surface,radius,x['points'],float(np.ptp(x['held_points'][:,2])+.05))
 preferred_targets=np.asarray(x.get('preferred_contacts',[])).reshape(-1,3)
 artifacts.write_text(a.output/'approach_evidence.json',json.dumps(dict(observation_approach_only=observation_approach_only,surface_points=len(surface),release_authorized=False,reason='Fresh complete support disk remains mandatory before any release'),indent=2))
 target=targets[np.argmin(np.linalg.norm(targets[:,:2],axis=1))].copy()
@@ -85,20 +91,32 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   T=tracking.T_map_base;pose=np.r_[T[:2,3],np.arctan2(T[1,0],T[0,0])]
   if tick%50==0:print('DOCK_PROGRESS',round(float(d.time-start),2),pose.tolist(),flush=True)
   if route is None:
+   from cross_episode_sim.runtime.episode import current_runtime
+   guided=bool(getattr(current_runtime(),'qwen_docking',False))
    candidates=[];chosen_targets={};reach_cache={};rejected={}
    proposal_checker=checker
    for proposal in placement_docks(targets,pose,preferred_targets=preferred_targets):
     if not proposal_checker.clear(proposal.pose):
      reason=proposal_checker.detail['reason'];rejected[reason]=rejected.get(reason,0)+1;continue
-    key=(proposal.distance,round(float(proposal.target[2]),2))
-    if key not in reach_cache:
-     reach_cache[key]=geo.reach(np.array([proposal.distance,0.,proposal.target[2]+.08]),packet.arm.position) is not None
-    if not reach_cache[key]:rejected['arm_reach']=rejected.get('arm_reach',0)+1;continue
+    # Preserve the qualified non-Qwen table baseline. Qwen approaches first.
+    if not guided:
+     key=(proposal.distance,round(float(proposal.target[2]),2))
+     if key not in reach_cache:
+      reach_cache[key]=geo.reach(np.array([proposal.distance,0.,proposal.target[2]+.08]),packet.arm.position) is not None
+     if not reach_cache[key]:rejected['arm_reach']=rejected.get('arm_reach',0)+1;continue
     candidates.append(proposal.pose);chosen_targets[tuple(proposal.pose)]=proposal.target
     if len(candidates)>=60:break
    artifacts.write_text(a.output/'candidate_summary.json',json.dumps(dict(feasible=len(candidates),rejected=rejected,candidates=[p.tolist() for p in candidates]),indent=2))
    print('FACING_DOCKS',len(candidates),'rejected',rejected,flush=True)
-   if not plan_to_any_dock(dock,pose,packet.arm.position,candidates):
+   from cross_episode_sim.runtime.episode import current_runtime
+   guided=bool(getattr(current_runtime(),'qwen_docking',False))
+   if guided:
+    from cross_episode_sim.navigation.qwen_docks import rank_docks,plan_ranked_docks
+    candidates,selection=rank_docks(grid,pose,candidates,[chosen_targets[tuple(g)] for g in candidates],
+        raw,a.output/('qwen_'+str(tick)),'place the held object on the observed free support')
+    planned=plan_ranked_docks(dock,pose,packet.arm.position,candidates)
+   else:planned=plan_to_any_dock(dock,pose,packet.arm.position,candidates)
+   if not planned:
     error='No observed loaded route to a reachable facing dock';break
    target=chosen_targets[tuple(dock.goal)]
    route=list(dock.path);follower=DockFollower(route)
@@ -132,7 +150,7 @@ cp=a.output/'private_checkpoint';cp.mkdir();artifacts.save_model(m,str(cp/'model
 grid.save(a.output);slam.save(a.output/'slam')
 from cross_episode_sim.mapping.continuity import load_memory,save_memory
 save_memory(a.output,load_memory(a.continuation_map) if a.continuation_map else dict(rooms=[],tables=[]))
-if 'fused_map' in globals():
+if 'fused_map' in globals() and not json.loads(artifacts.read_text(a.perception/'report.json')).get('approach_anchor_only',False):
  artifacts.save_array(a.output/'observed_table_surface_base.npy',(fused_map-tracking.T_map_base[:3,3])@tracking.T_map_base[:3,:3])
  artifacts.save_array(a.output/'observed_table_surface_rgb.npy',fused_rgb)
 target_base=np.linalg.inv(tracking.T_map_base)@np.r_[target,1.]

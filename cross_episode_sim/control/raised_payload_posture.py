@@ -17,12 +17,21 @@ from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesContro
 from cross_episode_sim.recording.deferred import StateVideoRecorder
 
 
-def raise_payload_clearance(runtime,tool_points,output,target_height=1.25):
+def tuck_payload_before_place(runtime,tool_points,output):
+    """Physically stow a loaded arm; keep the grasp and base command intact."""
+    from ..navigation.local_scan import ScanConfig
+    return raise_payload_clearance(runtime,tool_points,output,
+                                   joint_posture=np.asarray(ScanConfig().stowed_arm))
+
+
+def raise_payload_clearance(runtime,tool_points,output,target_height=1.25,lateral_offset=None,
+                            joint_posture=None):
     output.mkdir(parents=True,exist_ok=False)
     m,d=runtime.model,runtime.data;geometry=RobotGeometry(m);payload=ObservedPayload(geometry,tool_points)
     raw=runtime.sensors.capture();packet=payload.filter_packet(raw);q=packet.arm.position.copy()
     tcp=geometry.tcp_pose(q);start=float(d.time)
-    if tcp[2,3]>=target_height-.02:return dict(success=True,simulated_seconds=0.,reason='already_clear')
+    if joint_posture is None and tcp[2,3]>=target_height-.02 and (lateral_offset is None or abs(tcp[1,3]-lateral_offset)<.02):
+        return dict(success=True,simulated_seconds=0.,reason='already_clear')
     points=np.concatenate([camera_points(camera)[0] for camera in packet.cameras.values()])
     points=points[(points[:,2]>.08)&(np.linalg.norm(points,axis=1)<1.8)]
     for box in geometry.boxes(q):points=points[~np.all(np.abs((points-box.center)@box.axes)<=box.half+.01,axis=1)]
@@ -32,10 +41,15 @@ def raise_payload_clearance(runtime,tool_points,output,target_height=1.25):
     arm.planner.update_world(SceneCfg(cuboid=boxes))
     planner=ObservedGraspPlanner(arm,geometry,boxes,allow_curobo_fallback=True)
     target=tcp[:3,3].copy();target[2]=target_height
+    if lateral_offset is not None:target[1]=float(lateral_offset)
     strategy='vertical_clearance'
     from scipy.spatial.transform import Rotation
     path=None
-    for pitch in (0.,-30.,30.,-60.,60.,-90.,90.,180.):
+    if joint_posture is not None:
+        from .fixture_posture import plan_fixture_stow
+        path=plan_fixture_stow(planner,q,joint_posture)
+        strategy='loaded_tuck_before_fresh_placement_plan'
+    for pitch in (() if joint_posture is not None else (0.,-30.,30.,-60.,60.,-90.,90.,180.)):
         rotation=Rotation.from_euler('y',pitch,degrees=True).as_matrix()@tcp[:3,:3]
         for forward in (float(target[0]),.20,.35):
             goal=target.copy();goal[0]=forward
@@ -69,6 +83,8 @@ def raise_payload_clearance(runtime,tool_points,output,target_height=1.25):
             if steady>=5:break
         if steady<5:raise RuntimeError('Clearance posture did not settle')
     result=dict(success=True,simulated_seconds=float(d.time)-start,
-                reason='clearance for loaded local docking',strategy=strategy,requested_height=target_height,
+                reason=('settled neutral arm before fresh placement perception and IK' if joint_posture is not None
+                        else 'clearance for loaded local docking' if lateral_offset is None else 'uncover target after docking'),
+                strategy=strategy,requested_height=target_height,requested_lateral_offset=lateral_offset,
                 actual_tcp=geometry.tcp_pose(controller.robot_view.get_move_group('arm').joint_pos)[:3,3].tolist())
     (output/'report.json').write_text(json.dumps(result,indent=2));return result

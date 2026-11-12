@@ -34,6 +34,8 @@ class OneRingProcess:
         if self.remote is not None:return self.remote.call(operation='reset')
         return self._request(dict(reset=True))
     def predict(self,packet,goal):
+        from cross_episode_sim.perception.target_language import visual_target_text
+        goal=visual_target_text(goal)
         if self.remote is not None:
             action=self.remote.call(timestamp=packet.timestamp,goal=goal,navigation=packet.cameras['navigation'].rgb,wrist=packet.cameras['wrist'].rgb)
             self.count+=1

@@ -7,6 +7,9 @@ from cross_episode_sim.perception.container_masks import enclosing_container_mas
 
 def container_interior_detections(rgb,semantic_label,output_label):
  detector=PointMaskDetector(categories=(semantic_label,));_,masks=detector.segmenter.segment(rgb[:,:,::-1].copy());masks=[np.asarray(v,bool) for v in masks]
+ from .basket_floor_point import pointed_basket_floor
+ floor=pointed_basket_floor(rgb,semantic_label,output_label,detector.pointer,masks)
+ if floor:return floor
  objects=detector.detect(rgb,masks=masks);height,width=rgb.shape[:2];result=[]
  for obj in objects:
   mask=obj.mask

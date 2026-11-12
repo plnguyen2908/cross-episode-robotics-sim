@@ -28,10 +28,14 @@ Use unknown if the highlighted region does not provide enough evidence."""
 
 def category_prompt(categories):
     """Describe only the requested semantic classes, retaining rejection labels."""
+    from .target_language import visual_target_text
     choices=sorted(set(categories)|{'other','unknown'})
+    definitions={label:visual_target_text(label) for label in categories
+                 if visual_target_text(label)!=label}
     return ('Identify ONLY the red-highlighted region using the full image and its crop. '
             'Return JSON with category and a brief description of visible evidence. '
             'Choose exactly one category from '+json.dumps(choices)+'. '
+            +('Visual category definitions: '+json.dumps(definitions)+'. ' if definitions else '')+
             'Use other for a different visible item, or unknown for an ambiguous region. '
             'Do not infer hidden objects. Match location and color qualifiers only when visible.')
 

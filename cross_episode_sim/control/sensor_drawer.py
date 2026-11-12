@@ -47,15 +47,19 @@ class SensorDrawerMotion:
         settled=self.settle(path[-1],grip)
         return settled and np.max(np.abs(self.joints()-path[-1]))<.02
 
-    def release_and_withdraw(self, distance=.06):
+    def release_and_withdraw(self, distance=.06, alternatives=()):
         self.progress('release',{})
         if not self.gripper(0.):return DrawerMotionResult(False,'gripper_not_settled')
-        target=self.tcp().copy();target[:3,3]+=distance*self.normal
         self.progress('withdraw',{'distance':distance})
-        try:
-            if not self.path(target,grip=0.,contact_patch=True):
-                return DrawerMotionResult(False,'withdraw_not_settled')
-        except RuntimeError as exc:return DrawerMotionResult(False,'withdraw_path_blocked: '+str(exc))
+        errors=[]
+        for offset in (distance*self.normal,*alternatives):
+            target=self.tcp().copy();target[:3,3]+=np.asarray(offset)
+            try:
+                if not self.path(target,grip=0.,contact_patch=True):
+                    return DrawerMotionResult(False,'withdraw_not_settled')
+                break
+            except RuntimeError as exc:errors.append(str(exc))
+        else:return DrawerMotionResult(False,'withdraw_path_blocked: '+'; '.join(errors))
         return DrawerMotionResult(True,'released_and_withdrawn')
 
     def regrasp(self, observed_handle_pose):

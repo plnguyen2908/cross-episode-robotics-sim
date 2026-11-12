@@ -18,6 +18,71 @@ class PanelPushTarget:
     patch: np.ndarray
 
 
+def preflight_panel_push_step(planner, joints, target, hinge_xy, gripper_vertices,
+                              angle, support, orientation_gain=.5):
+    """Require a reachable contact to admit an initial coordinated push sweep.
+
+    All geometry is observed; this plans without executing or changing state.
+    A contact pose alone does not prove that the arm can follow the panel.
+    """
+    from .coordinated_contact import panel_arc_geometry
+    from .contact_retreat import ContactRetreatPlanner, base_offset_for_tool_motion
+    patch, normal, wrist = panel_arc_geometry(
+        target.surface, target.direction, np.r_[hinge_xy, 0.], [0., 0., 1.],
+        angle, target.contact[:3, :3], orientation_gain)
+    goal = panel_contact_pose(patch, normal, wrist, gripper_vertices)
+    turn = goal[:3, :3] @ target.contact[:3, :3].T
+    yaw = float(np.arctan2(turn[1, 0], turn[0, 0]))
+    contact = ContactRetreatPlanner(
+        planner.geometry, planner.clear_contact_push, support,
+        pose_clear=lambda q, offset, theta: planner.clear_contact_push(q, offset, base_yaw=theta),
+        support_pose_clear=support)
+    failures = []
+    for fraction in (1., .75, .5, .25, 0.):
+        theta = yaw * fraction
+        offset = base_offset_for_tool_motion(target.contact, goal, theta)
+        offset *= min(1., .10 / max(np.linalg.norm(offset), 1e-9))
+        if np.linalg.norm(offset) <= .005:
+            continue
+        try:
+            return contact.plan(joints, target.contact, distance=-float(np.linalg.norm(offset)),
+                                tcp_end=goal, base_offset_end=offset, base_yaw_end=theta)
+        except RuntimeError as exc:
+            failures.append(str(exc))
+    raise RuntimeError('Panel contact cannot continue into push: ' + str(failures))
+
+
+def refresh_observed_push_surface(target, points, gripper_vertices_tcp):
+    """Refit a newly exposed rear face locally after reaching around an edge.
+
+    A fridge liner can protrude beyond the thin edge visible from the front.
+    Keep the contact orientation, but measure the hand-facing surface again.
+    An occluded/unsupported patch retains its previously observed target.
+    """
+    points=np.asarray(points,float);normal=target.direction
+    across=np.cross(normal,[0.,0.,1.]);across/=np.linalg.norm(across)
+    delta=points-target.surface
+    signed=delta@normal
+    local=points[(abs(delta@across)<.035)&(abs(delta[:,2])<.035)&
+                 (signed>-.045)&(signed<.02)]
+    if len(local)<8:return target
+    layers=np.floor(((local-target.surface)@normal)/.003).astype(int)
+    for layer in np.unique(layers):
+        face=local[(layers==layer)|(layers==layer+1)]
+        if len(face)<8 or np.ptp(face[:,2])<.01:continue
+        # Require a planar patch aligned with the tracked door, rather than
+        # selecting a protruding handle or a single nearer depth pixel.
+        _,singular,axes=np.linalg.svd(face-face.mean(0),full_matrices=False)
+        if singular[1]<.003 or abs(axes[-1]@normal)<.95:continue
+        surface=face[np.argmin(np.linalg.norm(face-target.surface,axis=1))]
+        contact=panel_contact_pose(surface,normal,target.contact[:3,:3],gripper_vertices_tcp)
+        precontact=contact.copy();precontact[:3,3]-=.06*normal
+        patch=observed_contact_footprint(points,surface,normal,
+            np.asarray(gripper_vertices_tcp)@contact[:3,:3].T+contact[:3,3])
+        return PanelPushTarget(surface,normal,precontact,contact,patch)
+    return target
+
+
 def transport_panel_push_target(target,hinge_xy,previous_normal,current_normal):
     """Retain an observed contact patch through self-occlusion, tracking its panel.
 
@@ -32,7 +97,23 @@ def transport_panel_push_target(target,hinge_xy,previous_normal,current_normal):
         turn@target.precontact,turn@target.contact,target.patch@R.T+offset)
 
 
-def track_push_panel(points,previous,hinge_xy,angle,contact_height):
+def retain_observed_panel_face(previous,observed,hinge_xy,*,layer_tolerance=.012):
+    """Keep a tracked face's identity when the camera sees a parallel liner.
+
+    The normal is freshly fitted; an occluded front-face anchor is transported
+    from its previous observation, not replaced by a rear-face depth sample.
+    This does not add points to the obstacle cloud or remove world geometry.
+    """
+    from .sensor_hinged import arc_pose,PanelObservation
+    angle=float(np.arctan2(np.cross(previous.normal,observed.normal)[2],
+                          previous.normal@observed.normal))
+    pose=np.eye(4);pose[:3,3]=previous.anchor
+    predicted=arc_pose(pose,hinge_xy,angle)[:3,3]
+    if abs((observed.anchor-predicted)@observed.normal)<=layer_tolerance:return observed
+    return PanelObservation(predicted,observed.normal,observed.inliers,observed.residual)
+
+
+def track_push_panel(points,previous,hinge_xy,angle,contact_height,*,preserve_face=False):
     """Track the visible panel above a pushing hand, not behind a held handle."""
     from .sensor_hinged import arc_pose,fit_panel
     pose=np.eye(4);pose[:3,3]=previous.anchor
@@ -40,10 +121,26 @@ def track_push_panel(points,previous,hinge_xy,angle,contact_height):
     normal=prediction[:3,:3]@previous.normal
     near=prediction[:3,3]+.045*normal
     near[2]=contact_height+.25
-    return fit_panel(points,near,normal,radius=.3)
+    if not preserve_face:return fit_panel(points,near,normal,radius=.3)
+    # A fixed patch can be hidden by the hand/liner, and a passive panel can
+    # travel farther than one commanded increment. Search neighboring observed
+    # patches and bounded orientation hypotheses; never synthesize a fit.
+    for extra in (0.,5.,-5.,10.,-10.,20.,-20.):
+        prediction=arc_pose(pose,hinge_xy,angle+np.deg2rad(extra))
+        normal=prediction[:3,:3]@previous.normal
+        toward=np.r_[hinge_xy,prediction[2,3]]-prediction[:3,3]
+        toward[2]=0.;toward/=np.linalg.norm(toward)
+        for shift,height in ((0.,.25),(0.,.4),(.15,.25),(0.,.1),(.15,.4),(.15,.1),(0.,-.05)):
+            near=prediction[:3,3]+.045*normal+shift*toward
+            near[2]=contact_height+height
+            try:observed=fit_panel(points,near,normal,radius=.3)
+            except ValueError:continue
+            return retain_observed_panel_face(previous,observed,hinge_xy)
+    raise ValueError('Observed push panel unavailable in neighboring views/orientations')
 
 
-def prepare_observed_panel_push(approach_planner, contact_planner, joints, target, hinge_xy):
+def prepare_observed_panel_push(approach_planner, contact_planner, joints, target, hinge_xy,
+                                *, arm_only_edge_route=False):
     """Use the oracle preparation routine with RGB-D collision geometry only."""
     from .coordinated_contact import prepare_panel_push
     from .local_ik import local_ik
@@ -84,6 +181,22 @@ def prepare_observed_panel_push(approach_planner, contact_planner, joints, targe
             radial/=np.linalg.norm(radial)
             for clearance in (.12,.20):
                 entry=target.precontact.copy();entry[:3,3]+=clearance*radial
+                if arm_only_edge_route:
+                    # Leave the front of the panel along its free-edge tangent
+                    # before going behind it. A diagonal front-to-back reach
+                    # can cut through the panel despite a clear endpoint.
+                    corner=current[:3,3]+max(0.,float((entry[:3,3]-current[:3,3])@radial))*radial
+                    try:
+                        first=approach_planner.plan(joints,corner,current[:3,:3])
+                        turn=approach_planner.plan(first[-1],corner,entry[:3,:3])
+                        around=approach_planner.plan(turn[-1],entry[:3,3],entry[:3,:3])
+                        last=approach_planner.plan_joint_goal(around[-1],pre_q)
+                    except RuntimeError as exc:
+                        approach_planner.events.append(dict(method='panel_edge_route_rejected',
+                            clearance=clearance,reason=str(exc),collision=approach_planner.last_rejection))
+                    else:
+                        approach_planner.events.append(dict(method='panel_edge_corner',clearance=clearance))
+                        return np.concatenate([first,turn[1:],around[1:],last[1:]])
                 try:
                     first=approach_planner.plan(joints,entry[:3,3],current[:3,:3])
                     turn=approach_planner.plan(first[-1],entry[:3,3],entry[:3,:3])
@@ -94,14 +207,30 @@ def prepare_observed_panel_push(approach_planner, contact_planner, joints, targe
         finally:approach_planner.allow_curobo_fallback=graph
         return approach_planner.plan_joint_goal(joints,pre_q)
 
-    return prepare_panel_push(target.contact,
+    def prepare(solver):
+        return prepare_panel_push(target.contact,
         direction=target.direction,
-        solve_contact=solve_contact,
+        solve_contact=solver,
         check_contact=lambda q:check(contact_planner,q),
         solve_precontact=solve_precontact,
         plan_contact=smooth_joint_path,
         check_approach=check_approach,
         plan_reach=plan_reach)
+    if not arm_only_edge_route:
+        return prepare(solve_contact)
+    # A feasible contact on one IK branch may have no clear approach. Try the
+    # other collision-valid branches before rejecting the observed contact.
+    contact_planner.preferred_ik_seeds=[np.array([0.,.25,0.,-1.5,0.,3.35,0.])]
+    solutions=sorted(contact_planner.iter_solutions(joints,target.contact[:3,3],target.contact[:3,:3]),
+                     key=lambda q:np.linalg.norm(q-joints))
+    errors=[];tried=[]
+    for solution in solutions:
+        if any(np.max(abs(solution-old))<.02 for old in tried):continue
+        tried.append(solution)
+        try:return prepare(lambda pose:solution)
+        except RuntimeError as exc:errors.append(str(exc))
+    if not solutions:raise RuntimeError('Contact IK rejected: '+str(contact_planner.ik_diagnostics[:1]))
+    raise RuntimeError('Panel reach branches rejected: '+str(errors))
 
 
 

@@ -21,12 +21,18 @@ def test_every_non_navigation_skill_redocks_before_handler(name):
     assert 'redock' not in next(r for r in original.list_skills() if r['name']==name)['parameters']['properties']
 
 
-def test_failed_redock_does_not_fake_manipulation():
+@pytest.mark.parametrize('raises', [False, True])
+def test_failed_redock_attempts_manipulation_and_preserves_failure(raises):
     calls=[]
-    original=M2T2SkillInterface({'pick':lambda **kw:calls.append(kw)})
-    wrapper=QwenSkillInterface(original,lambda **kw:{'success':False})
+    original=M2T2SkillInterface({'pick':lambda **kw:calls.append(kw) or SkillOutcome(True)})
+    def redock(**kw):
+        if raises:raise RuntimeError('No local route')
+        return {'success':False, 'reason':'No local route'}
+    wrapper=QwenSkillInterface(original,redock)
     result=wrapper.execute_skill('pick',{'target':'bowl','redock':True})
-    assert not result['success'] and not calls
+    assert result['success'] and len(calls)==1
+    assert not result['redock']['success']
+    assert result['redock']['reason']=='No local route'
 
 
 def test_unavailable_and_invalid_requests_do_not_move():
@@ -79,3 +85,22 @@ def test_redock_default_preserves_original_dispatch():
     wrapper=QwenSkillInterface(M2T2SkillInterface({'pick':lambda **kw:SkillOutcome(True)}),lambda **kw:calls.append(kw))
     assert wrapper.execute_skill('pick',{'target':'bowl'})['success']
     assert not calls
+
+
+def test_prior_support_history_is_time_filtered(tmp_path):
+    import json
+    import numpy as np
+    from types import SimpleNamespace
+    from cross_episode_sim.code_policy.recorded_context import restore_start_context
+    np.savez(tmp_path/'floor.npz',origin=[-1.,-1.],resolution=1.,floor=np.ones((4,4),np.uint16))
+    anchor=np.eye(4);anchor[0,3]=.2
+    (tmp_path/'diagnostics.jsonl').write_text(json.dumps(dict(timestamp=2.,accepted=True,pose=anchor.tolist(),map='floor.npz')))
+    history=[]
+    for stamp in (1.,3.):
+        pose=np.eye(4);pose[0,3]=stamp*.1
+        history.append(dict(timestamp=stamp,accepted=True,pose=pose.tolist()))
+    (tmp_path/'support_history.json').write_text(json.dumps(history))
+    grid=SimpleNamespace(floor_views=np.zeros((1,1),np.uint16),config=SimpleNamespace(resolution=.1),cell_to_world=lambda cells:cells*.1)
+    restore_start_context(grid,tmp_path,2.)
+    assert len(grid.inherited_support_poses)==2
+    assert np.allclose(grid.inherited_support_poses[:,0],[0.,-.1])

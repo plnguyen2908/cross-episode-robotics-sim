@@ -7,15 +7,27 @@ import numpy as np
 from scipy.spatial import ConvexHull,cKDTree
 from scipy.spatial.transform import Rotation
 
-def interior_placement_candidates(surface, scene_points, held_points, tcp, radius):
+def interior_placement_candidates(surface, scene_points, held_points, tcp, radius, *, prefer_upright=False):
  surface=np.asarray(surface,float);scene=np.asarray(scene_points);held=np.asarray(held_points,float);tcp=np.asarray(tcp,float)
  _,indices=np.unique(np.floor(surface/.018).astype(int),axis=0,return_index=True);contacts=surface[np.sort(indices)]
  center=np.median(surface[:,:2],axis=0);contacts=np.asarray(sorted(contacts,key=lambda p:np.linalg.norm(p[:2]-center)))
  radial=np.r_[center,0.];radial/=max(np.linalg.norm(radial),1e-9);axis=np.cross([0,0,1.],radial)
  tree=cKDTree(surface[:,:2]);obstacles=cKDTree(scene[:,:2]);result=[];group=0
+ rotations=[]
+ if prefer_upright:
+  principal=np.linalg.svd(held-held.mean(0),full_matrices=False)[2]
+  extents=np.ptp(held@principal.T,axis=0)
+  # A long, narrow observed payload (e.g. a bottle) should first be placed
+  # vertically. Broad/flat groceries keep the original orientation search.
+  if extents[0]>1.6*max(extents[1:]):
+   long_axis=principal[0]*(-1 if principal[0,2]<0 else 1)
+   upright=Rotation.align_vectors([[0.,0.,1.]],[long_axis])[0].as_matrix()
+   rotations.extend((Rotation.from_euler('z',yaw,degrees=True).as_matrix()@upright,0.)
+                    for yaw in (0.,45.,-45.,90.,-90.,135.,-135.,180.))
  for pitch in (0.,-15.,15.,-30.,30.,-45.,45.,-60.,60.,-90.,90.):
   for yaw in (0.,90.,-90.,180.):
-   rotation=Rotation.from_rotvec(axis*np.deg2rad(pitch)).as_matrix()@Rotation.from_euler('z',yaw,degrees=True).as_matrix()
+   rotations.append((Rotation.from_rotvec(axis*np.deg2rad(pitch)).as_matrix()@Rotation.from_euler('z',yaw,degrees=True).as_matrix(),pitch))
+ for rotation,pitch in rotations:
    relative=(held-tcp[:3,3])@rotation.T
    bottom=np.r_[(relative[:,:2].min(0)+relative[:,:2].max(0))/2,relative[:,2].min()]
    footprint=relative[:,:2]-bottom[:2];hull=ConvexHull(footprint);eq=hull.equations; margin=.01

@@ -20,9 +20,9 @@ from cross_episode_sim.control.observed_arm import robot_calibration
 from cross_episode_sim.control.observed_payload import ObservedPayload,reconstruct_held_points
 from cross_episode_sim.control.planner_cache import sensor_arm_planner
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
-p=argparse.ArgumentParser();p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+p=argparse.ArgumentParser();p.add_argument('--current-pose',action='store_true');p.add_argument('--max-candidates',type=int,default=0);p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 r=json.loads(artifacts.read_text(a.dock/'report.json'))
-if not r.get('docking_success',False) and not (a.isolated_initial_state and r.get('isolated_placement_reset')) and not (a.observe_only and (r.get('transit_success') is True or r.get('initialization_valid') or r.get('approach_complete') or r.get('status') in ('needs_floor_observation','budget_exhausted'))):raise ValueError('Require sensor docking or explicit isolated reset')
+if not (a.current_pose and r.get('initialization_valid')) and not r.get('docking_success',False) and not (a.isolated_initial_state and r.get('isolated_placement_reset')) and not (a.observe_only and (r.get('transit_success') is True or r.get('initialization_valid') or r.get('approach_complete') or r.get('status') in ('needs_floor_observation','budget_exhausted'))):raise ValueError('Require sensor docking or explicit isolated reset')
 m,d=load_checkpoint(a.dock)
 c=MolmoSpacesController(m,d);hold={g:c.robot_view.get_move_group(g).noop_ctrl.copy() for g in ('base','arm','gripper')};geo=RobotGeometry(m);q=c.robot_view.get_move_group('arm').joint_pos.copy();tool_points=artifacts.load_array(a.dock/'observed_payload_tool.npy') if artifacts.exists(a.dock/'observed_payload_tool.npy') else None;payload=ObservedPayload(geo,tool_points) if tool_points is not None else None;tcp=geo.fk(q)[geo.tcp_body]@geo.tcp_local
 # Private scoring remembers only the initially held bowl, never a destination pose.
@@ -70,7 +70,10 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    from cross_episode_sim.perception.fixture_contact import FixtureContactPointer
    from cross_episode_sim.perception.molmo_pointing import MolmoPointer
    detector=PointMaskDetector(categories=(a.receptacle,),pointer=FixtureContactPointer(MolmoPointer(),'stove'))
-  if use_memory or a.observed_aperture:
+  # A remembered partial floor is a fallback, not the complete free interior.
+  # Redocking exposes new floor and changes occlusion by previous contents.
+  # Refresh the container mask so placement can use that newly visible space.
+  if a.observed_aperture:
    detections={k:[] for k in raw.cameras}
   elif a.semantic_receptacle and ('interior' in a.receptacle or 'inside' in a.receptacle):
    from cross_episode_sim.perception.basket_interior import container_interior_detections
@@ -116,7 +119,10 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     if detection.label==a.receptacle:
      if a.semantic_receptacle and ('interior' in a.receptacle or 'inside' in a.receptacle):
       from cross_episode_sim.perception.interior_support import interior_support_points
-      surface=interior_support_points(camera,detection)
+      if 'basket' in a.semantic_receptacle:
+       from cross_episode_sim.perception.basket_floor_surface import basket_floor_points
+       surface=basket_floor_points(camera,detection)
+      else:surface=interior_support_points(camera,detection)
      else:
       surface=table_points(camera,detection,np.eye(4),support_options=None if a.receptacle=='dining table' else dict(min_height=.03,max_height=1.8,min_span=.12,min_area=.005))
      if len(surface):
@@ -137,6 +143,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    artifacts.write_text(a.output/'aperture_evidence.json',json.dumps(dict(aperture=aperture,measured_support_points=len(surface)),indent=2))
   if not surfaces:raise RuntimeError('No freshly observed support surface for '+a.receptacle)
   surface=np.concatenate(surfaces);points=np.concatenate(points);colors=np.concatenate(colors);del detector
+  if a.semantic_receptacle and 'basket' in a.semantic_receptacle and r.get('placement_target_base') is not None:
+   # Associate the reconstructed instance with the sensed docking target.
+   # A segmentation of a remote floor/table is not this basket's support.
+   anchor=np.asarray(r['placement_target_base'])
+   surface=surface[np.linalg.norm(surface[:,:2]-anchor[:2],axis=1)<.45]
+   if not len(surface):raise RuntimeError('Observed support belongs to a different surface, not the approached basket')
   memory=a.dock/'observed_table_surface_base.npy'
   if artifacts.exists(memory):
    remembered=artifacts.load_array(memory)
@@ -157,7 +169,11 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    center=(held[:,:2].min(0)+held[:,:2].max(0))/2
    radius=float(np.linalg.norm(held[:,:2]-center,axis=1).max()+.03)
    artifacts.write_text(a.output/'support_filter.json',json.dumps(dict(radius_m=radius,edge_margin_m=.03),indent=2))
-   artifacts.write_text(a.output/'report.json',json.dumps(dict(observation_success=True,semantic_receptacle=a.semantic_receptacle,scope='Fresh onboard table/held-object perception only; no placement executed'),indent=2))
+   footprint_available=True
+   if a.semantic_receptacle and 'basket' in a.semantic_receptacle:
+    from cross_episode_sim.control.container_footprint import interior_placement_candidates
+    footprint_available=bool(interior_placement_candidates(surface,points,held,tcp,radius,prefer_upright=True))
+   artifacts.write_text(a.output/'report.json',json.dumps(dict(observation_success=True,placement_footprint_available=footprint_available,semantic_receptacle=a.semantic_receptacle,scope='Fresh onboard table/held-object perception only; no placement executed'),indent=2))
    print('TABLE_OBSERVED',len(surface),flush=True)
    raise SystemExit(0)
   from cross_episode_sim.runtime.episode import current_runtime
@@ -184,8 +200,14 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   rows=[row for row,ok in zip(rows,supported) if ok]
   if not rows and a.semantic_receptacle and ('interior' in a.receptacle or 'inside' in a.receptacle):
    from cross_episode_sim.control.container_footprint import interior_placement_candidates
-   rows=interior_placement_candidates(surface,points,held,tcp,support_radius)
+   rows=interior_placement_candidates(surface,points,held,tcp,support_radius,
+       prefer_upright='basket' in a.semantic_receptacle)
    print('OBSERVED_CONTAINER_FALLBACK',len(rows),'not learned M2T2 predictions',flush=True)
+  # Geometry fallback is generated after the learned-proposal ordering above.
+  # Apply the dock's contact preference to BOTH sources before diversification.
+  if r.get('placement_target_base') is not None:
+   preferred=np.asarray(r['placement_target_base'])
+   rows.sort(key=lambda row:np.linalg.norm(np.asarray(row['contact'])-preferred))
   artifacts.write_text(a.output/'support_filter.json',json.dumps(dict(radius_m=support_radius,edge_margin_m=.03,retained=len(rows)),indent=2))
   print('INTERIOR_PLACE_CANDIDATES',len(rows),'support radius',support_radius,flush=True)
   seen=set();diverse=[]
@@ -203,11 +225,18 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   release_candidates=[]
   # Try distinct contacts/orientations before revisiting millimeter-offset
   # copies of the same pose. Retain every existing candidate and clearance.
-  for clearance in (.10,.15,.20,.075,.05):
+  clearances=(.05,.075,.10,.15,.20) if a.semantic_receptacle and 'basket' in a.semantic_receptacle else (.10,.15,.20,.075,.05)
+  for clearance in clearances:
    for row in diverse[:40]:
     candidate=dict(row);goal=np.array(row['tcp']);goal[2,3]+=clearance
     candidate.update(model_tcp=row['tcp'],tcp=goal.tolist(),release_clearance_m=clearance)
     release_candidates.append(candidate)
+  if r.get('placement_witness') is not None:
+   from cross_episode_sim.control.basket_placement_witness import validate_witness
+   witness=validate_witness(r['placement_witness'],surface,points,held,tcp)
+   print('DOCK_PLACEMENT_WITNESS', 'fresh footprint confirmed' if witness else 'fresh footprint unavailable; using alternatives',flush=True)
+   if witness is not None:release_candidates.insert(0,witness)
+  if a.max_candidates>0:release_candidates=release_candidates[:a.max_candidates]
   for candidate_index,row in enumerate(release_candidates,1):
    print('PLACE_ATTEMPT',candidate_index,'of',len(release_candidates),'clearance_m',row['release_clearance_m'],'contact',row['contact'],flush=True)
    goal=np.array(row['tcp'])

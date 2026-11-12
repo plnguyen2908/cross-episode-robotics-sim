@@ -14,6 +14,19 @@ class ComponentScore:
                       if (model.body(i).name or '').startswith('robot_0/gripper/')}
         self.initially_held=self.touching_hand(data)
         self.initial=data.qpos.copy()
+        self.initial_heights={r:float(data.xpos[r,2]) for r in self.roots}
+        self.initial_appliance_objects={key:set() for key in ('fridge','microwave')}
+        for contact in data.contact:
+            if abs(contact.frame[2])<.7:continue
+            for a,b in ((contact.geom1,contact.geom2),(contact.geom2,contact.geom1)):
+                root=int(self.lookup[model.geom_bodyid[a]])
+                if root<0:continue
+                body=int(model.geom_bodyid[b]);names=[model.geom(b).name or '']
+                while body>0:
+                    names.append(model.body(body).name or '');body=int(model.body_parentid[body])
+                for key in self.initial_appliance_objects:
+                    if key in ' '.join(names).lower():self.initial_appliance_objects[key].add(root)
+
 
     def touching_hand(self,data):
         result=set();m=self.model
@@ -23,10 +36,21 @@ class ComponentScore:
             if b in self.gripper and self.lookup[a]>=0:result.add(int(self.lookup[a]))
         return result
 
-    def placement(self,data,case):
+    def pick_from(self,data,source):
+        expected=self.initial_appliance_objects[source]
+        held=self.touching_hand(data)
+        lifted={r for r in expected if float(data.xpos[r,2])-self.initial_heights[r]>.08}
+        correct=held & lifted & expected
+        return dict(success=bool(correct),source=source,initial_source_objects=sorted(expected),
+                    held_source_objects=sorted(correct))
+
+    def placement(self,data,case,*,basket='purple basket'):
         m=self.model
         token={'place':'dining_table','cup_in_drawer':'drawer',
-               'bowl_in_cabinet':'cabinet','pot_on_stove':'stove'}[case]
+               'bowl_in_cabinet':'cabinet','pot_on_stove':'stove','place_microwave':'microwave','grocery_in_basket':'purple_basket'}[case]
+        if case=='grocery_in_basket':
+            if basket not in ('purple basket','orange basket'):raise ValueError('Unknown basket category')
+            token=basket.replace(' ','_')
         # RoboCasa stack names encode the fixture through its joint suffix,
         # not necessarily a literal "cabinet"/"drawer" in every shelf name.
         suffix={'drawer':'_slidejoint','cabinet':'_doorhinge'}.get(token)
@@ -43,6 +67,22 @@ class ComponentScore:
                     names.append(m.body(body).name or '');body=int(m.body_parentid[body])
                 if token not in ' '.join(names).lower() and not any(
                         name.startswith(prefix) for name in names for prefix in prefixes):continue
+                if case=='grocery_in_basket':
+                    # Interior support, not a bottle balanced on the basket rim.
+                    if not (m.geom(b).name or '').endswith('_floor'):continue
+                    geoms=[i for i in range(m.ngeom) if self.lookup[m.geom_bodyid[i]]==root
+                           and (m.geom_contype[i] or m.geom_conaffinity[i])]
+                    corners=np.array([[x,y,z] for x in (-1,1) for y in (-1,1) for z in (-1,1)])
+                    vertices=[]
+                    for i in geoms:
+                        if m.geom_type[i]==mujoco.mjtGeom.mjGEOM_MESH:
+                            mesh=m.geom_dataid[i];a0=m.mesh_vertadr[mesh];n=m.mesh_vertnum[mesh];v=m.mesh_vert[a0:a0+n]
+                        else:v=m.geom_aabb[i,:3]+corners*m.geom_aabb[i,3:]
+                        vertices.extend(v@data.geom_xmat[i].reshape(3,3).T+data.geom_xpos[i])
+                    local_vertices=(np.asarray(vertices)-data.geom_xpos[b])@data.geom_xmat[b].reshape(3,3)
+                    center,half=m.geom_aabb[b,:3],m.geom_aabb[b,3:]
+                    if not (np.all(local_vertices[:,:2]>=center[:2]-half[:2]-.003)
+                            and np.all(local_vertices[:,:2]<=center[:2]+half[:2]+.003)):continue
                 # The object's center must lie over the supporting surface,
                 # rather than leaning on the outside of a drawer/cabinet.
                 center=m.geom_aabb[b,:3];half=m.geom_aabb[b,3:]

@@ -25,6 +25,8 @@ class MolmoPointer:
         self.model=AutoModelForImageTextToText.from_pretrained(model,trust_remote_code=True,torch_dtype=torch.bfloat16).to(device).eval()
 
     def point(self,image,target):
+        from .target_language import visual_target_text
+        target=visual_target_text(target)
         if self.remote is not None:
             import numpy as np
             return self.remote.call(image=np.asarray(image),target=target)
@@ -44,6 +46,9 @@ class PointingSupervisor:
         from .visual_targets import VisualTargetMap
         self.pointer=pointer;self.segmenter=segmenter;self.label=label;self.period=period
         self.targets=VisualTargetMap();self.last=-float('inf');self.events=[]
+
+    def refine_mask(self, camera, mask):
+        return mask
 
     def observe(self,packet,tracking):
         import numpy as np
@@ -65,6 +70,8 @@ class PointingSupervisor:
                     choices=[m for m in masks if m.shape==camera.depth_m.shape and m[v,u] and 30<=m.sum()<.15*m.size]
                     if not choices:continue
                     mask=min(choices,key=lambda m:m.sum())
+                    mask=self.refine_mask(camera,mask)
+                    if mask is None:continue
                     if any(np.array_equal(mask,d.mask) for d in detections):continue
                     yy,xx=np.where(mask)
                     detections.append(Detection(self.label,1.,(float(xx.min()),float(yy.min()),float(xx.max()+1),float(yy.max()+1)),mask=mask))

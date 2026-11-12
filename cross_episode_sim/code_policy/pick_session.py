@@ -14,13 +14,15 @@ class PickSession:
         self.target=target;self.calls=[];self.tool_budget=tool_budget;self.finished=False
         self.proposals=None;self.private_reports=[];self.source=None
         self._redocking=None;self._skill_interface=None
+        self._observed_pick_target=None
 
-    def move(self,target,purpose,distance,name):
+    def move(self,target,purpose,distance,name,lateral_offset=None):
         from .redocking import SensorRedocking
         self.budget();started=time.monotonic()
         if self._redocking is None:self._redocking=SensorRedocking(self.runtime,self.sensors,self.mapper)
         self.proposals=None  # Base motion invalidates all camera-frame grasps.
-        result=self._redocking.move(target,purpose,distance,self.output/f'{name}_{len(self.calls):03d}')
+        options={} if lateral_offset is None else dict(lateral_offset=lateral_offset)
+        result=self._redocking.move(target,purpose,distance,self.output/f'{name}_{len(self.calls):03d}',**options)
         return self.log(name,dict(target=target,purpose=purpose,distance=distance),result,started)
 
     def navigate(self,target,distance=.85):
@@ -105,7 +107,11 @@ class PickSession:
         target_base=None
         # Carry the observed target across camera/view changes, never a simulator ID.
         tracked=getattr(self._redocking,'target_point',None)
-        if tracked is not None and self._redocking.target_label==target:
+        tracked_label=getattr(self._redocking,'target_label',None)
+        if tracked_label!=target or tracked is None:
+            memory=self._observed_pick_target
+            tracked=memory[1] if memory is not None and memory[0]==target else None
+        if tracked is not None:
             local=T[:3,:3].T@(tracked-T[:3,3])
             optical=np.linalg.inv(camera.T_base_optical)@np.r_[local,1.]
             if optical[2]>0:
@@ -119,6 +125,8 @@ class PickSession:
             candidates=[pixel_point(camera,valid,p) for p in points]
             target_base=min(candidates,key=lambda p:np.linalg.norm(T[:3,:3]@p+T[:3,3]-tracked)) if tracked is not None else candidates[0]
         target_map=T[:3,:3]@target_base+T[:3,3]
+        if getattr(getattr(self,'approach_options',None),'source_receptacle',None):
+            self._observed_pick_target=(target,target_map.copy())
         self.snapshot(folder)
         artifacts.write_text(folder/'report.json',json.dumps(dict(selected_object=dict(label=target,position=target_map.tolist()))))
         with (folder/'perception.log').open('w',buffering=1) as log:
@@ -152,6 +160,7 @@ class PickSession:
         if not isinstance(candidate_ids,list) or not 1<=len(candidate_ids)<=24:raise ValueError('Supply 1–24 candidate IDs')
         if any(type(i) is not int or i<0 or i>=min(24,len(self.proposals['candidates'])) for i in candidate_ids):raise ValueError('Unknown candidate ID')
         folder=self.output/f'execute_{len(self.calls):03d}';folder.mkdir()
+        self.last_pick_output = folder/'physics'
         prediction=folder/'selected.json'
         artifacts.write_text(prediction,json.dumps({**self.proposals,'candidates':[self.proposals['candidates'][i] for i in candidate_ids]}))
         # Current live state, never a rollback between attempts.
@@ -160,17 +169,21 @@ class PickSession:
             result=self.runtime.run([sys.executable,'scripts/test_m2t2_pick.py',
                 '--source',str(self.source),'--input',str(self.source/'input.npz'),
                 '--predictions',str(prediction),'--output',str(folder/'physics'),
-                '--approach-offset',str(approach_offset),'--max-candidates','24'],log)
+                '--approach-offset',str(approach_offset),'--max-candidates','24',
+                *self.pick_execution_options(folder)],log)
         report_path=folder/'physics/report.json'
         if artifacts.exists(report_path):
             report=json.loads(artifacts.read_text(report_path));self.private_reports.append(report)
-            public={k:report[k] for k in ('execution_success','observed_gripper_not_empty','measured_pad_gap_m','phase','simulated_seconds') if k in report}
+            public={k:report[k] for k in ('execution_success','alignment_completed','alignment_only','front_wrist','observed_gripper_not_empty','measured_pad_gap_m','phase','simulated_seconds') if k in report}
+            public['error']=next((row['error'] for row in reversed(report.get('events',[])) if row.get('error')),None)
             public['planning_rejections']=[dict(stage=row.get('stage'),reason=row.get('reason',row.get('error'))) for row in report.get('planning_rejections',[])[:6]]
         else:public=dict(execution_success=False,error='Motion backend returned no report')
         public['backend_returncode']=result.returncode
         # Old camera-derived candidates are no longer valid after physical motion.
         self.proposals=None
         return self.log('execute_grasp',dict(candidate_ids=candidate_ids,approach_offset=approach_offset),public,start)
+
+    def pick_execution_options(self,folder):return []
 
     def finish(self):
         """End this attempt. This is an agent decision, not a success score."""

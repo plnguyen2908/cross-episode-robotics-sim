@@ -27,3 +27,24 @@ def container_interior_detections(rgb, semantic_label, output_label):
             if obj.mask is not None and not obj.mask[v,u]:continue
             result.append(Detection(output_label,obj.score,obj.box,obj.mask,(u,v)))
     return result
+
+
+def microwave_floor_detections(camera, output_label):
+    """Point at the visible turntable; grow only measured local depth.
+
+    The appliance body's instance mask can exclude the cavity (a hole in that
+    mask). The semantic floor point and connected horizontal-depth selector
+    therefore supply the interior region, without using an outer-body mask.
+    """
+    from .molmo_pointing import MolmoPointer
+    from .point_region import pointed_region
+    description=('center of the circular glass turntable on the bottom INSIDE '
+                 'the open microwave cavity, not the kitchen counter, '
+                 'not the open door, and not the container held by the robot')
+    answer=MolmoPointer().point(Image.fromarray(camera.rgb),description)
+    height,width=camera.depth_m.shape;result=[]
+    for u,v in answer.get('points',[]):
+        seed=Detection(output_label,1.,(0,0,width,height),None,(round(u),round(v)))
+        region=pointed_region(camera,seed,radius=.30)
+        if region is not None:result.append(region)
+    return result

@@ -14,11 +14,22 @@ from ..control.sensor_appliance_backend import camera_points,pixel_point
 from ..perception.handle_surface import observed_handle_surface
 
 
+def handle_description(target, opening):
+    if target == 'microwave':
+        if opening:
+            return 'middle of the vertical right edge of the movable microwave door, immediately left of the keypad; not the top edge or keypad'
+        return 'vertical free edge or handle of the OPEN microwave door swung away from the appliance; not the keypad, cavity rim, shelf or fixed appliance body'
+    if target == 'fridge' and not opening:
+        return 'vertical handle on the OPEN refrigerator door swung away from the fridge; not the freezer drawer or interior shelf'
+    return 'graspable handle on '+target
+
+
 class LiveFixtureControls:
-    def __init__(self,runtime,output):
+    def __init__(self,runtime,output,*,verify_fixture_points=True):
         from ..perception.molmo_pointing import MolmoPointer
         from ..control.m2t2_policy import M2T2Policy
         self.runtime=runtime;self.output=Path(output);self.index=0;self.hinges={};self.target_observation=None
+        self.verify_fixture_points=verify_fixture_points
         self.pointer=MolmoPointer()
         self.model=M2T2Policy('/nobackup2/le/.cache/hub/models--wentao-yuan--m2t2/snapshots/a20325dcd19cd1b838274974d0ebe35bfe383796/m2t2.pth','external/M2T2')
 
@@ -67,13 +78,12 @@ class LiveFixtureControls:
                     found=(target_point,surface,info)
                 except ValueError:pass
         for camera,valid in ([] if found is not None else views):
-            description=('middle of the vertical right edge of the movable microwave door, immediately left of the keypad; not the top edge or keypad'
-                         if target=='microwave' else 'graspable handle on '+target)
+            description=handle_description(target,opening)
             pointer=self.pointer
-            if target=='microwave':
+            if target=='microwave' and opening:
                 from ..perception.fixture_contact import FixtureContactPointer
                 pointer=FixtureContactPointer(pointer,target)
-            elif any(word in target for word in ('cabinet','drawer','fridge')):
+            elif self.verify_fixture_points and any(word in target for word in ('cabinet','drawer','fridge')):
                 from ..perception.fixture_pointing import ApplianceAssociatedPointer
                 pointer=ApplianceAssociatedPointer(pointer,target)
             answer=pointer.point(Image.fromarray(camera.rgb),description)
@@ -135,7 +145,9 @@ class LiveFixtureControls:
                 # Exact calibrated base/finger geometry and a checked short
                 # withdrawal avoid the opened panel during folding. Keep the
                 # room-door / set-table posture backend unchanged.
-                report=stow_after_fixture(self.runtime,sensors,rec,root/'posture',ScanConfig().stowed_arm)
+                report=stow_after_fixture(self.runtime,sensors,rec,root/'posture',ScanConfig().stowed_arm,
+                    arm_boxes=getattr(self,'calibrated_drawer_withdrawal',False),
+                    withdrawal_directions=getattr(self,'withdrawal_directions',()))
                 (root/'posture_report.json').write_text(json.dumps(report,indent=2))
             progress('checked_navigation_posture','completed')
 
@@ -211,6 +223,10 @@ class LiveFixtureControls:
                     pts=pts[np.linalg.norm(pts-current[:3,3]-t[:,None]*delta,axis=1)>.075]
                 vox=np.unique(np.floor(pts/.015).astype(int),axis=0)
                 boxes=[Cuboid(name=f'drawer_{i}',pose=((lo+hi+1)*.0075).tolist()+[1.,0.,0.,0.],dims=((hi-lo+1)*.015).tolist()) for i,(lo,hi) in enumerate(merge_voxels(vox))]
+                if getattr(self,'calibrated_drawer_withdrawal',False):
+                    from ..control.fixture_approach import calibrated_finger_planner
+                    return calibrated_finger_planner(b.prepare_arm(),b.geometry,boxes,
+                        self.runtime.model,self.runtime.data,arm_boxes=True,allow_curobo_fallback=False)
                 return ObservedGraspPlanner(b.prepare_arm(),b.geometry,boxes)
             motion=SensorDrawerMotion(joint_position=b.joints,
                 tcp_pose=lambda q=None:tool_pose(b.geometry,b.joints() if q is None else q),
@@ -218,5 +234,7 @@ class LiveFixtureControls:
             if not opening:
                 phase='drawer_close';result=motion.move_until_resistance(opening=False)
                 if not result.completed:raise RuntimeError(result.reason)
-            phase='drawer_release';result=motion.release_and_withdraw()
+            alternatives=([motion.normal*.03+[0,0,.08],[0,0,.12]]
+                          if getattr(self,'calibrated_drawer_withdrawal',False) else ())
+            phase='drawer_release';result=motion.release_and_withdraw(alternatives=alternatives)
             if not result.completed:raise RuntimeError(result.reason)

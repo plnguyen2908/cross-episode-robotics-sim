@@ -56,3 +56,15 @@ def make_executor(functions, observation):
             validate_code(code,functions)
             return super()._exec_user_code(code)
     return SensorCodeEnv()
+
+
+def validate_feedback_cell(code, functions):
+    """One physical action per observation cycle for calibration experiments."""
+    tree=validate_code(code,functions)
+    read_only={'list_skills','get_robot_state','door_state','propose_grasps'}
+    actions=set(functions)-read_only
+    calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id in actions]
+    loops=(ast.For,ast.While,ast.ListComp,ast.SetComp,ast.DictComp,ast.GeneratorExp)
+    if len(calls)>1 or any(isinstance(n,loops) for n in ast.walk(tree)):
+        raise ValueError('Use exactly one action per cell, then inspect fresh images and feedback. Do not combine pick/redock/finish or loop over attempts.')
+    return code

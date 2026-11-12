@@ -117,6 +117,22 @@ def grasp_to_tcp(grasp, contact_depth=.1034):
     return out
 
 
+def valid_grasp_poses(candidates):
+    """Reject malformed transforms before rotation/IK code; keep valid proposals."""
+    valid=[];rejected=[]
+    for index,row in enumerate(candidates):
+        try:
+            tcp=np.asarray(row['tcp'],float)
+            good=(tcp.shape==(4,4) and np.isfinite(tcp).all()
+                  and np.allclose(tcp[3],[0,0,0,1],atol=1e-5)
+                  and np.allclose(tcp[:3,:3].T@tcp[:3,:3],np.eye(3),atol=.005)
+                  and abs(np.linalg.det(tcp[:3,:3])-1.)<.005)
+        except (KeyError,ValueError,TypeError):good=False
+        if good:valid.append(row)
+        else:rejected.append(dict(index=index,reason='invalid_grasp_transform'))
+    return valid,rejected
+
+
 def parallel_gripper_symmetries(candidates):
     """Equivalent parallel-jaw grasps, each requiring robot motion validation.
 

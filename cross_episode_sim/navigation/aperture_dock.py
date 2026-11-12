@@ -9,7 +9,26 @@ from ..control.onboard_base import OnboardBaseActuator
 from ..recording.deferred import StateVideoRecorder
 
 
-def dock_to_aperture(runtime,aperture,tool_points,output,seconds=60.,distances=(.30,.35,.40,.45,.50,.55)):
+def observed_open_panel_points(points,aperture):
+    """Measured door surface near the remembered leaf, in the SLAM map frame.
+
+    A handle's height does not specify a panel's bottom/top. In particular, a
+    counter-mounted microwave door must never become a floor-to-ceiling wall.
+    Keep actual depth returns; older observed obstacles remain in the map.
+    """
+    points=np.asarray(points,float).reshape(-1,3)
+    if 'open_handle' not in aperture:return np.empty((0,3))
+    hinge=np.asarray(aperture['hinge'])[:2];handle=np.asarray(aperture['open_handle'])[:2]
+    delta=handle-hinge;length=float(np.linalg.norm(delta))
+    if length<.03:return np.empty((0,3))
+    along=(points[:,:2]-hinge)@(delta/length)
+    normal=np.array([-delta[1],delta[0]])/length
+    across=np.abs((points[:,:2]-hinge)@normal)
+    return points[(along>=-.05)&(along<=length+.08)&(across<.06)&(points[:,2]>.04)]
+
+
+def dock_to_aperture(runtime,aperture,tool_points,output,seconds=60.,distances=(.30,.35,.40,.45,.50,.55),multi_goal=False,
+                     offsets=(0.,.06,-.06,.12,-.12,.18,-.18,.24,-.24,.30,-.30),require_observed_support=True):
     """Aperture input is in the continuous estimated map frame, not world truth."""
     output.mkdir(parents=True,exist_ok=False)
     geometry=RobotGeometry(runtime.model);payload=ObservedPayload(geometry,tool_points)
@@ -22,14 +41,11 @@ def dock_to_aperture(runtime,aperture,tool_points,output,seconds=60.,distances=(
     support=list(getattr(grid,'inherited_support_poses',[]))+[pose]
     panel_points=None
     if 'open_handle' in aperture:
-        # Preserve the observed opened leaf even when the mast camera cannot
-        # currently see its lower half. This is sensor-estimated articulation
-        # memory, not simulator panel geometry or a changed global map.
-        hinge=np.asarray(aperture['hinge']);handle=np.asarray(aperture['open_handle'])
-        along=np.linspace(hinge[:2],handle[:2],max(2,int(np.linalg.norm(handle[:2]-hinge[:2])/.015)+1))
-        heights=np.arange(.05,max(.5,2*handle[2])+.02,.025)
-        panel_points=np.array([[xy[0],xy[1],z] for xy in along for z in heights])
-    checker=ObservedShapeChecker(grid,geometry.boxes(packet.arm.position)+[payload.box(packet.arm.position)],pose,support_poses=support,additional_points=panel_points)
+        from ..control.sensor_appliance_backend import camera_points
+        observed=np.concatenate([camera_points(cam)[0] for cam in packet.cameras.values()])
+        mapped=observed@T[:3,:3].T+T[:3,3]
+        panel_points=observed_open_panel_points(mapped,aperture)
+    checker=ObservedShapeChecker(grid,geometry.boxes(packet.arm.position)+[payload.box(packet.arm.position)],pose,support_poses=support,additional_points=panel_points,require_observed_support=require_observed_support)
     class LoadedDock(ShapedDocking):
         def make_checker(self,pose,q):return checker
     docking=LoadedDock(grid,geometry)
@@ -38,8 +54,12 @@ def dock_to_aperture(runtime,aperture,tool_points,output,seconds=60.,distances=(
     heading=math.atan2(-normal[1],-normal[0])
     tangent=np.array([-normal[1],normal[0]])
     candidates=[np.r_[center+normal*distance+tangent*offset,heading]
-                for distance in distances for offset in (0.,.06,-.06,.12,-.12,.18,-.18,.24,-.24,.30,-.30)]
-    if not docking.plan_candidates(pose,packet.arm.position,candidates,source='observed_aperture_front'):
+                for distance in distances for offset in offsets]
+    if multi_goal:
+        from .placement_docks import plan_to_any_dock
+        planned=plan_to_any_dock(docking,pose,packet.arm.position,candidates)
+    else:planned=docking.plan_candidates(pose,packet.arm.position,candidates,source='observed_aperture_front')
+    if not planned:
         raise RuntimeError('No loaded aperture-facing dock: '+str(docking.events[-1:]))
     path=departure_route(pose,docking.path,checker,keep_final_rotation=True)
     final_goal=path[-1].copy()
@@ -67,6 +87,6 @@ def dock_to_aperture(runtime,aperture,tool_points,output,seconds=60.,distances=(
             base.step(speed,yaw)
             if tick%50==0:print('APERTURE_DOCK',float(runtime.data.time-start),pose.tolist(),flush=True)
             if follower.complete and base.stationary():
-                report=dict(success=True,simulated_seconds=float(runtime.data.time-start),goal=path[-1].tolist(),events=docking.events)
+                report=dict(success=True,simulated_seconds=float(runtime.data.time-start),goal=path[-1].tolist(),events=docking.events,unknown_floor_policy='reject' if require_observed_support else 'allow_local_redock',observed_obstacle_checks=True)
                 (output/'report.json').write_text(json.dumps(report,indent=2));return report
     raise RuntimeError('Aperture docking budget exhausted')

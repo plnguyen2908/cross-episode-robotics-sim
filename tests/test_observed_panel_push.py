@@ -119,3 +119,62 @@ def test_contact_footprint_keeps_unrelated_geometry_and_handle_protrusions_out()
     points=np.array([[.07,0,.5],[.12,0,.5],[0,.03,.5],[0,0,.7]])
     patch=observed_contact_footprint(points,[0,0,.5],[0,1,0],vertices)
     np.testing.assert_array_equal(patch,points[:1])
+
+
+def test_panel_reach_tries_another_valid_contact_branch(monkeypatch):
+    from types import SimpleNamespace
+    from cross_episode_sim.control.observed_panel_push import prepare_observed_panel_push
+    import cross_episode_sim.control.local_ik as ik
+    cloud,panel,pads=scene()
+    target=ObservedPanelPush().candidates(cloud,panel,[0,0],[.6,0,.55],1,pads)[0]
+    attempted=[]
+    def precontact(geometry,seed,pose):
+        attempted.append(seed.copy())
+        return None if seed[0]==1 else seed-.01
+    monkeypatch.setattr(ik,'local_ik',precontact)
+    approach=SimpleNamespace(geometry=object(),clear=lambda path:True,
+        allow_curobo_fallback=False,plan_joint_goal=lambda q,goal:np.array([q,goal]))
+    contact=SimpleNamespace(iter_solutions=lambda *args:iter([np.ones(7),np.ones(7)*2]),
+        clear=lambda path:True)
+    _,reach,contact_path=prepare_observed_panel_push(approach,contact,np.zeros(7),target,[0,0],
+                                                    arm_only_edge_route=True)
+    assert len(attempted)==2
+    np.testing.assert_allclose(reach[-1],1.99)
+    np.testing.assert_allclose(contact_path[-1],2.)
+
+
+def test_newly_visible_liner_updates_contact_without_erasing_other_surfaces():
+    from cross_episode_sim.control.observed_panel_push import refresh_observed_push_surface
+    cloud,panel,pads=scene()
+    target=ObservedPanelPush().candidates(cloud,panel,[0,0],[.6,0,.55],1,pads)[0]
+    liner=cloud+np.array([0.,-.027,0.])
+    # A nearer outlier must not become a new target surface.
+    points=np.concatenate([cloud,liner,[target.surface+[0.,-.04,0.]]])
+    new=refresh_observed_push_surface(target,points,pads)
+    assert new.surface[1]==pytest.approx(-.027)
+    assert np.min(np.linalg.norm(liner-new.surface,axis=1))<1e-10
+    assert np.allclose(new.patch[:,1],-.027)
+    np.testing.assert_allclose(new.contact[:3,:3],target.contact[:3,:3])
+    assert refresh_observed_push_surface(target,points[:1],pads) is target
+
+
+def test_parallel_liner_does_not_replace_tracked_front_face():
+    from cross_episode_sim.control.observed_panel_push import retain_observed_panel_face
+    from scipy.spatial.transform import Rotation
+    _,before,_=scene();R=Rotation.from_euler('z',.1).as_matrix()
+    normal=R@before.normal;anchor=R@before.anchor
+    rear=PanelObservation(anchor-.04*normal,normal,200,.0001)
+    tracked=retain_observed_panel_face(before,rear,[0,0])
+    np.testing.assert_allclose(tracked.anchor,anchor)
+    np.testing.assert_allclose(tracked.normal,normal)
+    # Small fitting corrections on the same observed face remain accepted.
+    front=PanelObservation(anchor+.002*normal,normal,200,.0001)
+    assert retain_observed_panel_face(before,front,[0,0]) is front
+
+
+def test_push_tracker_recovers_after_passive_panel_moves_beyond_last_estimate():
+    from cross_episode_sim.control.observed_panel_push import track_push_panel
+    from scipy.spatial.transform import Rotation
+    cloud,before,_=scene();R=Rotation.from_euler('z',.32).as_matrix()
+    observed=track_push_panel(cloud@R.T,before,[0,0],0.,.43,preserve_face=True)
+    np.testing.assert_allclose(observed.normal,R@before.normal,atol=1e-6)

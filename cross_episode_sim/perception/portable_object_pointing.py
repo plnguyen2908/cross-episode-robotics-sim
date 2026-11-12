@@ -42,15 +42,19 @@ def household_pointing_supervisor(pointer, segmenter, label):
         pointer = PortableFoodPointer(pointer)
     elif label in ('packaged drink', 'packaged snack'):
         pointer = GroceryPointer(pointer, label)
+        return GroceryPointingSupervisor(pointer, segmenter, label)
     return PointingSupervisor(pointer, segmenter, label)
+
+
+class GroceryPointingSupervisor(PointingSupervisor):
+    def refine_mask(self, camera, mask):
+        from .grocery_surface import above_support_mask
+        return above_support_mask(camera, mask)
 
 
 class GroceryPointer:
     """Clarify visible packaging without object IDs, colors or scene bindings."""
-    descriptions = {
-        'packaged drink': 'drink bottles, canned beverages, or clearly labeled beverage cartons, excluding plain rectangular snack boxes',
-        'packaged snack': 'rectangular snack boxes, excluding drink bottles and cups',
-    }
+    from .target_language import GROCERY_DESCRIPTIONS as descriptions
 
     def __init__(self, pointer, category):
         self.pointer = pointer

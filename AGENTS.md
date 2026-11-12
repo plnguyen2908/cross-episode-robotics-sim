@@ -145,3 +145,26 @@ motions. Fixture-return docking uses frozen-map base-footprint planning without
 a second arm/gripper 3D veto. Preserve physical collisions and native A*/cuRobo
 planning. This is evaluation behavior, not weaker datagen acceptance. Preserve
 the qualified set-table implementation. `--fail-fast` restores legacy recipe aborts.
+
+## Qwen approach before manipulation — November 11, 2026
+
+For the Qwen pick/place docking and redocking paths, the first dock only moves
+near and faces a sensed target. Do not gate that approach on a grasp orientation,
+arm IK, supported placement footprint, or full insertion/release trajectory from
+the distant view. Preserve observed-map navigation and retained robot/payload
+swept collision checks. Capture fresh close-range RGB-D after physical arrival,
+then reconstruct and plan manipulation; Qwen may redock on that actual feedback.
+Navigation anchors are not release surfaces. Preserve the qualified non-Qwen
+set-table path. Report docking and physical manipulation success separately.
+
+## Full-task Qwen dispatch — November 11, 2026
+
+The Qwen branch's full task runner must use QwenSkillInterface over the existing
+navigation/exploration handlers, not silently bypass it with the bare M2T2
+interface. Pickup and fixture/control calls request fresh local Qwen-ranked
+redocking by default; placement owns its loaded docking and interior refinement
+inside the skill, avoiding duplicate preliminary motion. Preserve observed map,
+payload and live-state handoffs. Log the actual interface and redock decisions.
+Keep the prior qualified non-Qwen set-table behavior accessible with
+`--legacy-m2t2-interface`; changing the Qwen dispatch is not requalification of
+all five tasks. Test each physical recipe separately.

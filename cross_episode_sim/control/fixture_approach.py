@@ -6,7 +6,7 @@ identity, simulator pose, or reference trajectory is used.
 import numpy as np
 
 
-def calibrated_finger_planner(arm, geometry, boxes, model, data, **kwargs):
+def calibrated_finger_planner(arm, geometry, boxes, model, data, *, arm_boxes=False, palm_box=False, gripper_joint_positions=None, **kwargs):
     """Reuse articulation's exact finger narrow phase for close handle reach.
 
     Covering spheres remain the broad phase; calibrated collision boxes resolve
@@ -16,11 +16,20 @@ def calibrated_finger_planner(arm, geometry, boxes, model, data, **kwargs):
     from ..navigation.shaped_docking import RobotGeometry
     angles={model.joint(j).name:float(data.qpos[model.jnt_qposadr[j]])
             for j in range(model.njnt) if '/gripper/' in (model.joint(j).name or '')}
+    if gripper_joint_positions is not None:angles=dict(gripper_joint_positions)
     fingers=RobotGeometry(model,gripper_joint_positions=angles)
     links=[model.body(b).name[len('robot_0/'):].replace('/','_')
            for b in fingers.geoms if (model.body(b).name or '').startswith('robot_0/gripper/')
            and not (model.body(b).name or '').endswith('/base') and fingers.geoms[b]]
-    return ObservedHingedPlanner(arm,geometry,boxes,panel_points=np.empty((0,3)),
+    planner_class=ObservedHingedPlanner
+    if arm_boxes:
+        from .calibrated_arm_planner import CalibratedArmPlanner
+        planner_class=CalibratedArmPlanner
+        kwargs['arm_body_ids']=[model.body(f'robot_0/fr3_link{i}').id for i in range(8)]
+        if palm_box:
+            kwargs['arm_body_ids'].append(model.body('robot_0/gripper/base').id)
+            kwargs['box_link_names']=[f'fr3_link{i}' for i in range(8)]+['gripper_base']
+    return planner_class(arm,geometry,boxes,panel_points=np.empty((0,3)),
         hinge_xy=[0.,0.],reference_tcp=np.zeros(3),finger_geometry=fingers,
         finger_links=links,**kwargs)
 

@@ -292,7 +292,7 @@ def observed_target_mask(points,target,support):
     return mask
 
 
-def build_observed_boxes(grid,T_map_base,points,target):
+def build_observed_boxes(grid,T_map_base,points,target,*,support_height=None,local_resolution=.025):
     """Compress sensor occupancy exactly; retain support and non-target surfaces."""
     from curobo._src.geom.types import Cuboid
     R=T_map_base[:3,:3];indices=np.argwhere(grid.evidence>=2)
@@ -307,12 +307,13 @@ def build_observed_boxes(grid,T_map_base,points,target):
         center=origin+(lo+hi+1)*step/2;center=(center-T_map_base[:3,3])@R
         boxes.append(Cuboid(name=f'map_{i}',pose=center.tolist()+quat,dims=((hi-lo+1)*step+.01).tolist()))
     near=points[np.linalg.norm(points[:,:2]-target[:2],axis=1)<.2]
-    levels,counts=np.unique(np.round(near[:,2]/.005),return_counts=True);support=float(levels[counts.argmax()]*.005)
+    levels,counts=np.unique(np.round(near[:,2]/.005),return_counts=True);support=float(levels[counts.argmax()]*.005) if support_height is None else float(support_height)
     contact=observed_target_mask(points,target,support)
-    vox=np.unique(np.floor(points[~contact]/.025).astype(int),axis=0)
+    if not np.isfinite(local_resolution) or local_resolution<=0:raise ValueError('Positive local voxel resolution required')
+    vox=np.unique(np.floor(points[~contact]/local_resolution).astype(int),axis=0)
     for i,(lo,hi) in enumerate(merge_voxels(vox)):
-        boxes.append(Cuboid(name=f'depth_{i}',pose=((lo+hi+1)*.025/2).tolist()+[1.,0.,0.,0.],dims=((hi-lo+1)*.025+.003).tolist()))
-    return boxes,dict(fine_voxels=len(vox),coarse_voxels=int(keep.sum()),merged_boxes=len(boxes),support_z=support,target_surface_points=int(contact.sum()),target_surface_bounds=[points[contact].min(0).tolist(),points[contact].max(0).tolist()])
+        boxes.append(Cuboid(name=f'depth_{i}',pose=((lo+hi+1)*local_resolution/2).tolist()+[1.,0.,0.,0.],dims=((hi-lo+1)*local_resolution+.003).tolist()))
+    return boxes,dict(local_resolution_m=local_resolution,fine_voxels=len(vox),coarse_voxels=int(keep.sum()),merged_boxes=len(boxes),support_z=support,target_surface_points=int(contact.sum()),target_surface_bounds=[points[contact].min(0).tolist(),points[contact].max(0).tolist()])
 
 
 def target_linkage_clearance(geometry, path, target_surface, margin=.003):

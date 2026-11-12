@@ -21,6 +21,14 @@ def restore_start_context(grid, recording, timestamp):
         grid.floor_views[:]=np.maximum(grid.floor_views,np.min(counts,axis=0).reshape(grid.floor_views.shape))
     # Keep only already-traveled footprints; never consume later trajectory.
     inverse=np.linalg.inv(anchor);poses=[]
+    # Offline component fixtures may preserve the earlier SLAM trajectory
+    # separately from their final floor grid. These are occupied footprints,
+    # not inferred free space or simulator base poses. Never read future poses.
+    history=recording/'support_history.json'
+    if history.exists():
+        extra=json.loads(history.read_text())
+        rows=rows+[r for r in extra if r.get('accepted') and r.get('pose') is not None
+                   and r['timestamp']<=timestamp+1e-6]
     for r in rows:
         T=inverse@np.asarray(r['pose']);poses.append([T[0,3],T[1,3],np.arctan2(T[1,0],T[0,0])])
     grid.inherited_support_poses=np.asarray(poses)

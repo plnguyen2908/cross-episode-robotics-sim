@@ -14,7 +14,7 @@ from cross_episode_sim.control.observed_arm import robot_calibration
 from cross_episode_sim.control.observed_payload import ObservedPayload,reconstruct_held_points
 from cross_episode_sim.control.planner_cache import sensor_arm_planner
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
-p=argparse.ArgumentParser();p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--max-candidates',type=int,default=0,help='Optional bounded candidate batch; zero preserves the existing exhaustive policy');p.add_argument('--current-pose',action='store_true',help='Attempt sensor-planned placement from the live pose without claiming a completed base dock');p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+p=argparse.ArgumentParser();p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--max-candidates',type=int,default=0,help='Optional bounded candidate batch; zero preserves the existing exhaustive policy');p.add_argument('--approach-config',type=Path);p.add_argument('--align-only',action='store_true');p.add_argument('--current-pose',action='store_true',help='Attempt sensor-planned placement from the live pose without claiming a completed base dock');p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 r=json.loads(artifacts.read_text(a.dock/'report.json'))
 if not (a.current_pose and r.get('initialization_valid')) and not r.get('docking_success',False) and not (a.isolated_initial_state and r.get('isolated_placement_reset')) and not (a.observe_only and (r.get('transit_success') is True or r.get('initialization_valid') or r.get('approach_complete') or r.get('status') in ('needs_floor_observation','budget_exhausted'))):raise ValueError('Require sensor docking or explicit isolated reset')
 m,d=load_checkpoint(a.dock)
@@ -56,12 +56,31 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
  try:
   raw=sensors.capture();tracking=slam.update(raw.cameras['navigation'],raw.timestamp)
   grid.update(raw.cameras['navigation'],tracking)
-  detector=PointMaskDetector(categories=(a.receptacle,),free_support=True);surfaces=[];points=[];colors=[];preferred_contacts=[]
+  from cross_episode_sim.mapping.continuity import load_memory,save_memory
+  from cross_episode_sim.perception.mapped_support import support_landmark,mapped_support_detection
+  destination_memory=load_memory(a.dock)
+  landmark=support_landmark(destination_memory,a.semantic_receptacle or a.receptacle) if a.receptacle=='dining table' else None
+  if payload is None:
+   tool_points=reconstruct_held_points(raw,geo);payload=ObservedPayload(geo,tool_points)
+  packet=payload.filter_packet(raw)
+  detector=None if landmark is not None else PointMaskDetector(categories=(a.receptacle,),free_support=True)
+  surfaces=[];points=[];colors=[];preferred_contacts=[]
   if a.semantic_receptacle and 'stove burner' in a.semantic_receptacle:
    from cross_episode_sim.perception.fixture_contact import FixtureContactPointer
    from cross_episode_sim.perception.molmo_pointing import MolmoPointer
    detector=PointMaskDetector(categories=(a.receptacle,),pointer=FixtureContactPointer(MolmoPointer(),'stove'))
-  if a.observed_aperture:
+  if landmark is not None:
+   detections={}
+   for key,camera in packet.cameras.items():
+    detection=mapped_support_detection(camera,tracking.T_map_base,landmark,a.receptacle)
+    detections[key]=[] if detection is None else [detection]
+   detail=dict(provenance='frozen semantic map identity + fresh measured RGB-D plane',
+               landmark=landmark,recognition_calls=0,
+               visible_support_pixels={k:sum(int(v.mask.sum()) for v in ds) for k,ds in detections.items()})
+   (a.output/'support_identity').mkdir(exist_ok=True)
+   artifacts.write_text(a.output/'support_identity/report.json',json.dumps(detail,indent=2))
+   print('MAPPED_SUPPORT',json.dumps({k:v for k,v in detail.items() if k!='landmark'}),flush=True)
+  elif a.observed_aperture:
    detections={k:[] for k in raw.cameras}
   elif a.semantic_receptacle and ('interior' in a.receptacle or 'inside' in a.receptacle):
    from cross_episode_sim.perception.container_interior import container_interior_detections
@@ -73,10 +92,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    detections={k:[region for d in ds if (region:=pointed_region(raw.cameras[k],d)) is not None] for k,ds in detections.items()}
   artifacts.write_text(a.output/'detections.json',json.dumps({k:[dict(label=v.label,box=v.box,score=v.score,point=v.point) for v in ds] for k,ds in detections.items()},indent=2))
   from cross_episode_sim.perception.daaam_grounding import LocalVLM,masked_views,parse_label
-  verifier=LocalVLM(device='cuda:1');verified=[]
+  verifier=None if landmark is not None else LocalVLM(device='cuda:1');verified=[]
   for key,ds in detections.items():
    accepted=[]
    for detection in ds:
+    if landmark is not None:
+     accepted.append(detection);continue
     if detection.label!=a.receptacle:accepted.append(detection);continue
     if a.semantic_receptacle and 'stove burner' in a.semantic_receptacle:
      accepted.append(detection);verified.append(dict(camera=key,provenance='confirmed stove RGB crop plus Molmo named cooking-zone point; no redundant standalone-burner classification'));continue
@@ -144,6 +165,13 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   torch.cuda.empty_cache()
   held=tool_points@tcp[:3,:3].T+tcp[:3,3]
   artifacts.save_archive(a.output/'input.npz',points=points,rgb=colors,held_points=held,ee_pose=tcp,table_surface=surface,preferred_contacts=np.asarray(preferred_contacts).reshape(-1,3))
+  active_mode=None;approach_options=None;approach_aperture=None
+  if a.approach_config:
+   from cross_episode_sim.control.manipulation_approach import approach_config,resolve_mode,opening_frame,front_placement_candidates,plan_front_entry,gripper_points_tool
+   approach_options,approach_aperture=approach_config(json.loads(artifacts.read_text(a.approach_config)))
+   if a.observed_aperture:approach_aperture=json.loads(artifacts.read_text(a.observed_aperture))
+   active_mode=resolve_mode(approach_options.approach_mode,surface,points,observed_aperture=approach_aperture is not None)
+   print('MANIPULATION_APPROACH',active_mode,approach_options.as_dict(),flush=True)
   if a.observe_only:
    center=(held[:,:2].min(0)+held[:,:2].max(0))/2
    radius=float(np.linalg.norm(held[:,:2]-center,axis=1).max()+.03)
@@ -161,6 +189,9 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   for i,(lo,hi) in enumerate(merge_voxels(vox)):
    lo=np.array(lo);hi=np.array(hi);boxes.append(Cuboid(name=f'observed_{i}',pose=[*((lo+hi+1)*.0125),1,0,0,0],dims=((hi-lo+1)*.025+.003).tolist()))
   calibration=robot_calibration(m,d,a.output/'robot');fixed_support=[[*s['center'],s['radius']] for s in calibration['collision_spheres'].get('base',[])];arm=sensor_arm_planner(kinematics=calibration,collision_cache={'cuboid':max(16,len(boxes)),'mesh':2});arm.planner.update_world(SceneCfg(cuboid=boxes));planner=ObservedGraspPlanner(arm,geo,boxes,fixed_floor_support_spheres=fixed_support);tree=cKDTree(surface)
+  if active_mode=='front_entry':
+   from cross_episode_sim.control.calibrated_arm_planner import CalibratedArmPlanner
+   planner=CalibratedArmPlanner(arm,geo,boxes,panel_points=np.empty((0,3)),hinge_xy=[0.,0.],reference_tcp=np.zeros(3),arm_body_ids=[m.body(f'robot_0/fr3_link{i}').id for i in range(8)],allow_curobo_fallback=False,fixed_floor_support_spheres=fixed_support)
   rows=json.loads(artifacts.read_text(a.output/'predictions.json'))['candidates'];rows=[x for x in rows if tree.query(x['contact'])[0]<.035];rows.sort(key=lambda x:np.linalg.norm(np.array(x['tcp'])[:3,3]-tcp[:3,3])-.1*x['confidence']);chosen=None
   if r.get('placement_target_base') is not None:
    preferred=np.asarray(r['placement_target_base'])
@@ -177,6 +208,9 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    from cross_episode_sim.control.container_placement import interior_placement_candidates
    rows=interior_placement_candidates(surface,points,held,tcp,support_radius)
    print('OBSERVED_CONTAINER_FALLBACK',len(rows),'not learned M2T2 predictions',flush=True)
+  if active_mode=='front_entry':
+   rows=front_placement_candidates(surface,points,held,tcp,approach_options.wrist_yaw_degrees,opening_normal=(opening_frame(surface,approach_aperture)[1] if approach_options.front_wrist=='horizontal' else None),opening_anchor=opening_frame(surface,approach_aperture)[0])
+   print('ALIGNED_FRONT_CANDIDATES',len(rows),flush=True)
   artifacts.write_text(a.output/'support_filter.json',json.dumps(dict(radius_m=support_radius,edge_margin_m=.03,retained=len(rows)),indent=2))
   print('INTERIOR_PLACE_CANDIDATES',len(rows),'support radius',support_radius,flush=True)
   seen=set();diverse=[]
@@ -204,15 +238,36 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    print('PLACE_ATTEMPT',candidate_index,'of',len(release_candidates),'clearance_m',row['release_clearance_m'],'contact',row['contact'],flush=True)
    goal=np.array(row['tcp'])
    try:
-    plan_phase='approach';approach=planner.plan(q,goal[:3,3]+[0,0,.08],goal[:3,:3]);plan_phase='lower';lower=planner.plan(approach[-1],goal[:3,3],goal[:3,:3]);plan_phase='retreat';retreat=lower[::-1].copy()
+    if active_mode=='front_entry':
+     plan_phase='front_entry'
+     anchor,normal=opening_frame(surface,approach_aperture)
+     envelope=np.concatenate([tool_points,gripper_points_tool(geo,q,tcp)])
+     if a.align_only:
+      from cross_episode_sim.control.manipulation_approach import plan_front_alignment
+      approach,waypoints=plan_front_alignment(planner,q,tcp,goal,envelope,anchor,normal,approach_options)
+      lower=approach[-1:];retreat=lower.copy()
+     else:
+      approach,lower,retreat,waypoints=plan_front_entry(planner,q,tcp,goal,envelope,anchor,normal,approach_options)
+     row=dict(row,approach_mode=active_mode,alignment_waypoints=[dict(phase=k,tcp=v.tolist()) for k,v in waypoints])
+    elif active_mode=='top_down':
+     plan_phase='approach';approach=planner.plan(q,goal[:3,3]+[0,0,max(.08,approach_options.entry_height)],goal[:3,:3]);plan_phase='lower';lower=planner.plan(approach[-1],goal[:3,3],goal[:3,:3]);plan_phase='retreat';retreat=lower[::-1].copy()
+    else:
+     plan_phase='approach';approach=planner.plan(q,goal[:3,3]+[0,0,.08],goal[:3,:3]);plan_phase='lower';lower=planner.plan(approach[-1],goal[:3,3],goal[:3,:3]);plan_phase='retreat';retreat=lower[::-1].copy()
     # Exact reverse of the just-validated lower path in the same static world.
     # No second identical arm collision pass; payload validation below remains.
     for joints in np.concatenate([approach,lower]):
      T=geo.fk(joints)[geo.tcp_body]@geo.tcp_local;xyz=tool_points[::max(1,len(tool_points)//150)]@T[:3,:3].T+T[:3,3]
-     if not planner.world_clear(np.c_[xyz,np.full(len(xyz),.006)][None],margin=.002):raise RuntimeError('Held points collide on placement approach')
+     if not ObservedGraspPlanner.world_clear(planner,np.c_[xyz,np.full(len(xyz),.006)][None],margin=.002):raise RuntimeError('Held points collide on placement approach: '+str(getattr(planner,'last_rejection',None)))
     chosen=row;break
    except RuntimeError as e:events.append(plan_phase+': '+str(e));print('PLACE_REJECT',len(events),plan_phase,str(e),flush=True)
   if chosen is None:raise RuntimeError('No validated M2T2 place path')
+  if a.align_only:
+   if active_mode!='front_entry':raise RuntimeError('Alignment preview requires front_entry')
+   phase='align_outside_opening';execute(approach,255)
+   artifacts.write_text(a.output/'chosen.json',json.dumps(chosen,indent=2))
+   artifacts.write_text(a.output/'report.json',json.dumps(dict(alignment_completed=True,execution_success=False,approach_mode=active_mode,phase=phase,simulated_seconds=float(d.time-start),wall_seconds=time.monotonic()-wall_start,release_executed=False,scope='alignment only; object remains held; not task success')))
+   print('ALIGNMENT_COMPLETED',float(d.time-start),flush=True)
+   raise SystemExit(0)
   selected_tcp=np.asarray(chosen['tcp'])
   artifacts.write_text(a.output/'chosen.json',json.dumps(chosen,indent=2));phase='approach';execute(approach,255);phase='lower';execute(lower,255)
   phase='release';last=None;stable=0
@@ -261,8 +316,9 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
  except Exception as e:error=str(e);print(type(e).__name__,error,flush=True)
  frame()
 grid.save(a.output);slam.save(a.output/'slam')
+if 'destination_memory' in globals():save_memory(a.output,destination_memory)
 execution_success=error is None and phase=='score'
-artifacts.write_text(a.output/'report.json',json.dumps(dict(execution_success=execution_success,observed_release_stable=bool(locals().get('visually_stable',False)),success=success,phase=phase,error=error,warnings=warnings,wall_seconds=time.monotonic()-wall_start,video_status='deferred',simulated_seconds=float(d.time-start),planning_rejections=events,receptacle=a.receptacle,scope='command execution; legacy vessel/table private diagnostic is not generic task scoring',isolated_initial_state=a.isolated_initial_state,source_docking_scope=r.get('scope','unspecified')),indent=2));print('PLACE_SUCCESS',success,flush=True)
+artifacts.write_text(a.output/'report.json',json.dumps(dict(approach_mode=locals().get("active_mode"),execution_success=execution_success,observed_release_stable=bool(locals().get('visually_stable',False)),success=success,phase=phase,error=error,warnings=warnings,wall_seconds=time.monotonic()-wall_start,video_status='deferred',simulated_seconds=float(d.time-start),planning_rejections=events,receptacle=a.receptacle,scope='command execution; legacy vessel/table private diagnostic is not generic task scoring',isolated_initial_state=a.isolated_initial_state,source_docking_scope=r.get('scope','unspecified')),indent=2));print('PLACE_SUCCESS',success,flush=True)
 # Preserve the actual resulting physics state for the next pipeline stage.
 # This is harness-only state, never exposed to perception or action selection.
 checkpoint=a.output/'private_checkpoint';checkpoint.mkdir()

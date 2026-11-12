@@ -51,6 +51,23 @@ def test_loaded_redock_never_uses_empty_arm_motion(tmp_path):
     assert s._redocking is None
 
 
+def test_qwen_can_choose_cabinet_dock_without_prior_failed_place(tmp_path):
+    s=session(tmp_path,'bowl');calls=[]
+    s.invalidate=lambda:None
+    s.prepare_place=lambda *args,**kwargs:calls.append((args,kwargs))
+    assert s.redock('kitchen storage cabinet',purpose='place',distance=.45,lateral_offset=-.12)['success']
+    assert calls==[(('kitchen storage cabinet','interior'),dict(cabinet_distance=.45,cabinet_offset=-.12))]
+    assert s.held=='bowl' and s._redocking is None
+
+
+def test_invalid_loaded_dock_options_never_move(tmp_path):
+    s=session(tmp_path,'bowl')
+    s.invalidate=lambda:pytest.fail('Invalid request must not move or invalidate state')
+    with pytest.raises(ValueError):s.redock('kitchen storage cabinet',purpose='place',distance=float('nan'))
+    with pytest.raises(ValueError):s.redock('kitchen storage cabinet',purpose='place',lateral_offset=1.)
+    with pytest.raises(ValueError):s.redock('dining table',purpose='place',lateral_offset=.1)
+
+
 def test_place_without_redock_requests_current_pose_only(tmp_path):
     s=session(tmp_path,'bowl');calls=[]
     def prepare(target,region,**kw):
@@ -90,6 +107,14 @@ def test_direct_atomic_aliases_use_same_dispatcher(tmp_path):
                    ('open_door',{'target':'fridge','redock':True})]
 
 
+def test_continuation_accepts_qwen_dispatcher_spelling(tmp_path):
+    s=session(tmp_path);calls=[]
+    s.continue_door=lambda **kwargs:calls.append(kwargs) or {'success':True}
+    result=s.execute_skill('continue_door',{'target':'fridge','motion':'base_push'})
+    assert result['success']
+    assert calls==[{'target':'fridge','motion':'base_push'}]
+
+
 def test_private_support_accepts_native_stack_shelf_not_ground():
     import mujoco
     from cross_episode_sim.evaluation.qwen_component_score import ComponentScore
@@ -118,3 +143,163 @@ def test_backend_feedback_preserves_recovery_reason_without_private_fields():
     assert 'support_not_visible' in reason and 'redock' in reason
     assert '99' not in reason and 'private' not in reason
     assert 'placement_plan_unreachable' in HouseholdSession.backend_reason({'planning_rejections':[{}]})
+
+
+@pytest.mark.parametrize('fails',[False,True])
+def test_alignment_keeps_payload_and_consumes_plan(tmp_path,fails):
+    s=session(tmp_path,'bowl');seen=[]
+    def prepare(target,region,**kwargs):
+        assert kwargs=={'dock':False}
+        assert s.approach_options.approach_mode=='front_entry'
+        s.prepared=dict(root=tmp_path,dock=tmp_path,script='backend',description=target,extra=[])
+    def stage(script,args,root,key):
+        seen.append((args,key))
+        if fails:raise RuntimeError('No executable alignment')
+        return {'alignment_completed':True}
+    s.prepare_place=prepare;s.stage=stage
+    if fails:
+        with pytest.raises(RuntimeError):s.align('kitchen storage cabinet')
+    else:
+        result=s.align('kitchen storage cabinet')
+        assert result['success'] and result['release_executed'] is False
+    assert s.held=='bowl' and s.prepared is None and s.approach_options is None
+    assert '--align-only' in seen[0][0] and seen[0][1]=='alignment_completed'
+
+
+def test_default_place_reuses_prepared_redock_target(tmp_path):
+    s=session(tmp_path,'bowl')
+    prepared=dict(approach_options=None,dock='sensor-selected-dock')
+    s.prepared=prepared
+    with s.manipulation_context('place',{},{}):
+        assert s.prepared is prepared
+    assert s.prepared is prepared
+    # An actual approach change must still discard the cached plan.
+    with s.manipulation_context('place',{},dict(approach_mode='front_entry')):
+        assert s.prepared is None
+
+
+def test_confined_pick_reobserves_after_alignment_and_restores_mode(tmp_path):
+    s=session(tmp_path);events=[]
+    def propose(target):
+        events.append('observe');return {'candidates':[{'id':0}]}
+    def execute(ids):
+        align=getattr(s.runtime,'pick_align_only',False)
+        events.append('align' if align else 'grasp')
+        return {'alignment_completed':align,'execution_success':not align}
+    s.propose=propose;s.execute=execute
+    result=s.execute_skill('pick',dict(target='bottle',approach_mode='front_entry'))
+    assert result['success']
+    assert events==['observe','align','observe','grasp']
+    assert not s.runtime.pick_align_only
+
+
+def test_failed_alignment_does_not_attempt_grasp_or_leave_mode_enabled(tmp_path):
+    s=session(tmp_path);events=[]
+    s.propose=lambda target:{'candidates':[{'id':0}]}
+    def execute(ids):events.append('align');return {'alignment_completed':False}
+    s.execute=execute
+    result=s.execute_skill('pick',dict(target='bottle',approach_mode='front_entry'))
+    assert not result['success'] and result['reason']=='front_alignment_failed'
+    assert events==['align'] and not s.runtime.pick_align_only
+
+
+def test_top_down_pick_has_no_confined_alignment_cycle(tmp_path):
+    s=session(tmp_path);events=[]
+    s.propose=lambda target:{'candidates':[{'id':0}]}
+    s.execute=lambda ids:events.append('grasp') or {'execution_success':True}
+    assert s.execute_skill('pick',dict(target='bowl',approach_mode='top_down'))['success']
+    assert events==['grasp']
+
+
+def test_basket_place_routes_to_container_backend_without_changing_table(tmp_path,monkeypatch):
+    import cross_episode_sim.control.held_view_posture as view
+    from cross_episode_sim.control.manipulation_approach import ApproachOptions
+    s=session(tmp_path,'drink bottle');motions=[]
+    s.checkpoint=lambda root:root;s.aperture=lambda *a,**k:None;s.held_points=lambda:object()
+    monkeypatch.setattr(view,'raise_held_view',lambda *args:motions.append(args[2]))
+    s.approach_options=ApproachOptions(approach_mode='top_down')
+    s.prepare_place('purple basket','interior',dock=False)
+    assert s.prepared['script']=='scripts/test_basket_place.py'
+    assert s.prepared['extra']==['--current-pose'] and len(motions)==1
+    s.prepare_place('dining table','default',dock=False)
+    assert s.prepared['script']=='scripts/test_m2t2_place.py'
+    assert len(motions)==1
+
+
+def test_stove_place_keeps_native_candidates_and_explicit_redock(tmp_path,monkeypatch):
+    import cross_episode_sim.control.held_view_posture as view
+    monkeypatch.setattr(view,'raise_held_view',lambda *args:None)
+    s=session(tmp_path,'cookware')
+    s.held_points=lambda:object()
+    s.checkpoint=lambda root:root
+    s.aperture=lambda *a,**k:None
+    s.prepare_place('front left stove burner','default',dock=False)
+    assert s.prepared['script']=='scripts/test_burner_place.py'
+    assert s.prepared['extra']==['--current-pose']
+    assert s.prepared['receptacle']=='front left stove burner'
+
+
+def test_loaded_approach_reuses_opening_memory(tmp_path,monkeypatch):
+    import cross_episode_sim.navigation.aperture_dock as aperture_dock
+    import cross_episode_sim.navigation.receptacle_approach as approach
+    s=session(tmp_path,'food container');seen=[]
+    measured={'closed_handle':[1.,0.,1.], 'hinge':[1.,.5,1.], 'closed_normal':[-1.,0.,0.]}
+    s.aperture=lambda target,**kwargs:measured
+    s.held_points=lambda:object()
+    monkeypatch.setattr(aperture_dock,'dock_to_aperture',lambda runtime,opening,*a,**k:seen.append(opening) or {'success':True})
+    monkeypatch.setattr(approach,'approach_receptacle',lambda *a,**k:pytest.fail('Do not rediscover an already observed opening'))
+    assert s.navigate('food container',destination='microwave')['success']
+    assert seen==[measured] and s.held=='food container'
+    assert s.infer_region('microwave')=='interior'
+
+
+def test_explicit_learned_wrist_is_passed_to_pick_not_place(tmp_path):
+    s=session(tmp_path);seen=[]
+    s.propose=lambda target:{'candidates':[{'id':0}]}
+    def execute(ids):
+        seen.append((s.approach_options.front_wrist,getattr(s.runtime,'pick_align_only',False)))
+        return {'alignment_completed':True,'execution_success':True}
+    s.execute=execute
+    result=s.execute_skill('pick',dict(target='bowl',approach_mode='front_entry',front_wrist='learned'))
+    assert result['success'] and seen==[('learned',False)]
+    assert s.approach_options is None
+    with pytest.raises(ValueError,match='applies to pick'):
+        s.execute_skill('place',dict(receptacle='microwave',front_wrist='learned'))
+
+
+@pytest.mark.parametrize('offset',[0.,-.12,.1])
+def test_empty_hand_lateral_dock_forwarded_without_changing_loaded_defaults(tmp_path,monkeypatch,offset):
+    from cross_episode_sim.code_policy.pick_session import PickSession
+    s=session(tmp_path);calls=[]
+    monkeypatch.setattr(PickSession,'move',lambda self,*args,**kw:calls.append((args,kw)) or {'success':True})
+    assert s.redock('food container inside microwave',distance=.65,lateral_offset=offset)['success']
+    assert calls==[(('food container inside microwave','pick',.65,'redock'),{'lateral_offset':offset})]
+
+
+def test_loaded_microwave_dock_accepts_observed_opening_offsets(tmp_path):
+    s=session(tmp_path,'food container');calls=[]
+    s.invalidate=lambda:None
+    s.prepare_place=lambda *args,**kwargs:calls.append((args,kwargs))
+    assert s.redock('microwave',purpose='place',distance=.6,lateral_offset=0.)['success']
+    assert calls==[(('microwave','interior'),dict(cabinet_distance=.6,cabinet_offset=0.))]
+    assert s.held=='food container'
+
+
+def test_standalone_microwave_redock_uses_remembered_aperture(tmp_path,monkeypatch):
+    import cross_episode_sim.runtime.household_placement as backend
+    from contextlib import nullcontext
+    from cross_episode_sim.control.manipulation_approach import ApproachOptions
+    from cross_episode_sim.control import held_view_posture
+    from cross_episode_sim.runtime import artifacts
+    s=session(tmp_path,'food container');calls=[]
+    s.aperture=lambda *args,**kwargs:{'hinge':[1,0,1],'closed_handle':[1,1,1],'closed_normal':[-1,0,0]}
+    s.checkpoint=lambda path:path
+    s.held_points=lambda:[]
+    s.stage=lambda *args:(_ for _ in ()).throw(AssertionError('Must not call generic table docking'))
+    monkeypatch.setattr(backend,'prepare_support_view',lambda *args,**kw:calls.append((args[3],kw)) or [])
+    monkeypatch.setattr(held_view_posture,'raise_held_view',lambda *args,**kw:None)
+    monkeypatch.setattr(artifacts,'write_text',lambda *args:None)
+    s.prepare_place('microwave','interior',cabinet_distance=.6,cabinet_offset=0.)
+    assert calls[0][0]=='cabinet'
+    assert calls[0][1]['cabinet_distances']==(.6,)
+    assert s.prepared['script']=='scripts/test_aperture_place.py'

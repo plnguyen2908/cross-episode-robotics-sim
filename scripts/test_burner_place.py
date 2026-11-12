@@ -14,7 +14,7 @@ from cross_episode_sim.control.observed_arm import robot_calibration
 from cross_episode_sim.control.observed_payload import ObservedPayload,reconstruct_held_points
 from cross_episode_sim.control.planner_cache import sensor_arm_planner
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
-p=argparse.ArgumentParser();p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--max-candidates',type=int,default=0,help='Optional bounded candidate batch; zero preserves the existing exhaustive policy');p.add_argument('--current-pose',action='store_true',help='Attempt sensor-planned placement from the live pose without claiming a completed base dock');p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+p=argparse.ArgumentParser();p.add_argument('--upright-cookware',action='store_true');p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--max-candidates',type=int,default=0,help='Optional bounded candidate batch; zero preserves the existing exhaustive policy');p.add_argument('--current-pose',action='store_true',help='Attempt sensor-planned placement from the live pose without claiming a completed base dock');p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 r=json.loads(artifacts.read_text(a.dock/'report.json'))
 if not (a.current_pose and r.get('initialization_valid')) and not r.get('docking_success',False) and not (a.isolated_initial_state and r.get('isolated_placement_reset')) and not (a.observe_only and (r.get('transit_success') is True or r.get('initialization_valid') or r.get('approach_complete') or r.get('status') in ('needs_floor_observation','budget_exhausted'))):raise ValueError('Require sensor docking or explicit isolated reset')
 m,d=load_checkpoint(a.dock)
@@ -65,7 +65,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     def point(self,image,description):
      if 'burner' in description:
       side='right' if 'right' in description else 'left'
-      description=f'center of the front-{side} cooking burner on the stovetop, directly above the front-{side} knob, not the knob or the oven door'
+      row='rear' if 'rear' in description or 'back' in description else 'front'
+      description=(f'center of the {row}-{side} cooking zone on the horizontal stovetop grate. '
+                   'Front means the row nearest the oven control panel; rear means nearest the backsplash. '
+                   f'{side.title()} means the {side} side when facing the oven. '
+                   'Point at the center of that corner cooking zone, not between burners, '
+                   'not at any knob, and not at the held pot.')
      return self.pointer.point(image,description)
    detector=PointMaskDetector(categories=(a.receptacle,),pointer=FixtureContactPointer(CookingZonePointer(),'stove'))
   remembered_burner=(a.semantic_receptacle and 'stove burner' in a.semantic_receptacle and r.get('semantic_receptacle')==a.semantic_receptacle and r.get('placement_target_base') is not None)
@@ -148,6 +153,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
        anchors.append(pixel_point(camera,camera.valid_depth,detection.point))
     anchors=[p for p in anchors if p is not None]
     if not anchors:raise RuntimeError('No freshly pointed burner with valid metric depth')
+    print('BURNER_ANCHORS',np.asarray(anchors).tolist(),flush=True)
     anchor=np.median(anchors,axis=0)
     preferred_contacts=[]
     artifacts.write_text(a.output/'observed_burner.json',json.dumps(dict(point=anchor.tolist(),source='fresh confirmed appliance crop and depth')))
@@ -212,6 +218,10 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    from cross_episode_sim.control.cookware_settling import interior_placement_candidates
    rows=interior_placement_candidates(surface,points,held,tcp,support_radius)
    print('OBSERVED_CONTAINER_FALLBACK',len(rows),'not learned M2T2 predictions',flush=True)
+  if a.upright_cookware:
+   from cross_episode_sim.control.upright_cookware import upright_candidates
+   rows=upright_candidates(surface,points,held,tcp)
+   print('UPRIGHT_COOKWARE_CANDIDATES',len(rows),flush=True)
   if a.semantic_receptacle and 'stove burner' in a.semantic_receptacle:
    if not preferred_contacts:raise RuntimeError('No depth-supported named burner point')
    centers=np.asarray(preferred_contacts)

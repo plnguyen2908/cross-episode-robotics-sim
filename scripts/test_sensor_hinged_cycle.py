@@ -37,7 +37,7 @@ def measure_wall(name):
   return measured
  return decorate
 
-p=argparse.ArgumentParser();p.add_argument('--close-observation',type=Path);p.add_argument('--handle-then-push',action='store_true');p.add_argument('--pull-push-after',type=float,default=30.);p.add_argument('--contact-motion-profile',choices=['feedback','fast'],default='feedback');p.add_argument('--auto-probe-direction',action='store_true');p.add_argument('--shared-oracle-contact',action='store_true');p.add_argument('--grasp-run',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--open-only',action='store_true');p.add_argument('--push-after',type=float,default=None);p.add_argument('--base-push',action='store_true');p.add_argument('--disable-local-contact-ik',action='store_true');p.add_argument('--contact-ik',choices=['finite','analytic'],default='finite');p.add_argument('--adaptive-push-orientation',action='store_true');p.add_argument('--base-follow-handle',action='store_true');p.add_argument('--base-yaw-follow',action='store_true');p.add_argument('--oracle-contact-poses',action='store_true');p.add_argument('--exact-closed-fingers',action='store_true');p.add_argument('--planar-push',action='store_true');p.add_argument('--lateral-base-fraction',type=float,default=.5);p.add_argument('--contact-retreat',action='store_true');p.add_argument('--probe-only',action='store_true');p.add_argument('--release-regrasp',action='store_true');p.add_argument('--debug-stack-interval',type=float,default=0.);p.add_argument('--absolute-open-angle',type=float,default=None,help='Observed angle from the initial panel, including probe motion');p.add_argument('--max-angle',type=float,default=100);p.add_argument('--angle-step',type=float,default=5.);p.add_argument('--orientation-gain',type=float,default=1.);p.add_argument('--probe-distance',type=float,default=.06);p.add_argument('--probe-direction',type=int,choices=[-1,1],default=1);a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+p=argparse.ArgumentParser();p.add_argument('--panel-close-reference',type=Path);p.add_argument('--calibrated-contact-boxes',action='store_true');p.add_argument('--local-panel-reach',action='store_true');p.add_argument('--pause-at-panel',action='store_true');p.add_argument('--resume-panel-push',action='store_true');p.add_argument('--push-advance-degrees',type=float,default=15.);p.add_argument('--close-observation',type=Path);p.add_argument('--handle-then-push',action='store_true');p.add_argument('--pull-push-after',type=float,default=30.);p.add_argument('--contact-motion-profile',choices=['feedback','fast'],default='feedback');p.add_argument('--auto-probe-direction',action='store_true');p.add_argument('--shared-oracle-contact',action='store_true');p.add_argument('--grasp-run',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--open-only',action='store_true');p.add_argument('--push-after',type=float,default=None);p.add_argument('--base-push',action='store_true');p.add_argument('--disable-local-contact-ik',action='store_true');p.add_argument('--contact-ik',choices=['finite','analytic'],default='finite');p.add_argument('--adaptive-push-orientation',action='store_true');p.add_argument('--base-follow-handle',action='store_true');p.add_argument('--base-yaw-follow',action='store_true');p.add_argument('--oracle-contact-poses',action='store_true');p.add_argument('--exact-closed-fingers',action='store_true');p.add_argument('--planar-push',action='store_true');p.add_argument('--lateral-base-fraction',type=float,default=.5);p.add_argument('--contact-retreat',action='store_true');p.add_argument('--probe-only',action='store_true');p.add_argument('--release-regrasp',action='store_true');p.add_argument('--debug-stack-interval',type=float,default=0.);p.add_argument('--absolute-open-angle',type=float,default=None,help='Observed angle from the initial panel, including probe motion');p.add_argument('--max-angle',type=float,default=100);p.add_argument('--angle-step',type=float,default=5.);p.add_argument('--orientation-gain',type=float,default=1.);p.add_argument('--probe-distance',type=float,default=.06);p.add_argument('--probe-direction',type=int,choices=[-1,1],default=1);a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 if a.debug_stack_interval>0:
  import faulthandler
  faulthandler.dump_traceback_later(a.debug_stack_interval,repeat=True)
@@ -47,6 +47,9 @@ if a.handle_then_push and not 0<a.pull_push_after<a.max_angle:raise ValueError('
 if a.push_after is not None and (not a.open_only or not 0<a.push_after<a.max_angle):raise ValueError('Push continuation currently requires open-only and a switch angle inside the opening range')
 (a.output/'config.json').write_text(json.dumps({k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()},indent=2))
 record=a.grasp_run/'state_recording';runtime=current_runtime()
+if a.resume_panel_push and (runtime is None or getattr(runtime,'door_push_memory',None) is None):raise ValueError('Panel continuation requires live observed contact memory')
+if not 1<=a.push_advance_degrees<=90:raise ValueError('Push advance must be 1–90 degrees')
+class PanelContactReady(Exception):pass
 if runtime is not None and runtime.model is not None:
  m,d=runtime.model,runtime.data
 else:
@@ -61,6 +64,7 @@ tcp=lambda:geo.fk(q())[geo.tcp_body]@geo.tcp_local
 start_T=tcp();start=d.time;phase='observe';events=[];error=None;open_states=[];closed_states=[]
 report=json.loads((a.grasp_run/'report.json').read_text());initial_normal=np.array(report['surface_info']['panel_normal']);initial_normal[2]=0;initial_normal/=np.linalg.norm(initial_normal)
 previous_cloud=None;previous_normal=None;previous_leaf=None;previous_anchor=None;confirmed_layers=[]
+handle_reference_angle=0.
 retreat_used=0;floor_observations=[];confirmed_floor=set();contact_mapper=runtime.mapper if runtime is not None else None;support_history=getattr(runtime,'contact_support_region',None)
 if runtime is None:
  from cross_episode_sim.control.recorded_contact_support import recorded_contact_support
@@ -101,7 +105,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   planning_started=time.monotonic()
   print('WORLD_BUILD_START',dict(phase=phase,points=len(points)),flush=True)
   global previous_cloud,previous_normal,previous_leaf,contact_geometry,contact_links,previous_anchor,confirmed_layers
-  if phase.startswith('close'):
+  if phase.startswith('close') or a.calibrated_contact_boxes:
    # Match finger collision geometry to the current measured aperture, rather
    # than rejecting a handle approach using inflated covering spheres.
    joint_positions={m.joint(j).name:float(d.qpos[m.jnt_qposadr[j]]) for j in range(m.njnt) if (m.joint(j).name or '').startswith('robot_0/gripper/')}
@@ -120,7 +124,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    # The last physically held handle anchors translation. Rotating the whole
    # cloud about an estimated hinge accumulates center-fit translation error.
    # Preserve the observed panel rotation but anchor at measured/reacquired TCP.
-   theta=np.arctan2(before.normal[0]*after.normal[1]-before.normal[1]*after.normal[0],np.dot(before.normal,after.normal))
+   theta=np.arctan2(before.normal[0]*after.normal[1]-before.normal[1]*after.normal[0],np.dot(before.normal,after.normal))-handle_reference_angle
    co,si=np.cos(theta),np.sin(theta);R=np.array([[co,-si,0],[si,co,0],[0,0,1.]])
    surface=(handle-start_T[:3,3])@R.T+current[:3,3]
   keep=cKDTree(surface).query(points,distance_upper_bound=np.nextafter(.018,np.inf))[0]>.018
@@ -141,7 +145,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    if previous_cloud is not None and previous_normal is not None:
     angle=np.arctan2(previous_normal[0]*after.normal[1]-previous_normal[1]*after.normal[0],np.dot(previous_normal,after.normal))
     eligible=(radial>-.05)&(radial<max(observed_leaf_radius,hinge_data['radius'])+.12)
-    if not a.open_only and previous_anchor is not None and abs(angle)>.06:
+    if (not a.open_only or a.calibrated_contact_boxes) and previous_anchor is not None and abs(angle)>.06:
      from cross_episode_sim.control.sensor_hinged import parallel_leaf_layers
      layers=parallel_leaf_layers(points,after.anchor,after.normal,hinge_data['center_xy'],max(observed_leaf_radius,hinge_data['radius']))
      old_layers=parallel_leaf_layers(previous_cloud,previous_anchor,previous_normal,hinge_data['center_xy'],max(observed_leaf_radius,hinge_data['radius']))
@@ -179,15 +183,21 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   print('COLLISION_WORLD',dict(phase=phase,boxes=len(boxes),moving_panel_points=0 if panel_points is None else len(panel_points),build_seconds=time.monotonic()-planning_started),flush=True)
   # Observed planners check these boxes directly. Upload lazily only if
   # their cuRobo trajectory fallback is actually invoked.
+  planner_type=ObservedHingedPlanner;shape_options={}
+  if a.calibrated_contact_boxes:
+   from cross_episode_sim.control.calibrated_arm_planner import CalibratedArmPlanner
+   planner_type=CalibratedArmPlanner
+   shape_options=dict(arm_body_ids=[m.body(f'robot_0/fr3_link{i}').id for i in range(8)]+[m.body('robot_0/gripper/base').id],
+       box_link_names=[f'fr3_link{i}' for i in range(8)]+['gripper_base'])
   if panel_points is not None:
-   return ObservedHingedPlanner(arm,geo,boxes,finger_geometry=contact_geometry,finger_links=contact_links,panel_points=panel_points,hinge_xy=hinge_data['center_xy'],reference_tcp=current[:3,3])
+   return planner_type(arm,geo,boxes,finger_geometry=contact_geometry,finger_links=contact_links,panel_points=panel_points,hinge_xy=hinge_data['center_xy'],reference_tcp=current[:3,3],**shape_options)
   if phase.startswith('push_') or contact_geometry is not None:
-   planner=ObservedHingedPlanner(arm,geo,boxes,finger_geometry=contact_geometry,finger_links=contact_links,panel_points=np.empty((0,3)),hinge_xy=[0.,0.],reference_tcp=current[:3,3])
+   planner=planner_type(arm,geo,boxes,finger_geometry=contact_geometry,finger_links=contact_links,panel_points=np.empty((0,3)),hinge_xy=[0.,0.],reference_tcp=current[:3,3],**shape_options)
    # Reaching the opposite face needs an obstacle-avoiding arm trajectory.
    # Direct joint interpolation alone can reject a reachable contact pose.
    # Only free-space precontact may use the graph fallback; contact stays
    # constrained to its checked local line/hinge arc.
-   planner.allow_curobo_fallback=phase=='push_precontact'
+   planner.allow_curobo_fallback=phase=='push_precontact' and not a.local_panel_reach
    return planner
   return ObservedGraspPlanner(arm,geo,boxes)
  @measure_wall('arm_plan_and_settle')
@@ -218,17 +228,20 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   from itertools import product
   # Base-follow is allowed while pulling a held handle. It must stop during
   # arm-only transfer and must not rotate the base during the panel push.
-  if a.handle_then_push:a.base_follow_handle=False;a.base_yaw_follow=False
-  phase='push_release';fixed_handle_T=tcp().copy();attached=False
-  last=None;stable=0
-  for _ in range(100):
-   execute(q(),0.);fingers=c.robot_view.get_move_group('gripper').joint_pos.copy()
-   stable=stable+1 if last is not None and np.max(abs(fingers-last))<.0002 else 0;last=fingers
-   if stable>=10:break
-  if stable<10:raise RuntimeError('Handle release did not stabilize')
-  # Retract from the handle without tucking or a new navigation call.
-  phase='push_handle_withdraw';withdraw=tcp().copy();withdraw[:3,3]+=.055*after.normal
-  move(withdraw,observe(),0.)
+  if a.handle_then_push:
+   a.base_follow_handle=False
+   if a.panel_close_reference is None:a.base_yaw_follow=False
+  if a.panel_close_reference is None:
+   phase='push_release';fixed_handle_T=tcp().copy();attached=False
+   last=None;stable=0
+   for _ in range(100):
+    execute(q(),0.);fingers=c.robot_view.get_move_group('gripper').joint_pos.copy()
+    stable=stable+1 if last is not None and np.max(abs(fingers-last))<.0002 else 0;last=fingers
+    if stable>=10:break
+   if stable<10:raise RuntimeError('Handle release did not stabilize')
+   # Retract from the handle without tucking or a new navigation call.
+   phase='push_handle_withdraw';withdraw=tcp().copy();withdraw[:3,3]+=.055*after.normal
+   move(withdraw,observe(),0.)
   phase='push_close_empty';last=None;stable=0
   for _ in range(100):
    execute(q(),255.);fingers=c.robot_view.get_move_group('gripper').joint_pos.copy()
@@ -252,7 +265,8 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   # A released passive leaf may settle; refresh its sensed face before
   # planning contact rather than retaining the held-grasp plane.
   local_tangent=np.array([-after.normal[1],after.normal[0],0.])
-  after=fit_panel(points,fixed_handle_T[:3,3]+panel_offset*local_tangent,after.normal,radius=.3,min_gap=-.025 if a.probe_direction<0 else .012)
+  if a.panel_close_reference is None:
+   after=fit_panel(points,fixed_handle_T[:3,3]+panel_offset*local_tangent,after.normal,radius=.3,min_gap=-.025 if a.probe_direction<0 else .012)
   panel_history.append(after)
   # Match the oracle's procedural strategy, not its privileged poses:
   # leave the adjacent free-edge leaf and stand toward the observed hinge.
@@ -336,7 +350,13 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     tangent=inv[:3,:3]@tangent;points=observe()
   failures=[];selected=None
   for approach_attempt in range(1 if a.handle_then_push else 2):
-   candidates=ObservedPanelPush().candidates(points,after,estimate['center_xy'],fixed_handle_T[:3,3],int(sign),pad_local,edge_margins=(.015,.04,.07) if a.handle_then_push else ((.35,.25,.14) if a.probe_direction<0 else (.14,.10,.06)),oracle_contact_poses=a.oracle_contact_poses,preferred_rotation=tcp()[:3,:3] if a.handle_then_push else None,use_observed_edge=a.handle_then_push,height_offsets=(-.12,0.,-.24) if a.handle_then_push else (0.,))
+   preferred_push_rotation=tcp()[:3,:3] if a.handle_then_push else None
+   if a.panel_close_reference is not None:
+    radial=fixed_handle_T[:3,3]-np.r_[estimate['center_xy'],fixed_handle_T[2,3]]
+    direction=after.normal*np.sign(after.normal@(sign*np.cross([0.,0.,1.],radial)))
+    up=np.array([0.,0.,1.])
+    preferred_push_rotation=np.column_stack((up,np.cross(direction,up),direction))
+   candidates=ObservedPanelPush().candidates(points,after,estimate['center_xy'],fixed_handle_T[:3,3],int(sign),pad_local,edge_margins=tuple(memory.get("push_edge_margins",(.18,.25,.32))) if a.panel_close_reference is not None else (.015,.04,.07) if a.handle_then_push else ((.35,.25,.14) if a.probe_direction<0 else (.14,.10,.06)),oracle_contact_poses=a.oracle_contact_poses,preferred_rotation=preferred_push_rotation,use_observed_edge=a.handle_then_push,height_offsets=(0.,.15,-.10) if a.panel_close_reference is not None else (-.12,0.,-.24) if a.handle_then_push else (0.,))
    np.savez(a.output/'push_candidates.npz',points=points,surfaces=np.array([v.surface for v in candidates]),precontacts=np.array([v.precontact for v in candidates]),directions=np.array([v.direction for v in candidates]))
    phase='push_precontact';planner=planner_for(points)
    for candidate_index,candidate in enumerate(candidates):
@@ -349,7 +369,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
       local_handle=(handle-candidate.contact[:3,3])@candidate.contact[:3,:3]
       fixed_handle_T=candidate.contact.copy();contact_planner=planner_for(points)
       print('ORACLE_PANEL_PREPARATION',candidate_index,flush=True)
-      _,path,contact_path=prepare_observed_panel_push(planner,contact_planner,q(),candidate,estimate['center_xy'])
+      _,path,contact_path=prepare_observed_panel_push(planner,contact_planner,q(),candidate,estimate['center_xy'],arm_only_edge_route=a.local_panel_reach)
+      if a.panel_close_reference is not None:
+       from cross_episode_sim.control.observed_panel_push import preflight_panel_push_step
+       from cross_episode_sim.control.contact_retreat import occupied_support_validator
+       support=occupied_support_validator(contact_planner.base_boxes,observed_cells=confirmed_floor,observed_support=support_history)
+       preflight_panel_push_step(contact_planner,contact_path[-1],candidate,estimate['center_xy'],pad_local,sign*np.deg2rad(a.angle_step),support,a.orientation_gain)
      except RuntimeError as exc:
       failures.append(str(exc));print('PUSH_APPROACH_REJECTED',candidate_index,str(exc),flush=True);continue
      finally:
@@ -413,9 +438,21 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    # patch, just as the cabinet routine refreshes its contact after reaching.
    toward=np.r_[estimate['center_xy'],after.anchor[2]]-after.anchor;toward[2]=0.;toward/=np.linalg.norm(toward)
    near=after.anchor+.18*toward+.045*after.normal+np.array([0.,0.,.12])
-   tracked_panel=fit_panel(fresh,near,after.normal,radius=.3)
+   if a.panel_close_reference is not None:
+    from cross_episode_sim.control.observed_panel_push import track_push_panel
+    tracked_panel=track_push_panel(fresh,after,estimate['center_xy'],0.,selected.surface[2],preserve_face=True)
+   else:tracked_panel=fit_panel(fresh,near,after.normal,radius=.3)
+   if a.local_panel_reach:
+    from cross_episode_sim.control.observed_panel_push import retain_observed_panel_face
+    tracked_panel=retain_observed_panel_face(after,tracked_panel,estimate['center_xy'])
    selected=transport_panel_push_target(selected,estimate['center_xy'],after.normal,tracked_panel.normal)
    after=tracked_panel;panel_history.append(after)
+   if a.local_panel_reach:
+    from cross_episode_sim.control.observed_panel_push import refresh_observed_push_surface
+    previous_surface=selected.surface.copy()
+    selected=refresh_observed_push_surface(selected,fresh,pad_local)
+    events.append(dict(phase='fresh_panel_surface',shift=(selected.surface-previous_surface).tolist()))
+    print('FRESH_PANEL_SURFACE',events[-1],flush=True)
   # Update the intended contact mask with fresh observed points. Points from
   # a previously occluded part of the same footprint must not become a false
   # obstacle; off-plane handles and all other surfaces remain checked.
@@ -432,6 +469,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   events.append(dict(phase='push_contact_selected',time=float(d.time-start),surface=selected.surface.tolist(),direction=selected.direction.tolist()))
   push_contact_states.append(snapshot())
   print('PANEL_PUSH',events[-1],flush=True)
+  if a.pause_at_panel:raise PanelContactReady()
   return observe()
  @measure_wall('base_contact')
  def contact_retreat(points,push_goal=None,allow_unattached=False,repark_offsets=None):
@@ -603,71 +641,110 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   return inv
  try:
   from cross_episode_sim.control.sensor_hinged import fit_held_panel
-  points=observe();tangent=np.array([-initial_normal[1],initial_normal[0],0.]);candidates=[]
-  for offset in [0.,-.12,.12]:
-   try:
-    fitted=fit_panel(points,start_T[:3,3]+offset*tangent,initial_normal,radius=.3,min_gap=-.025 if a.probe_direction<0 else .012)
-    candidates.append((fitted.inliers/(1+10000*fitted.residual),offset,fitted))
-   except ValueError:pass
-  if not candidates:raise ValueError('No observed panel patch')
-  _,panel_offset,before=max(candidates,key=lambda c:c[0]);print('PANEL_OFFSET',panel_offset,flush=True)
-  np.savez(a.output/'initial_observed.npz',points=points)
-  print('INITIAL_PANEL',before,flush=True)
-  if a.close_observation is not None:
-   # This file contains ONLY earlier RGB-D estimates transformed into the
-   # current SLAM-estimated base frame by the live skill adapter.
-   memory=json.loads(a.close_observation.read_text())
-   after=before
-   before=PanelObservation(np.asarray(memory['closed_anchor']),np.asarray(memory['closed_normal']),1,0.)
-   theta=float(np.arctan2(np.cross(before.normal,after.normal)[2],before.normal@after.normal))
-   estimate=dict(center_xy=memory['hinge_xy'],radius=float(np.linalg.norm(start_T[:2,3]-memory['hinge_xy'])),observed_angle=theta)
-   panel_history=[after]
+  if a.panel_close_reference is not None:
+   memory=json.loads(a.panel_close_reference.read_text())
+   points=observe();normal=np.asarray(memory['open_normal'])
+   edge=np.asarray(memory['open_handle']);center=np.r_[memory['hinge_xy'],edge[2]]
+   toward=center-edge;toward/=np.linalg.norm(toward)
+   before=fit_panel(points,edge+.12*toward+.05*normal,normal,radius=.3,min_gap=-.025)
+   after=before;panel_history=[before];panel_offset=0.
+   remaining=float(np.arctan2(np.cross(before.normal,memory['closed_normal'])[2],before.normal@memory['closed_normal']))
+   if abs(remaining)<np.deg2rad(2):raise ValueError('Observed door already at closed reference')
+   estimate=dict(center_xy=memory['hinge_xy'],radius=float(np.linalg.norm(edge[:2]-center[:2])),observed_angle=float(np.sign(remaining)*1e-6))
+   start_T=tcp().copy();start_T[:3,3]=edge;fixed_handle_T=start_T.copy();attached=False
+   tangent=np.array([-normal[1],normal[0],0.]);theta=0.
+   a.absolute_open_angle=abs(float(np.degrees(remaining)))
+   a.push_after=.001
+  elif a.resume_panel_push:
+   memory=runtime.door_push_memory.observed
+   before=memory['before'];after=memory['after'];panel_history=list(memory['panel_history'])
+   estimate=dict(memory['estimate']);start_T=memory['start_T'].copy()
+   handle=memory['handle'].copy();local_handle=memory['local_handle'].copy()
+   fixed_handle_T=memory['fixed_handle_T'].copy();push_vertices=memory['push_vertices'].copy()
+   previous_cloud=memory['previous_cloud'];previous_normal=memory['previous_normal']
+   previous_anchor=memory['previous_anchor'];previous_leaf=memory['previous_leaf']
+   confirmed_layers=list(memory['confirmed_layers']);confirmed_floor=set(memory['confirmed_floor'])
+   observed_leaf_radius=memory['observed_leaf_radius'];panel_offset=memory['panel_offset']
+   tangent=memory['tangent'].copy();support_history=memory['support_history']
+   push_active=True;attached=True;a.push_after=None
+   points=observe()
+   from cross_episode_sim.control.observed_panel_push import track_push_panel
+   after=track_push_panel(points,after,estimate['center_xy'],0.,tcp()[2,3],preserve_face=True)
   else:
-   after=before;panel_history=[before]
-   directions=[a.probe_direction,-a.probe_direction] if a.auto_probe_direction else [a.probe_direction]
-   for attempt,direction in enumerate(directions):
-    a.probe_direction=direction
+   points=observe();tangent=np.array([-initial_normal[1],initial_normal[0],0.]);candidates=[]
+   for offset in [0.,-.12,.12]:
     try:
-     for distance in np.arange(.02,a.probe_distance+.001,.02):
-      phase='probe';T=start_T.copy();T[:3,3]+=direction*distance*before.normal;move(T,points);points=observe();panel_offset,after=fit_held_panel(points,tcp()[:3,3],tangent,before,start_T[:3,3],before.normal,panel_offset,min_gap=-.025 if direction<0 else .012)
-      np.savez(a.output/f'probe_{direction}_{distance:.2f}.npz',points=points,tcp=tcp());print('PANEL',after,flush=True);panel_history.append(after)
-     estimate=estimate_vertical_hinge(before,after,tcp()[:3,3]);break
-    except (RuntimeError,ValueError) as exc:
-     # Lost panel association during a short pull can mean that the leaf
-     # resisted that direction. Return to the measured start and try the
-     # opposite bounded probe; do not bypass collision/IK failures.
-     recoverable=('tracking error' in str(exc) or 'rotation too small' in str(exc)
-                  or 'No observed panel associated with held handle' in str(exc))
-     if attempt+1==len(directions) or not recoverable:raise
-     events.append(dict(phase='reverse_probe',reason=str(exc),direction=direction))
-     phase='probe_return';points=observe();move(start_T,points);points=observe()
-     after=before;panel_history=[before]
-   if a.auto_probe_direction and a.probe_direction>0:
-    if a.handle_then_push:
-     # The oracle can continue its pull-side handle stroke toward 45 degrees
-     # before transferring to the exposed panel. Follow the held-handle arc;
-     # begin_panel_push disables base-follow before releasing the handle.
-     a.push_after=a.pull_push_after
-     a.base_follow_handle=True;a.base_yaw_follow=True;a.lateral_base_fraction=1.
-    else:
-     a.push_after=None
-     a.base_follow_handle=True;a.base_yaw_follow=True;a.lateral_base_fraction=1.
-  observed_leaf_radius=estimate['radius'];hinge_data=estimate;events.append(dict(hinge_estimate=dict(estimate)));print('HINGE',estimate,flush=True)
+     fitted=fit_panel(points,start_T[:3,3]+offset*tangent,initial_normal,radius=.3,min_gap=-.025 if a.probe_direction<0 else .012)
+     candidates.append((fitted.inliers/(1+10000*fitted.residual),offset,fitted))
+    except ValueError:pass
+   if not candidates:raise ValueError('No observed panel patch')
+   _,panel_offset,before=max(candidates,key=lambda c:c[0]);print('PANEL_OFFSET',panel_offset,flush=True)
+   np.savez(a.output/'initial_observed.npz',points=points)
+   print('INITIAL_PANEL',before,flush=True)
+   if a.close_observation is not None:
+    # This file contains ONLY earlier RGB-D estimates transformed into the
+    # current SLAM-estimated base frame by the live skill adapter.
+    memory=json.loads(a.close_observation.read_text())
+    after=before
+    before=PanelObservation(np.asarray(memory['closed_anchor']),np.asarray(memory['closed_normal']),1,0.)
+    theta=float(np.arctan2(np.cross(before.normal,after.normal)[2],before.normal@after.normal))
+    # A separate close skill reacquired this handle with the door already
+    # open. Its cloud needs only motion SINCE this grasp, not the full angle
+    # from the earlier closed-panel reference (which remains the goal).
+    handle_reference_angle=theta
+    estimate=dict(center_xy=memory['hinge_xy'],radius=float(np.linalg.norm(start_T[:2,3]-memory['hinge_xy'])),observed_angle=theta)
+    panel_history=[after]
+   else:
+    after=before;panel_history=[before]
+    directions=[a.probe_direction,-a.probe_direction] if a.auto_probe_direction else [a.probe_direction]
+    for attempt,direction in enumerate(directions):
+     a.probe_direction=direction
+     try:
+      for distance in np.arange(.02,a.probe_distance+.001,.02):
+       phase='probe';T=start_T.copy();T[:3,3]+=direction*distance*before.normal;move(T,points);points=observe();panel_offset,after=fit_held_panel(points,tcp()[:3,3],tangent,before,start_T[:3,3],before.normal,panel_offset,min_gap=-.025 if direction<0 else .012)
+       np.savez(a.output/f'probe_{direction}_{distance:.2f}.npz',points=points,tcp=tcp());print('PANEL',after,flush=True);panel_history.append(after)
+      estimate=estimate_vertical_hinge(before,after,tcp()[:3,3]);break
+     except (RuntimeError,ValueError) as exc:
+      # Lost panel association during a short pull can mean that the leaf
+      # resisted that direction. Return to the measured start and try the
+      # opposite bounded probe; do not bypass collision/IK failures.
+      recoverable=('tracking error' in str(exc) or 'rotation too small' in str(exc)
+                   or 'No observed panel associated with held handle' in str(exc))
+      if attempt+1==len(directions) or not recoverable:raise
+      events.append(dict(phase='reverse_probe',reason=str(exc),direction=direction))
+      phase='probe_return';points=observe();move(start_T,points);points=observe()
+      after=before;panel_history=[before]
+    if a.auto_probe_direction and a.probe_direction>0:
+     if a.handle_then_push:
+      # The oracle can continue its pull-side handle stroke toward 45 degrees
+      # before transferring to the exposed panel. Follow the held-handle arc;
+      # begin_panel_push disables base-follow before releasing the handle.
+      a.push_after=a.pull_push_after
+      a.base_follow_handle=True;a.base_yaw_follow=True;a.lateral_base_fraction=1.
+     else:
+      a.push_after=None
+      a.base_follow_handle=True;a.base_yaw_follow=True;a.lateral_base_fraction=1.
+  observed_leaf_radius=max(observed_leaf_radius,estimate['radius']);hinge_data=estimate;events.append(dict(hinge_estimate=dict(estimate)));print('HINGE',estimate,flush=True)
   if not a.probe_only:
    probe_T=tcp();sign=np.sign(estimate['observed_angle']);phase='open'
    budget=0. if a.close_observation is not None else (a.max_angle if a.absolute_open_angle is None else a.absolute_open_angle+2*a.angle_step)
+   start_open=abs(np.arctan2(np.cross(before.normal,after.normal)[2],before.normal@after.normal))
+   segment_goal=min(np.deg2rad(a.absolute_open_angle or a.max_angle),start_open+np.deg2rad(a.push_advance_degrees)) if a.resume_panel_push else None
    for angle in np.deg2rad(np.arange(a.angle_step,budget+.001,a.angle_step))*sign:
     remaining=None
     if a.absolute_open_angle is not None:
      observed=abs(np.arctan2(np.cross(before.normal,after.normal)[2],before.normal@after.normal))
-     remaining=np.deg2rad(a.absolute_open_angle)-observed
+     remaining=(segment_goal if segment_goal is not None else np.deg2rad(a.absolute_open_angle))-observed
      if remaining<=np.deg2rad(.25):break
     # Reanchor each small contact increment at the measured grasp pose.
     # Refine the hinge when enough visible angular coverage exists.
-    try:
-     refined=refine_vertical_hinge(panel_history,tcp()[:3,3]);estimate.update(refined);observed_leaf_radius=max(observed_leaf_radius,refined['radius'])
-     print('REFINED_HINGE',refined,flush=True)
-    except ValueError:pass
+    if not (push_active and a.local_panel_reach):
+     # The pull fitted the hinge from directly observed front-face planes.
+     # Do not refit it from anchors transported through push-side occlusion.
+     try:
+      refined=refine_vertical_hinge(panel_history,tcp()[:3,3]);estimate.update(refined);observed_leaf_radius=max(observed_leaf_radius,refined['radius'])
+      print('REFINED_HINGE',refined,flush=True)
+     except ValueError:pass
     if a.push_after is not None and not push_active and abs(np.rad2deg(angle))>=a.push_after:
      points=begin_panel_push(points)
     phase='push_open' if push_active else 'open'
@@ -682,7 +759,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
      tip=offsets[projection>projection.max()-1e-5].mean(axis=0)
      surface=current_T[:3,3]+tip-.0005*direction
      patch,normal,wrist=panel_arc_geometry(surface,direction,np.r_[estimate['center_xy'],0.],
-         [0.,0.,1.],delta,current_T[:3,:3],.5)
+         [0.,0.,1.],delta,current_T[:3,:3],a.orientation_gain)
      goal=panel_contact_pose(patch,normal,wrist,push_vertices)
     try:
      if (push_active and a.base_push) or (not push_active and a.base_follow_handle):
@@ -712,7 +789,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     previous_open=abs(np.arctan2(np.cross(before.normal,after.normal)[2],before.normal@after.normal))
     if push_active and a.handle_then_push:
      from cross_episode_sim.control.observed_panel_push import track_push_panel
-     after=track_push_panel(points,after,estimate['center_xy'],delta,tcp()[2,3])
+     after=track_push_panel(points,after,estimate['center_xy'],delta,tcp()[2,3],preserve_face=a.local_panel_reach)
     else:
      try:after=fit_panel(points,tcp()[:3,3]+panel_offset*expected_tangent,expected_normal,radius=.3,min_gap=-.025 if a.probe_direction<0 else .012)
      except ValueError:
@@ -732,13 +809,15 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
       settled=True
       for _ in range(3):
        execute(q());points=observe()
-       if push_active and a.handle_then_push:verified=track_push_panel(points,after,estimate['center_xy'],0.,tcp()[2,3])
+       if push_active and a.handle_then_push:verified=track_push_panel(points,after,estimate['center_xy'],0.,tcp()[2,3],preserve_face=a.local_panel_reach)
        else:verified=fit_panel(points,tcp()[:3,3]+panel_offset*expected_tangent,after.normal,radius=.3,min_gap=-.025 if a.probe_direction<0 else .012)
        if abs(np.arctan2(np.cross(after.normal,verified.normal)[2],after.normal@verified.normal))>np.deg2rad(.25):settled=False
        after=verified
       if settled:
        events.append(dict(phase='observed_open_stop',angle_degrees=float(np.degrees(measured_open)),reason='Panel stopped near target across completed contact increment and three fresh observations'))
        break
+   if segment_goal is not None and segment_goal<np.deg2rad(a.absolute_open_angle or a.max_angle)-.005:
+    raise PanelContactReady()
    phase='verify_open'
    for _ in range(25):execute(q());open_states.append(snapshot())
    if a.open_only:
@@ -809,7 +888,21 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     for cmd in path:execute(cmd,0.)
     phase='verify_closed'
     for _ in range(25):execute(q(),0.);closed_states.append(snapshot())
+ except PanelContactReady:
+  phase='panel_contact_ready';print('PANEL_CONTACT_READY: returning live control to the caller',flush=True)
  except Exception as exc:error=f'{type(exc).__name__}: {exc}';print(error,flush=True)
+ if runtime is not None and push_active and 'push_vertices' in globals():
+  from cross_episode_sim.control.door_push_memory import DoorPushMemory
+  reached=(any(e.get('phase')=='push_contact_selected' for e in events) or a.resume_panel_push)
+  observed=dict(before=before,after=after,panel_history=list(panel_history),estimate=dict(estimate),
+      start_T=start_T.copy(),handle=handle.copy(),local_handle=local_handle.copy(),
+      fixed_handle_T=fixed_handle_T.copy(),push_vertices=push_vertices.copy(),
+      previous_cloud=previous_cloud,previous_normal=previous_normal,previous_anchor=previous_anchor,
+      previous_leaf=previous_leaf,confirmed_layers=list(confirmed_layers),confirmed_floor=set(confirmed_floor),
+      observed_leaf_radius=observed_leaf_radius,panel_offset=panel_offset,tangent=tangent.copy(),
+      support_history=support_history)
+  runtime.door_push_memory=DoorPushMemory(a.grasp_run,observed,phase,reached,error,
+      completed=phase=='verify_open_released')
  final_state=snapshot()
 # Private scoring only after execution. Identify touched hinged fixture at initial grasp.
 private=mujoco.MjData(m);mujoco.mj_setState(m,private,reset,mujoco.mjtState.mjSTATE_INTEGRATION);mujoco.mj_forward(m,private);hinges=set()
@@ -825,6 +918,10 @@ def score(state):
  mujoco.mj_setState(m,private,state,mujoco.mjtState.mjSTATE_INTEGRATION);mujoco.mj_forward(m,private)
  return {m.joint(j).name:dict(position=float(private.qpos[m.jnt_qposadr[j]]),initial=float(private_initial_qpos[m.jnt_qposadr[j]]),limits=m.jnt_range[j].tolist()) for j in hinges}
 result=dict(contact_policy='shared_oracle_endpoint_sweep' if a.shared_oracle_contact else 'dense_sensor_contact',wall_timings=wall_timings,push_after_degrees=a.push_after,push_contact_executed=push_active,success=False,scope='pregrasped hinged interaction experiment',error=error,events=events,simulated_seconds=float(d.time-start),private_final=score(final_state),private_open=score(open_states[-1]) if open_states else {},private_closed=score(closed_states[-1]) if closed_states else {})
+result['observed_current_panel_anchor_base']=after.anchor.tolist()
+result['observed_current_panel_normal_base']=after.normal.tolist()
+result['contact_control_returned']=phase=='panel_contact_ready'
+result['commands_completed']=error is None
 # Diagnostic contact forces are evaluated only after execution has ended.
 result['observed_open_angle_degrees']=float(abs(np.degrees(np.arctan2(np.cross(before.normal,after.normal)[2],before.normal@after.normal)))) if 'before' in globals() and 'after' in globals() else None
 if error is None and a.open_only and hinge_data is not None:
@@ -859,4 +956,10 @@ if a.open_only and open_states:
  result['full_open_reached']=opened
  result['success']=opened and error is None and phase=='verify_open_released'
  result['scope']='pregrasped open-release-withdraw experiment'
+if a.panel_close_reference is not None:
+ result['scope']='observed panel push-close; no grasp acquisition'
+ result['closing_push']=True
+ result['observed_closing_progress_degrees']=result.pop('observed_open_angle_degrees')
+ result.pop('full_open_reached',None)
+ result['success']=False  # Semantic closing is scored by the outer private harness.
 (a.output/'report.json').write_text(json.dumps(result,indent=2));print(json.dumps(result),flush=True)

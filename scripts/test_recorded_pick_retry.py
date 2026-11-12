@@ -14,6 +14,8 @@ from cross_episode_sim.slam import create_mapper
 
 
 def main():
+    from cross_episode_sim.runtime.logging import TimestampedStream
+    sys.stdout=TimestampedStream(sys.stdout);sys.stderr=TimestampedStream(sys.stderr)
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--pick-executor',default='scripts/test_m2t2_pick.py',help='Isolated executor experiment')
     p.add_argument('--pick',type=Path)
@@ -24,6 +26,7 @@ def main():
     p.add_argument('--household-dock',action='store_true',help='Use new generic-object docking; implies workspace docking')
     p.add_argument('--focused-proposals',action='store_true')
     p.add_argument('--production-pick',action='store_true',help='Exercise the generic pickup wrapper including fresh-depth docking')
+    p.add_argument('--restore-floor-context',action='store_true',help='Restore prior sensor floor coverage from the selected navigation recording')
     p.add_argument('--dock-distance',type=float,help='Component experiment: checked frontal dock radius')
     a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
     a.workspace_dock=a.workspace_dock or a.household_dock or a.dock_distance is not None
@@ -37,10 +40,19 @@ def main():
         from cross_episode_sim.control.sensor_appliance_backend import pixel_point,camera_points
         with episode_sensors(model,data) as sensor:
             packet=sensor.capture();camera=packet.cameras['wrist']
-            answer=MolmoPointer().point(Image.fromarray(camera.rgb),a.target)
-            if not answer['points']:raise RuntimeError('Target not observed in recorded wrist view')
-            _,_,valid=camera_points(camera)
-            x=dict(target=pixel_point(camera,valid,answer['points'][0]))
+            if a.target in ('packaged drink','packaged snack'):
+                from types import SimpleNamespace
+                from cross_episode_sim.perception.portable_object_pointing import household_pointing_supervisor
+                from cross_episode_sim.perception.rpc import configured_client,RemoteSegmenter
+                supervisor=household_pointing_supervisor(MolmoPointer(),RemoteSegmenter(configured_client('fastsam')),a.target)
+                supervisor.observe(packet,SimpleNamespace(accepted=True,T_map_base=np.eye(4)))
+                if not supervisor.targets.targets:raise RuntimeError('No grocery surface observed above support')
+                x=dict(target=min(supervisor.targets.targets,key=lambda t:np.linalg.norm(t.position[:2])).position)
+            else:
+                answer=MolmoPointer().point(Image.fromarray(camera.rgb),a.target)
+                if not answer['points']:raise RuntimeError('Target not observed in recorded wrist view')
+                _,_,valid=camera_points(camera)
+                x=dict(target=pixel_point(camera,valid,answer['points'][0]))
         navigation=dict(selected_object=dict(label=a.target))
     else:
         x=np.load(a.pick/'input.npz');navigation=json.loads((a.pick.parent/'navigation/report.json').read_text())
@@ -50,6 +62,9 @@ def main():
         artifacts.save_array(source/'private_checkpoint/state.npy',state)
         mapper=create_mapper(fuse_dense=False);packet=sensors.capture();tracking=mapper.update(packet.cameras['navigation'],packet.timestamp)
         grid=ObservedNavigationMap(MapConfig(resolution=.05,height_resolution=.025,pixel_stride=4));grid.update(packet.cameras['navigation'],tracking);grid.update_support(packet.cameras['wrist'],tracking)
+        if a.restore_floor_context:
+            from cross_episode_sim.code_policy.recorded_context import restore_start_context
+            restore_start_context(grid,record,float(data.time))
         target=tracking.T_map_base[:3,:3]@x['target']+tracking.T_map_base[:3,3]
         if a.navigation:
             # Previously occupied footprints are sensor evidence, not new floor.
@@ -117,12 +132,13 @@ def main():
                 from cross_episode_sim.control.onboard_base import OnboardBaseActuator
                 from cross_episode_sim.navigation.fixed_map import freeze_map
                 base=OnboardBaseActuator(model,data)
-                for _ in range(3):
-                    for _ in range(5):base.step(0.,0.)
-                    packet=sensors.capture();tracking=mapper.update(packet.cameras['navigation'],packet.timestamp)
-                    grid.update(packet.cameras['navigation'],tracking);grid.update_support(packet.cameras['wrist'],tracking)
-                from scripts.recorded_sensor_context import restore_recorded_floor
-                restore_recorded_floor(grid,record,last=bool(a.navigation))
+                if not a.workspace_dock:
+                    for _ in range(3):
+                        for _ in range(5):base.step(0.,0.)
+                        packet=sensors.capture();tracking=mapper.update(packet.cameras['navigation'],packet.timestamp)
+                        grid.update(packet.cameras['navigation'],tracking);grid.update_support(packet.cameras['wrist'],tracking)
+                    from scripts.recorded_sensor_context import restore_recorded_floor
+                    restore_recorded_floor(grid,record,last=bool(a.navigation))
                 freeze_map(grid);grid.save(source);mapper.save(source/'slam')
                 # The observation warm-up advances live physics. Publish that
                 # current state before the production wrapper consumes it.

@@ -67,6 +67,14 @@ def locate_detection(camera, detection, T_map_base):
         span=np.percentile(points,95,axis=0)-np.percentile(points,5,axis=0)
         if np.max(span)>.75:return None
     point=np.median(points,axis=0)
+    if detection.label == 'packaged snack':
+        # A point on an occluding arm is not the block behind it. The fast
+        # capture path supplies calibrated robot bounds even without a dense
+        # image self-mask. Filter this single observed point, not the whole RGB.
+        from ..sensors.onboard import without_robot_points
+        local=T_map_base[:3,:3].T@(point-T_map_base[:3,3])
+        if not len(without_robot_points(local[None],camera)):
+            return None
     # Broad physical category priors in the gravity-aligned SLAM frame, not
     # scene-specific coordinates. A floor patch is not a tabletop.
     if detection.label=='dining table' and not .45<point[2]<1.25:return None

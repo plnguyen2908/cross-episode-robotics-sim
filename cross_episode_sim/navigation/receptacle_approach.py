@@ -49,10 +49,11 @@ def approach_receptacle(runtime,label,output,tool_points,seconds=40.):
     class LoadedDock(ShapedDocking):
         def make_checker(self,pose,q):return checker
     docking=LoadedDock(grid,geometry)
-    start=float(runtime.data.time)
+    start=float(runtime.data.time);budget=seconds;tick=0
     with StateVideoRecorder(runtime.model,runtime.data,output/'state_recording') as recorder:
-        for tick in range(round(seconds*50)):
-            if tick%5==0:
+        while float(runtime.data.time)-start<budget:
+            tick+=1
+            if tick==1 or tick%5==0:
                 packet=payload.filter_packet(runtime.sensors.capture(include_robot_mask=False))
                 estimate=tracker.update(packet.cameras['navigation'],packet.timestamp)
                 recorder.record_map(grid,estimate,'receptacle_view_approach')
@@ -71,6 +72,21 @@ def approach_receptacle(runtime,label,output,tool_points,seconds=40.):
                         candidate=proposal.pose.copy();candidate[2]+=offset;candidates.append(candidate)
                 if not plan_to_any_dock(docking,pose,packet.arm.position,candidates):
                     raise RuntimeError('No observed loaded approach to '+label+': '+str(docking.events[-1:]))
+                from .observed_undock import departure_route
+                original=list(docking.path)
+                docking.path=departure_route(pose,original,checker,keep_final_rotation=True)
+                route=[pose]+docking.path
+                distance=sum(np.linalg.norm(b[:2]-a[:2]) for a,b in zip(route,route[1:]))
+                turns=sum(abs((b[2]-a[2]+np.pi)%(2*np.pi)-np.pi) for a,b in zip(route,route[1:]))
+                # Keep checked turns/contact posture; omit redundant lattice
+                # stops and derive the allowance from the actual route.
+                allowance=max(15.,distance/.15+turns/.5+5.*len(docking.path))
+                budget=max(budget,float(runtime.data.time)-start+allowance)
+                event=dict(event='receptacle_approach_route',route=[p.tolist() for p in docking.path],
+                    removed_waypoints=len(original)-len(docking.path),distance_m=distance,
+                    turn_radians=turns,budget_seconds=budget)
+                docking.events.append(event);print(json.dumps(event),flush=True)
+                (output/'route.json').write_text(json.dumps(event,indent=2))
                 follower=DockFollower(docking.path,max_speed=.15,max_yaw_speed=.5)
             try:speed,yaw=follower.command(pose)
             except RuntimeError as exc:

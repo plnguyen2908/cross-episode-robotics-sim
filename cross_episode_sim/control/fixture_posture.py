@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 
-def plan_fixture_stow(planner, joints, posture):
+def plan_fixture_stow(planner, joints, posture, *, withdrawal_directions=()):
     """Try a checked withdrawal waypoint before an expensive graph search."""
     from .contact_retreat import tool_pose
     allow_graph = planner.allow_curobo_fallback
@@ -23,6 +23,17 @@ def plan_fixture_stow(planner, joints, posture):
         toward_base = -tcp[:3, 3].copy()
         toward_base[2] = 0.
         toward_base /= max(np.linalg.norm(toward_base), 1e-8)
+        for direction in withdrawal_directions:
+            direction=np.asarray(direction,float);direction/=np.linalg.norm(direction)
+            for distance in (.08,.14,.20):
+                waypoint=tcp[:3,3]+distance*direction
+                try:
+                    first=planner.plan(joints,waypoint,tcp[:3,:3])
+                    second=planner.plan_joint_goal(first[-1],posture)
+                except RuntimeError as exc:
+                    rejected.append(str(exc));continue
+                planner.events.append(dict(method='observed_panel_normal_withdrawal',waypoint=waypoint.tolist()))
+                return np.concatenate([first,second[1:]])
         for distance in (.08, .14, .20):
             for height in (0., -.06, .06):
                 waypoint = tcp[:3, 3] + distance * toward_base + [0., 0., height]
@@ -42,7 +53,7 @@ def plan_fixture_stow(planner, joints, posture):
     return planner.plan_joint_goal(joints, posture)
 
 
-def stow_after_fixture(runtime, sensors, recorder, output, posture):
+def stow_after_fixture(runtime, sensors, recorder, output, posture, *, arm_boxes=False, withdrawal_directions=()):
     import mujoco
     from curobo._src.geom.types import Cuboid
     from .sensor_appliance_backend import camera_points
@@ -73,9 +84,10 @@ def stow_after_fixture(runtime, sensors, recorder, output, posture):
                             collision_cache={'cuboid': max(16, len(boxes)), 'mesh': 2},
                             activation_distance=.012)
     planner = calibrated_finger_planner(arm, geometry, boxes, model, data,
+                                       arm_boxes=arm_boxes,
                                        allow_curobo_fallback=True)
     print('FIXTURE_STOW_PLAN', dict(boxes=len(boxes)), flush=True)
-    path = plan_fixture_stow(planner, q, target)
+    path = plan_fixture_stow(planner, q, target, withdrawal_directions=withdrawal_directions)
     hold = {group: controller.robot_view.get_move_group(group).noop_ctrl.copy()
             for group in ('base', 'arm', 'gripper')}
     start_sim = float(data.time)
