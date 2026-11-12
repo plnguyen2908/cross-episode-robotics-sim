@@ -57,3 +57,20 @@ def test_pending_placement_never_starts_empty_hand_redock():
     from cross_episode_sim.runtime.qwen_pipeline import PipelineRedocking
     dock=PipelineRedocking(SimpleNamespace(),{'held':'cup'},lambda:pytest.fail('No fixture motion allowed'))
     assert dock(target='cup',purpose='pick')==dict(success=False,reason='placement_pending_retained_grasp')
+
+
+def test_pick_redock_after_failed_call_uses_fresh_view(tmp_path,monkeypatch):
+    from cross_episode_sim.runtime.qwen_pipeline import PipelineRedocking
+    previous=tmp_path/'failed_call_005';previous.mkdir()
+    class Session:
+        _redocking=None
+        def redock(self,target,purpose,distance):return dict(success=False,reason='object_found_unconfirmed')
+        def checkpoint(self,path):path.mkdir(parents=True);return path
+    session=Session()
+    monkeypatch.setattr('cross_episode_sim.runtime.household_components.live_session',lambda *a,**kw:session)
+    monkeypatch.setattr('cross_episode_sim.mapping.continuity.load_memory',lambda path:{})
+    monkeypatch.setattr('cross_episode_sim.mapping.continuity.save_memory',lambda path,memory:None)
+    ctx={'continuation':previous}
+    dock=PipelineRedocking(SimpleNamespace(output=tmp_path,runtime=SimpleNamespace()),ctx,lambda:None)
+    assert dock(target='bowl',purpose='pick')==dict(success=False,reason='object_found_unconfirmed')
+    assert session._redocking is None and ctx['continuation']==tmp_path/'qwen_redock_001'/'handoff'

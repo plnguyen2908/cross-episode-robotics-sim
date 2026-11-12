@@ -48,6 +48,9 @@ def main():
   def make_checker(self,pose,q):
    return checker
  departure=DepartureDock(grid,geometry);undock=None;departure_checked=False
+ from cross_episode_sim.navigation.recorded_departure import recorded_fallback
+ from cross_episode_sim.runtime.episode import current_runtime
+ guided=bool(getattr(current_runtime(),'qwen_docking',False))
  from cross_episode_sim.control.execution_monitor import PlannedMotionMonitor
  execution_monitor=PlannedMotionMonitor()
  def execution_guard(forward,yaw,dt):
@@ -83,6 +86,10 @@ def main():
     print(json.dumps(policy.events[-1]),flush=True)
    if undock is not None:
     cmd=undock.step(packet,tracking,departure_free,float(d.time))
+    # Qwen docks check only the base footprint, so the full-shape undock can
+    # find its own start pose blocked. Leave as the loaded carry does.
+    fallback=recorded_fallback(undock,grid) if guided else None
+    if fallback is not None:undock=fallback;cmd=undock.step(packet,tracking,departure_free,float(d.time))
     if undock.error:status=undock.error;guard_detail=checker.detail;break
     if cmd['status']=='undock_complete':
      undock=None;resume_transit(policy,tracking,float(d.time))

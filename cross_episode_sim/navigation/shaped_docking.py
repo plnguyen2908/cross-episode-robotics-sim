@@ -500,7 +500,8 @@ class ShapedDocking:
             if not accepted and hasattr(self.grid,'fixed_obstacle_points'):
                 from .coverage import exploration_request
                 details=[r.get('detail',{}) for e in self.events[-6:] for r in e.get('rejected',[])]
-                details.append(getattr(self.checker,'detail',None))
+                # The surface fit can fail before any plan has made a checker.
+                details.append(getattr(getattr(self,'checker',None),'detail',None))
                 for detail in details:
                     request=exploration_request(self.grid,detail,'docking')
                     if request is not None:

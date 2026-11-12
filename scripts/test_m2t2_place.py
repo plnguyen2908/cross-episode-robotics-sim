@@ -226,6 +226,10 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   # passes the unchanged collision checks; gravity and support are scored after
   # release. This avoids requiring penetration into voxelized table geometry.
   release_candidates=[]
+  if a.receptacle=='dining table' and active_mode!='front_entry':
+   from cross_episode_sim.control.table_drop import table_drop_candidates
+   release_candidates=table_drop_candidates(surface,points,held,tcp,clearance=.09)
+   print('SMALL_TABLE_DROP_CANDIDATES',len(release_candidates),flush=True)
   # Try distinct contacts/orientations before revisiting millimeter-offset
   # copies of the same pose. Retain every existing candidate and clearance.
   for clearance in (.03,.05,.015,0.,.005,.01,.02,.04):
@@ -249,6 +253,11 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
      else:
       approach,lower,retreat,waypoints=plan_front_entry(planner,q,tcp,goal,envelope,anchor,normal,approach_options)
      row=dict(row,approach_mode=active_mode,alignment_waypoints=[dict(phase=k,tcp=v.tolist()) for k,v in waypoints])
+    elif row.get('proposal_source')=='observed_table_small_drop':
+     # The release pose already has clearance. Do not insist on another
+     # lowering phase; withdraw along the validated incoming path after release.
+     plan_phase='drop_approach';approach=planner.plan(q,goal[:3,3],goal[:3,:3])
+     lower=approach[-1:];retreat=approach[::-1].copy()
     elif active_mode=='top_down':
      plan_phase='approach';approach=planner.plan(q,goal[:3,3]+[0,0,max(.08,approach_options.entry_height)],goal[:3,:3]);plan_phase='lower';lower=planner.plan(approach[-1],goal[:3,3],goal[:3,:3]);plan_phase='retreat';retreat=lower[::-1].copy()
     else:

@@ -14,7 +14,8 @@ from cross_episode_sim.runtime.logging import TimestampedStream
 def main():
  sys.stdout=TimestampedStream(sys.stdout);sys.stderr=TimestampedStream(sys.stderr)
  p=argparse.ArgumentParser();p.add_argument('--episode',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
- p.add_argument('--transfer',type=int,default=6);p.add_argument('--observe-only',action='store_true');a=p.parse_args()
+ p.add_argument('--transfer',type=int,default=6);p.add_argument('--observe-only',action='store_true')
+ p.add_argument('--qwen-docking',action='store_true');a=p.parse_args()
  a.output.mkdir(parents=True,exist_ok=False)
  rec=a.episode/f'transfer_{a.transfer:03d}/carry/state_recording';pick=a.episode/f'transfer_{a.transfer-1:03d}/pick'
  m=mujoco.MjModel.from_binary_path(str(rec/'model.mjb'));d=mujoco.MjData(m)
@@ -22,6 +23,7 @@ def main():
  mujoco.mj_setState(m,d,state,mujoco.mjtState.mjSTATE_INTEGRATION);mujoco.mj_forward(m,d)
  from cross_episode_sim.evaluation.qwen_component_score import ComponentScore
  score=ComponentScore(m,d);runtime=EpisodeRuntime(a.output);runtime.bind(m,d)
+ runtime.qwen_docking=a.qwen_docking
  os.environ['SENSOR_SKILL_EXECUTION']='1'
  with runtime.activate(),episode_sensors(m,d) as sensors:
   from cross_episode_sim.navigation.shaped_docking import RobotGeometry

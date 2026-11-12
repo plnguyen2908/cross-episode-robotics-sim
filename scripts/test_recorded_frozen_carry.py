@@ -62,6 +62,16 @@ def main():
     calibration=SimpleNamespace(geometry=RobotGeometry(model))
     def make_departure():
         result=make_carry_departure(grid,calibration,known_map_only=True)
+        # Saved sensor history, including Qwen's short approach after the last
+        # route-graph station. Never reconstruct this connection from truth.
+        history=list(memory.poses)
+        for path in sorted(a.run.glob('qwen_redock_*/redock_*/state_recording/diagnostics.jsonl')):
+            for line in path.read_text().splitlines():
+                item=json.loads(line)
+                if item.get('accepted') and item.get('pose') is not None and item['timestamp']<=event['timestamp']:
+                    history.append(np.asarray(item['pose']))
+        history.append(anchor)
+        result.approach_poses=history
         if a.overlap_departure:
             from cross_episode_sim.navigation.overlap_departure import LocalOverlapDeparture
             result=LocalOverlapDeparture(result)

@@ -87,6 +87,11 @@ class QwenSkillInterface:
                 dock_result = self.redock(target=target, purpose=purpose, distance=options.get('redock_distance'))
             except RuntimeError as exc:
                 dock_result = dict(success=False, reason=str(exc))
+            except Exception as exc:
+                # A docking backend error fails this dock, not the whole recipe.
+                import traceback
+                traceback.print_exc()
+                dock_result = dict(success=False, reason=f'redock_backend_error: {type(exc).__name__}: {exc}')
             # A partial dock may already expose a reachable support. Attempt
             # the requested skill from the live pose; its native planner owns
             # executable motion. Preserve failed docking feedback separately.

@@ -20,11 +20,20 @@ class TrackingResult:
 
 
 class RGBDMapper:
+    @contextmanager
+    def matched_keyframes(self):
+        """Keep keyframe poses as matched for one stage; weak-match refinement resumes after it."""
+        self.refine_weak=False;self.bound_bridges=False
+        try:yield
+        finally:self.refine_weak=True;self.bound_bridges=True
+    def record_control(self,forward,yaw,dt,lateral=0.):
+        """Issued base motion bounds bridged steps; it is never integrated as progress."""
+        if self.tracker is not None:self.tracker.command(forward,yaw,dt,lateral)
     def __init__(self, device='CPU:0', voxel_size=.04, depth_max=6., min_fitness=.15, planar_base=True, tracking_backend='hybrid', recovery_factory=None, feature_width=None, feature_backend='opencv', fuse_dense=True):
         if tracking_backend not in ('hybrid','odometry'):raise ValueError('Unknown tracking backend')
         self.fuse_dense=fuse_dense
         if not fuse_dense and tracking_backend!='hybrid':raise ValueError('Localization-only requires hybrid tracking')
-        self.tracking_backend=tracking_backend;self.tracker=None;self.timestamps=[]
+        self.tracking_backend=tracking_backend;self.tracker=None;self.timestamps=[];self.refine_weak=True;self.bound_bridges=True
         self.recovery_factory=recovery_factory;self.feature_width=feature_width;self.feature_backend=feature_backend
         self.device = o3d.core.Device(device)
         self.voxel_size, self.depth_max, self.min_fitness = voxel_size, depth_max, min_fitness
@@ -116,6 +125,7 @@ class RGBDMapper:
             self.input.set_data_from_image('color',o3d.t.geometry.Image(o3d.core.Tensor(np.ascontiguousarray(camera.rgb),device=self.device)))
         status='tracking'
         if self.tracker is not None:
+            self.tracker.refine_weak=self.refine_weak;self.tracker.bound_bridges=self.bound_bridges
             event_count=len(self.tracker.keys.events)
             if getattr(self,'_precision_reference',None) is not None:
                 estimate,n,rmse,status=self._precision_update(camera.rgb,depth)

@@ -71,6 +71,43 @@ class FixedMapNavigator(SemanticNavigator):
         self.cached_transit=None;self.cache_attempted=False;self.route_events=[]
         self.route_config=config
 
+    def prepare_transit(self,tracking,now):
+        """Bind departure and routing to the same observed station costmap.
+
+        Keep station endpoints even when a sampled cached route needs A* repair.
+        A rejected cached polyline does not erase the previously visited station.
+        """
+        if getattr(self,'cache_attempted',True) or not tracking.accepted:
+            return
+        self.cache_attempted=True
+        from .route_memory import episode_routes
+        from cross_episode_sim.runtime.episode import current_runtime
+        memory=episode_routes();runtime=current_runtime()
+        if memory is None or runtime is None or runtime.mapper is None:
+            return
+        stations=memory.stations.get(self.destination,[])
+        if not stations:
+            return
+        anchor=runtime.mapper.last_result.T_map_base @ np.linalg.inv(tracking.T_map_base)
+        inverse=np.linalg.inv(anchor)
+        follower=FixedRoomWaypointFollower(self.grid,self.route_config)
+        follower.set_destinations([(inverse @ row['pose'])[:2,3] for row in stations])
+        follower.route_memory=memory;follower.route_destination=self.destination
+        follower.route_anchor=anchor
+        follower.layers(tracking.T_map_base[:2,3])
+        follower.events.append(dict(event='observed_station_transit',
+            destination=self.destination,endpoints=len(stations)))
+        self.cached_transit=follower
+        self.route_events=list(follower.events)
+
+    def departure_region(self,tracking,now):
+        self.prepare_transit(tracking,now)
+        follower=self.cached_transit or self.follower
+        follower.layers(tracking.T_map_base[:2,3])
+        if hasattr(follower,'destination_component'):
+            return follower.destination_component()
+        return follower.free.copy()
+
     def observe(self,packet,tracking):
         # Do not rerun a detector or VLM while following the known route.
         return
@@ -81,20 +118,7 @@ class FixedMapNavigator(SemanticNavigator):
         # it again would overwrite successful fixed-map transit with a scan error.
         if self.terminal:
             return self.follower._stop(self.terminal)
-        if not getattr(self,'cache_attempted',True) and tracking.accepted:
-            self.cache_attempted=True
-            from .route_memory import episode_routes
-            from cross_episode_sim.runtime.episode import current_runtime
-            memory=episode_routes();runtime=current_runtime()
-            if memory is not None and runtime.mapper is not None:
-                follower=FixedRoomWaypointFollower(self.grid,self.route_config)
-                follower.set_destinations([])
-                follower.route_memory=memory;follower.route_destination=self.destination
-                # Tracking result is stage-local; session result is continuous.
-                follower.route_anchor=runtime.mapper.last_result.T_map_base @ np.linalg.inv(tracking.T_map_base)
-                xy=tracking.T_map_base[:2,3];follower.layers(xy)
-                if follower._cached_route(xy,now):
-                    self.cached_transit=follower;self.route_events=list(follower.events)
+        self.prepare_transit(tracking,now)
         if getattr(self,'cached_transit',None) is not None:
             command=self.cached_transit.step(packet,tracking,now)
             self.route_events=list(self.cached_transit.events)

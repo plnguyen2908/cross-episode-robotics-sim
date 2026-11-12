@@ -365,3 +365,17 @@ def test_exploration_unknown_floor_does_not_disable_obstacle_checks():
     ordinary=ObservedShapeChecker(g,boxes(),np.zeros(3))
     assert not ordinary.clear(np.array([-.8,0.,0.]))
     assert ordinary.detail['reason']=='unobserved_base_support'
+
+
+def test_unverified_surface_on_a_frozen_map_falls_back_to_the_observation_turn():
+    # Set-table run 16, call 10: the cup was confirmed 1.4 m away, the support
+    # surface could not be fitted from there, and no earlier plan had created a
+    # checker. Reading its detail raised instead of turning to look.
+    from cross_episode_sim.navigation.local_scan import ScanConfig
+    g=grid();g.fixed_obstacle_points=np.zeros((0,3))
+    d=ShapedDocking(g,NS(boxes=lambda q:boxes()))
+    d.reset(NS(position=np.array([.8,-.5,.9])))
+    packet=NS(timestamp=0.,arm=NS(position=np.array(ScanConfig().stowed_arm)),cameras={})
+    result=d.step(packet,NS(accepted=True,T_map_base=np.eye(4)),0.)
+    assert [e['event'] for e in d.events][:2]==['surface_unverified','observe_approach_floor']
+    assert d.terminal is None and result['forward']==0 and result['yaw']<0

@@ -147,7 +147,9 @@ def main(*, docking_factory=None, pointing_factory=None):
     # Navigation needs an occupancy map, not diagnostic 3D scene exports.
     hydra_frames=None
     artifacts.write_text(a.output/'configuration.json',json.dumps(dict(station_exploration=a.station_exploration,dense_3d_reconstruction=False,navigation_representation='2d_occupancy_with_height_clearance',source=str(a.source),preserve_initial_state=a.preserve_initial_state,navigation_mode=a.navigation_mode,goal_room=a.goal_room,ring_checkpoint=str(a.ring_checkpoint) if a.ring_checkpoint else None,ring_device=a.ring_device,target=a.target,preferred_distance=a.preferred_distance,object_map=a.object_map,explorer=a.explorer,perception=a.perception,proposal_backend='molmo2_fastsam',vlm_model=a.vlm_model,vlm_device=a.vlm_device,seconds=a.seconds,initial_backoff=a.initial_backoff,initial_yaw_offset=a.initial_yaw_offset,doors_initialized_open=doors),indent=2))
-    with ring_context,mapper_context,planner_context,OnboardSensorInterface(model,data) as sensors,StateVideoRecorder(model,data,a.output/'state_recording') as recording,open(a.output/'progress.jsonl','w',buffering=1) as log:
+    # Station exploration is qualified on matched keyframe poses; weak-match refinement resumes for later stages.
+    keyframe_context=slam.matched_keyframes() if a.station_exploration and hasattr(slam,'matched_keyframes') else nullcontext()
+    with keyframe_context,ring_context,mapper_context,planner_context,OnboardSensorInterface(model,data) as sensors,StateVideoRecorder(model,data,a.output/'state_recording') as recording,open(a.output/'progress.jsonl','w',buffering=1) as log:
         for tick in tqdm(range(round(a.seconds*50)+10),desc='Visual target navigation'):
             if tick%5==0:
                 packet=sensors.capture(include_robot_mask=False);tracking=slam.update(packet.cameras['navigation'],packet.timestamp)

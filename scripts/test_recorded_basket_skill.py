@@ -14,6 +14,7 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--receptacle',required=True,choices=['orange basket','purple basket'])
     p.add_argument('--pick',type=Path,help='Restore occluded payload from pre-grasp RGB-D and recorded encoders')
+    p.add_argument('--place-only',action='store_true',help='Test release directly at the recorded dock, without repeating navigation')
     p.add_argument('--last-frame',action='store_true',help='Continue from the end of the saved carry')
     a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
     m=mujoco.MjModel.from_binary_path(str(a.recording/'model.mjb'));d=mujoco.MjData(m)
@@ -58,12 +59,20 @@ def main():
         pipeline.current_station='kitchen'
         error=None
         try:
-            placed,dock=place_in_basket(pipeline,a.output,source,a.receptacle,
-                'inside bottom of the '+a.receptacle,'kitchen',1,
-                lambda *v:print('PROGRESS',*v,flush=True))
+            if a.place_only:
+                placed=a.output/'place'
+                pipeline.stage('basket_drop',[sys.executable,'scripts/test_basket_place.py',
+                    '--dock',str(source),'--current-pose','--receptacle','inside bottom of the '+a.receptacle,
+                    '--semantic-receptacle',a.receptacle,'--output',str(placed)],
+                    placed/'report.json','execution_success')
+            else:
+                placed,dock=place_in_basket(pipeline,a.output,source,a.receptacle,
+                    'inside bottom of the '+a.receptacle,'kitchen',1,
+                    lambda *v:print('PROGRESS',*v,flush=True))
         except Exception as exc:
             import traceback;traceback.print_exc();error=str(exc)
-        private=score.placement(d,'grocery_in_basket',basket=a.receptacle)
+        from cross_episode_sim.evaluation.basket_support import basket_release_score
+        private=basket_release_score(m,d,score.initially_held,a.receptacle)
         result=dict(private_placement=private,error=error,stages=pipeline.stages,
             scope='recorded-state production basket skill, fresh local RGB-D obstacles and recorded floor')
         artifacts.write_text(a.output/'report.json',json.dumps(result,indent=2))

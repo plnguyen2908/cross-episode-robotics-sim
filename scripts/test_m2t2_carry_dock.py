@@ -129,6 +129,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     continue
   # Leave the close grasp dock before asking the room explorer to rotate.
   # Distance and route come from observed floor/obstacles, not a fixed retreat.
+  if a.known_map_only:policy.prepare_transit(tracking,float(d.time))
   active_follower=getattr(policy,'cached_transit',None) or policy.follower
   if departure_done and a.known_map_only and tick%5==0 and outside_transit_region(active_follower,tracking):
    departure=make_carry_departure(grid,payload,known_map_only=a.known_map_only,allow_initial_overlap_exit=a.allow_initial_overlap_exit);departure_done=False
@@ -137,12 +138,16 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    print(json.dumps(active_follower.events[-1]),flush=True)
   if not departure_done:
    if departure_map_stamp!=packet.timestamp:
-    policy.explorer.layers(tracking.T_map_base[:2,3]);departure_map_stamp=packet.timestamp
+    if a.known_map_only:
+     departure_free=policy.departure_region(tracking,float(d.time))
+    else:
+     policy.explorer.layers(tracking.T_map_base[:2,3]);departure_free=policy.explorer.free
+    departure_map_stamp=packet.timestamp
    row,col=policy.explorer.cell(tracking.T_map_base[:2,3])
-   if departure.follower is None and recovering_follower is None and policy.explorer.free[row,col]:
+   if departure.follower is None and recovering_follower is None and departure_free[row,col]:
     departure_done=True
    else:
-    command=measured('departure_planning_and_following',departure.step,packet,tracking,policy.explorer.free,float(d.time))
+    command=measured('departure_planning_and_following',departure.step,packet,tracking,departure_free,float(d.time))
     if departure.error:
      status=departure.error;guard_detail=departure.docking.checker.detail if departure.docking.checker else None;break
     departure_done=command['status']=='undock_complete'

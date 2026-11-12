@@ -29,7 +29,7 @@ def surface_description(receptacle,region):
 
 
 class SensorHouseholdPipeline(SensorSetTablePipeline):
-    def _finish_component_place(self,ctx,outcome,placed,progress):
+    def _finish_component_place(self,ctx,outcome,placed,progress,observed_map=None):
         """Only a completed release can hand off to empty-hand navigation."""
         if not outcome['success']:
             # A failed planning call can still provide a valid live checkpoint.
@@ -39,10 +39,10 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             progress('observe_dock_place','failed')
             return SkillOutcome(False,outcome.get('reason','placement_failed'))
         if placed is None:raise RuntimeError('Placement returned no live handoff')
-        ctx.update(held=None,continuation=placed)
+        ctx.update(held=None,carry=None,continuation=placed)
         continuation=ctx['root']/'return'
         self.stage(f"{ctx['number']}_return",[sys.executable,'scripts/prepare_m2t2_return.py',
-            '--place',str(placed),'--observed-map',str(placed),
+            '--place',str(placed),'--observed-map',str(observed_map or placed),
             '--output',str(continuation)],continuation/'report.json')
         ctx.update(held=None,continuation=continuation)
         progress('observe_dock_place','completed')
@@ -179,6 +179,11 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             nonlocal fixtures
             from ..runtime.appliance_controls import invalidate_appliance_targets
             invalidate_appliance_targets(self.runtime)
+            if destination is not None and ctx.get('held') is None:
+                # A failed pickup leaves nothing to carry; the previous
+                # object's pickup handoff must not stand in for it.
+                progress('navigation','failed')
+                return SkillOutcome(False,'no_held_object_to_carry')
             ctx['number']+=1;n=ctx['number'];root=self.output/f'transfer_{n:03d}';root.mkdir()
             progress('navigation','running')
             if destination is None:
@@ -272,6 +277,9 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 outcome=prepared_session.execute_skill('place',dict(receptacle=receptacle,region=region))
                 placed=getattr(prepared_session,'last_placement_output',None)
                 return self._finish_component_place(ctx,outcome,placed,progress)
+            if ctx.get('held') is None:
+                progress('observe_dock_place','failed')
+                return SkillOutcome(False,'no_held_object_to_place')
             progress('observe_dock_place','running');n=ctx['number'];root=ctx['root'];carry=ctx['carry']
             perception=root/'receptacle_perception';dock=root/'place_dock';placed=root/'place'
             description=surface_description(receptacle,region)
@@ -339,11 +347,8 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 ctx.update(continuation=placed,carry=placed)
                 progress('observe_dock_place','failed')
                 return SkillOutcome(False,outcome.get('error') or 'placement_failed')
-            continuation=root/'return'
-            self.stage(f'{n}_return',[sys.executable,'scripts/prepare_m2t2_return.py','--place',str(placed),
-                '--observed-map',str(dock),'--output',str(continuation)],continuation/'report.json')
-            ctx.update(held=None,continuation=continuation)
-            progress('observe_dock_place','completed');return SkillOutcome(True,'release_commands_completed')
+            return self._finish_component_place(ctx,
+                dict(success=True,reason='release_commands_completed'),placed,progress,observed_map=dock)
         def fixture(name,**kw):
             nonlocal fixtures
 

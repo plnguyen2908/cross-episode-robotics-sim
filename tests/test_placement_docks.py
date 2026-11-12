@@ -54,3 +54,22 @@ def test_search_does_not_execute_an_unverified_connector():
     dock=SimpleNamespace(make_checker=lambda pose,q:checker,events=[])
     assert not plan_to_any_dock(dock,np.zeros(3),np.zeros(7),[np.array([.1,0.,0.])],max_nodes=10)
     assert dock.path is None
+
+
+def test_dock_with_carried_arm_over_the_support_edge_is_rejected():
+    from cross_episode_sim.navigation.placement_docks import retained_arm_clear
+    from cross_episode_sim.navigation.shaped_docking import RobotBox
+    base=RobotBox('robot_0/base/collision',np.array([0.,0.,.17]),np.eye(3),np.array([.24,.24,.17]))
+    link=RobotBox('robot_0/fr3_link2_collision',np.array([0.,0.,.74]),np.eye(3),np.array([.10,.10,.17]))
+    # A table top at 0.82 m whose near edge runs along map x=1; the low base fits beneath it.
+    xs,ys=np.meshgrid(np.arange(1.,1.8,.02),np.arange(-.6,.6,.02))
+    table=np.c_[xs.ravel(),ys.ravel(),np.full(xs.size,.82)]
+    assert retained_arm_clear([base,link],np.array([.80,0.,0.]),table)
+    assert not retained_arm_clear([base,link],np.array([.94,0.,0.]),table)
+    # The same position turned away from the edge still has the link beside it.
+    assert not retained_arm_clear([base,link],np.array([.94,0.,np.pi/2]),table)
+    # Dock and support are in one map frame at any heading and base height.
+    turned=np.c_[-table[:,1],table[:,0],table[:,2]+.3]
+    assert retained_arm_clear([base,link],np.array([0.,.80,np.pi/2]),turned,base_height=.3)
+    assert not retained_arm_clear([base,link],np.array([0.,.94,np.pi/2]),turned,base_height=.3)
+    assert retained_arm_clear([base,link],np.array([.94,0.,0.]),np.empty((0,3)))

@@ -19,8 +19,24 @@ def above_support_mask(camera, mask):
     ring = binary_dilation(mask, iterations=12) & ~mask & valid
     if ring.sum() < 30:
         return None
-    levels, counts = np.unique(np.round(height[ring]/.005), return_counts=True)
-    support = float(levels[counts.argmax()]*.005)
+    # A merged bottle/table mask can put the surrounding ring on the FLOOR.
+    # Include the mask itself when finding broad horizontal support planes;
+    # otherwise the entire tabletop is incorrectly retained as foreground.
+    xyz=optical@camera.T_base_optical[:3,:3].T+camera.T_base_optical[:3,3]
+    region=(ring|mask)&valid
+    levels,counts=np.unique(np.round(height[region]/.005),return_counts=True)
+    planes=[]
+    for level,count in zip(levels,counts):
+        if count<30:continue
+        band=region&(abs(height-level*.005)<.006)
+        xy=xyz[band,:2]
+        if len(xy)<30:continue
+        _,_,axes=np.linalg.svd(xy-xy.mean(0),full_matrices=False)
+        extent=np.ptp(xy@axes.T,axis=0)
+        if extent.max()>.25 and extent.min()>.10:
+            planes.append(float(level*.005))
+    if not planes:return None
+    support=max(planes)
     foreground = mask & valid & (height > support+.012)
     components, count = label(foreground)
     if not count:

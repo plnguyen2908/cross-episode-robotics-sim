@@ -24,10 +24,12 @@ class PipelineRedocking:
         print('QWEN_PIPELINE_REDOCK',purpose,target,str(root),flush=True)
         session=live_session(p.runtime,root,previous,self.fixtures(),target,
                              held=ctx.get('held') if purpose=='place' else None)
-        if purpose=='pick' and target in ('bowl','cup'):
+        if purpose=='pick' and target in ('bowl','cup','packaged drink','packaged snack'):
             from ..code_policy.redocking import SensorRedocking
             import numpy as np
-            report=json.loads(artifacts.read_text(previous/'report.json'))
+            # A handoff saved after a failed call has no navigation report;
+            # the redock then looks for the target in its own fresh view.
+            report=json.loads(artifacts.read_text(previous/'report.json')) if artifacts.exists(previous/'report.json') else {}
             observed=report.get('selected_object')
             if observed and observed.get('label')==target:
                 # Navigation's point is an observed association, not a grasp.
@@ -36,7 +38,11 @@ class PipelineRedocking:
                 metadata=json.loads(artifacts.read_text(previous/'slam/mapper.json'))
                 old_anchor=np.asarray(metadata.get('global_anchor',np.eye(4)))
                 point=session.mapper.inverse@old_anchor@np.r_[observed['position'],1.]
-                session._redocking=SensorRedocking(p.runtime,session.sensors,session.mapper)
+                redocking_class=SensorRedocking
+                if target in ('packaged drink','packaged snack'):
+                    from ..code_policy.grocery_redocking import GroceryRedocking
+                    redocking_class=GroceryRedocking
+                session._redocking=redocking_class(p.runtime,session.sensors,session.mapper)
                 session._redocking.target_point=point[:3]
                 session._redocking.target_label=target
                 session._redocking.preserve_target=True

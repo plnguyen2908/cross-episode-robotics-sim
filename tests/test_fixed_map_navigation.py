@@ -179,3 +179,30 @@ def test_cached_centerline_near_cell_boundary_requests_repair_before_motion():
     assert f.cached_route_needs_repair and f.detour_turn_in_place
     np.testing.assert_array_equal(f._recovery_destination,goal)
     np.testing.assert_array_equal(f.free,before)
+
+
+def test_first_carry_uses_exploration_station_when_cached_path_needs_repair(monkeypatch):
+    from cross_episode_sim.navigation import route_memory
+    from cross_episode_sim.runtime import episode
+    from cross_episode_sim.navigation.house_exploration import HouseExplorationConfig
+    from cross_episode_sim.perception.visual_targets import VisualTarget
+    from cross_episode_sim.navigation.fixed_map import FixedRoomWaypointFollower
+    g=ObservedNavigationMap(MapConfig(extent_m=6.,resolution=.1));g.floor_views[:]=2
+    freeze_map(g)
+    endpoint=np.eye(4);endpoint[0,3]=1.
+    memory=NS(stations={'dining table':[dict(pose=endpoint,kind='successful_station_exploration')]},
+              candidates=lambda *args:[])
+    monkeypatch.setattr(route_memory,'episode_routes',lambda:memory)
+    monkeypatch.setattr(episode,'current_runtime',lambda:NS(mapper=NS(last_result=NS(T_map_base=np.eye(4)))))
+    # No cached polyline is available; the remembered station must survive.
+    monkeypatch.setattr(FixedRoomWaypointFollower,'_cached_route',lambda *args:False)
+    target=VisualTarget(track_id=0,label='dining table',position=np.array([2.,0.,.8]),score=1.,observations=2)
+    nav=FixedMapNavigator(g,[target],HouseExplorationConfig())
+    tracking=NS(accepted=True,T_map_base=np.eye(4))
+    region=nav.departure_region(tracking,0.)
+    assert nav.cached_transit is not None
+    f=nav.cached_transit
+    np.testing.assert_allclose(f.destinations,[endpoint[:2,3]])
+    assert region[f.cell(np.zeros(2))]
+    assert f._plan(np.zeros(2),0.) is None
+    np.testing.assert_allclose(f.goal,endpoint[:2,3],atol=.08)

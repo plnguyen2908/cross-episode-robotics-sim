@@ -24,6 +24,38 @@ def tuck_payload_before_place(runtime,tool_points,output):
                                    joint_posture=np.asarray(ScanConfig().stowed_arm))
 
 
+def plan_loaded_stow(planner,joints,posture,held_clear):
+    """Stow a loaded arm along the first route clear for arm and held object.
+
+    The arm planner does not model the held object, and a direct joint sweep
+    can carry it through an observed rim. Staged routes fold part of the arm
+    before the remaining joints move. Every route passes the same arm and
+    held-surface checks; none relaxes clearance.
+    """
+    from .fixture_posture import plan_fixture_stow
+    joints=np.asarray(joints,float);posture=np.asarray(posture,float)
+    def staged(first):
+        middle=joints.copy();middle[list(first)]=posture[list(first)]
+        allow=planner.allow_curobo_fallback;planner.allow_curobo_fallback=False
+        try:return np.concatenate([planner.plan_joint_goal(joints,middle),planner.plan_joint_goal(middle,posture)[1:]])
+        finally:planner.allow_curobo_fallback=allow
+    routes=(('direct',lambda:plan_fixture_stow(planner,joints,posture)),
+            ('shoulder_first',lambda:staged((1,))),('shoulder_elbow_first',lambda:staged((1,3))),
+            ('wrist_first',lambda:staged((4,5,6))))
+    rejected=[]
+    for name,build in routes:
+        try:path=build()
+        except RuntimeError as exc:rejected.append(dict(route=name,reason=str(exc)));continue
+        if held_clear(path):
+            if rejected:print('LOADED_STOW_ROUTE',json.dumps(dict(route=name,rejected=rejected)),flush=True)
+            return path,name
+        rejected.append(dict(route=name,reason='held surface sweep blocked'))
+    print('LOADED_STOW_REJECTED',json.dumps(rejected),flush=True)
+    if any(row['reason']=='held surface sweep blocked' for row in rejected):
+        raise RuntimeError('Observed held surface blocks clearance posture')
+    raise RuntimeError(rejected[0]['reason'])
+
+
 def raise_payload_clearance(runtime,tool_points,output,target_height=1.25,lateral_offset=None,
                             joint_posture=None):
     output.mkdir(parents=True,exist_ok=False)
@@ -44,10 +76,14 @@ def raise_payload_clearance(runtime,tool_points,output,target_height=1.25,latera
     if lateral_offset is not None:target[1]=float(lateral_offset)
     strategy='vertical_clearance'
     from scipy.spatial.transform import Rotation
-    path=None
+    path=None;stow_route=None
     if joint_posture is not None:
-        from .fixture_posture import plan_fixture_stow
-        path=plan_fixture_stow(planner,q,joint_posture)
+        def held_clear(candidate):
+            for joints in candidate:
+                T=geometry.tcp_pose(joints);xyz=tool_points[::max(1,len(tool_points)//200)]@T[:3,:3].T+T[:3,3]
+                if not planner.world_clear(np.c_[xyz,np.full(len(xyz),.006)][None],margin=.002):return False
+            return True
+        path,stow_route=plan_loaded_stow(planner,q,joint_posture,held_clear)
         strategy='loaded_tuck_before_fresh_placement_plan'
     for pitch in (() if joint_posture is not None else (0.,-30.,30.,-60.,60.,-90.,90.,180.)):
         rotation=Rotation.from_euler('y',pitch,degrees=True).as_matrix()@tcp[:3,:3]
@@ -85,6 +121,6 @@ def raise_payload_clearance(runtime,tool_points,output,target_height=1.25,latera
     result=dict(success=True,simulated_seconds=float(d.time)-start,
                 reason=('settled neutral arm before fresh placement perception and IK' if joint_posture is not None
                         else 'clearance for loaded local docking' if lateral_offset is None else 'uncover target after docking'),
-                strategy=strategy,requested_height=target_height,requested_lateral_offset=lateral_offset,
+                strategy=strategy,stow_route=stow_route,requested_height=target_height,requested_lateral_offset=lateral_offset,
                 actual_tcp=geometry.tcp_pose(controller.robot_view.get_move_group('arm').joint_pos)[:3,3].tolist())
     (output/'report.json').write_text(json.dumps(result,indent=2));return result

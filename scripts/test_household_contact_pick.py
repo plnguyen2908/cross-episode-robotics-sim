@@ -66,11 +66,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   boxes,world_stats=build_observed_boxes(g,T,points,target)
   print('OBSERVED_WORLD',world_stats,flush=True)
   artifacts.write_text(a.output/'observed_world.json',json.dumps([dict(name=b.name,pose=b.pose,dims=b.dims) for b in boxes],indent=2))
-  from cross_episode_sim.control.m2t2_policy import filter_observed_contacts
-  before=len(rows);contact_mask=observed_target_mask(points,target,world_stats['support_z'])
-  rows=filter_observed_contacts(rows,points[contact_mask])
-  artifacts.write_text(a.output/'proposal_filter.json',json.dumps(dict(before=before,after=len(rows),reason='Predicted contact must match connected observed target surface',tolerance_m=.015),indent=2))
-  if not rows:raise RuntimeError('No M2T2 contacts match the observed target surface; no arm path attempted')
+  # Target selection/cropping is upstream. Do not veto learned proposals
+  # again with a hard contact-to-surface distance threshold before planning.
+  contact_mask=observed_target_mask(points,target,world_stats['support_z'])
+  artifacts.write_text(a.output/'proposal_filter.json',json.dumps(dict(
+      before=len(rows),after=len(rows),enabled=False,
+      reason='No additional contact matching; target-conditioned proposals go to arm planning'),indent=2))
   from cross_episode_sim.control.household_grasp import grasp_world_capacity
   capacity=grasp_world_capacity(requested_category,len(boxes),points[contact_mask])
   arm=sensor_arm_planner(kinematics=robot_calibration(m,d,a.output/'robot'),collision_cache={'cuboid':capacity, 'mesh':2},activation_distance=.012 if a.household_grasp else None)
@@ -94,6 +95,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    from cross_episode_sim.control.fixture_approach import calibrated_finger_planner
    planner=calibrated_finger_planner(arm,geo,boxes,m,d,allow_curobo_fallback=True)
    approach_planner=calibrated_finger_planner(arm,geo,boxes+target_boxes,m,d,allow_curobo_fallback=True)
+  pad_enclosure=None
   if a.household_grasp:
    # Prefer a confident grip away from the support surface. Sorting only by
    # shoulder distance favored low bottle contacts that tipped the object.
@@ -108,6 +110,11 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    from cross_episode_sim.control.grasp_linkage_ranking import GraspLinkageRanker
    link_ranker=GraspLinkageRanker(contact_geometry,measured(),points[contact_mask])
    rows=link_ranker.iter_ranked(variants)
+   # The linkage checks exclude the pads and one view hides the far faces.
+   # Reject open pads inside the target completed down to its support: such
+   # corner grasps wedge a box out and close empty.
+   from cross_episode_sim.control.grasp_pad_enclosure import MAX_FACE_SKEW_DEG,PadEnclosure
+   pad_enclosure=PadEnclosure(contact_geometry,measured(),points[contact_mask],world_stats['support_z'])
   if ('cookware' in requested_category or requested_category.startswith('food container')):
    from cross_episode_sim.control.grasp_linkage_ranking import GraspLinkageRanker
    from cross_episode_sim.control.rim_contact_refinement import outward_rim_contacts
@@ -127,6 +134,10 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
      # Necessary endpoint check before six IK seeds and the free approach.
      # The full insertion sweep is still checked at the solved robot poses.
      if link_ranker.blocked(tcp):raise RuntimeError('Observed target blocks endpoint linkage')
+     if pad_enclosure is not None and pad_enclosure.blocked(tcp):raise RuntimeError('Support-completed target blocks open finger pad')
+     if pad_enclosure is not None:
+      skew=pad_enclosure.face_skew(tcp)
+      if skew is not None and skew>MAX_FACE_SKEW_DEG:raise RuntimeError(f'Support-completed target faces skewed {skew:.0f} deg to finger pads')
      if not planner.solve(measured(),goal,R):raise RuntimeError('No collision-clear contact endpoint')
      planning_stage='approach'
     pre=goal-a.approach_offset*R[:,2]

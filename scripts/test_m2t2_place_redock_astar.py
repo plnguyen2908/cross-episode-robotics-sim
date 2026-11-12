@@ -9,6 +9,7 @@ from cross_episode_sim.runtime.episode import episode_sensors as OnboardSensorIn
 from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
 from cross_episode_sim.navigation.shaped_docking import RobotGeometry,ShapedDocking
+from cross_episode_sim.navigation.basket_docking import FrozenBasketDocking
 from cross_episode_sim.control.observed_payload import ObservedPayload
 from cross_episode_sim.control.observed_placement import supported_interior,free_approach_targets
 from cross_episode_sim.control.onboard_base import OnboardBaseActuator
@@ -57,7 +58,9 @@ frozen_digest=freeze_map(grid);wall_start=time.monotonic()
 class LoadedDock(ShapedDocking):
  def make_checker(self,pose,q):
   return checker
-dock=LoadedDock(grid,geo,max_nodes=3000);route=None
+# Qwen base approaches use the frozen 2D map. Arm planning follows arrival.
+# Preserve the qualified legacy non-Qwen controller path.
+dock=(FrozenBasketDocking if guided else LoadedDock)(grid,geo,max_nodes=3000);route=None
 from cross_episode_sim.control.execution_monitor import PlannedMotionMonitor
 execution_monitor=PlannedMotionMonitor()
 def execution_guard(forward,yaw,dt):
@@ -83,9 +86,11 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
      surface_in_map=True
     if not supports:supports.append(pose.copy())
     if np.linalg.norm(pose[:2]-supports[-1][:2])>.025:supports.append(pose.copy())
-    if checker is None:checker=payload.checker(grid,packet.arm.position,pose,supports)
+    if checker is None:
+     checker=(dock.make_checker(pose,packet.arm.position) if guided else
+              payload.checker(grid,packet.arm.position,pose,supports))
     checker.remember_support(pose)
-    if route is None:checker.update_live_points(live_obstacle_points(packet,tracking))
+    if not guided and route is None:checker.update_live_points(live_obstacle_points(packet,tracking))
   if not tracking.accepted:
    base.step(0,0);continue
   T=tracking.T_map_base;pose=np.r_[T[:2,3],np.arctan2(T[1,0],T[0,0])]
@@ -95,9 +100,19 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    guided=bool(getattr(current_runtime(),'qwen_docking',False))
    candidates=[];chosen_targets={};reach_cache={};rejected={}
    proposal_checker=checker
-   for proposal in placement_docks(targets,pose,preferred_targets=preferred_targets):
+   from cross_episode_sim.navigation.placement_docks import retained_arm_clear
+   arm_boxes=geo.boxes(packet.arm.position)
+   proposals=placement_docks(targets,pose,preferred_targets=preferred_targets)
+   if guided:
+    # The base-only route layer does not see the carried arm. Offer Qwen only
+    # docks where that posture clears the measured support; a deep target
+    # needs the longer standoffs for that.
+    proposals+=placement_docks(targets,pose,distances=(.74,.82,.90),preferred_targets=preferred_targets)
+   for proposal in proposals:
     if not proposal_checker.clear(proposal.pose):
      reason=proposal_checker.detail['reason'];rejected[reason]=rejected.get(reason,0)+1;continue
+    if guided and not retained_arm_clear(arm_boxes,proposal.pose,fused_map,float(T[2,3])):
+     rejected['retained_arm_over_support']=rejected.get('retained_arm_over_support',0)+1;continue
     # Preserve the qualified non-Qwen table baseline. Qwen approaches first.
     if not guided:
      key=(proposal.distance,round(float(proposal.target[2]),2))
@@ -167,4 +182,7 @@ if success:
   station=perception_report.get('station') or (arrival.get('selected_object') or {}).get('label','dining table')
   route_memory.record_dock(slam.trajectory,slam.anchor,station)
 report=dict(fixed_map_unchanged=unchanged,initial_map_sha256=frozen_digest,final_map_sha256=map_digest(grid),wall_seconds=time.monotonic()-wall_start,dense_fusion=False,private_hold_retained=retained,contact_diagnostics=list(audit.events.values()),placement_target_base=target_base[:3].tolist(),docking_heading_error_rad=heading_error,docking_success=success,error=error,guard_detail=detail,target_observed=target.tolist(),selected_dock_pose=None if getattr(dock,'goal',None) is None else dock.goal.tolist(),simulated_seconds=float(d.time-start),route_events=dock.events,scope='Observed A-star local redock from supplied physical checkpoint; cross-room navigation scored separately.')
+report.update(base_collision_source='frozen_2d_base_height_slice' if guided else 'loaded_3d',
+              live_depth_collision_veto=not guided,arm_payload_docking_veto=not guided,
+              retained_arm_support_filter=guided)
 artifacts.write_text(a.output/'report.json',json.dumps(report,indent=2));print(json.dumps(report),flush=True)

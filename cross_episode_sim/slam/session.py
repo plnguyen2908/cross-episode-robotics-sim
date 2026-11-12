@@ -30,6 +30,7 @@ class TrackingSession:
             self.planar_motion=PlanarVisualMotion()
     def record_control(self,forward,yaw,dt,lateral=0.):
         if self.planar_motion is not None:self.planar_motion.command(forward,yaw,dt,lateral)
+        if hasattr(self.mapper,'record_control'):self.mapper.record_control(forward,yaw,dt,lateral)
     def update(self,camera,timestamp):
         if self.last_result is not None and timestamp==self.last_result.timestamp:
             return self.last_result
@@ -53,6 +54,7 @@ class TrackingSession:
             self.timestamps.append(timestamp);self.trajectory.append(result.T_map_base.copy())
         return result
     def fixed_reference(self, **kwargs):return self.mapper.fixed_reference(**kwargs)
+    def matched_keyframes(self):return self.mapper.matched_keyframes()
     def view(self):return StageTrackingView(self)
 
 
@@ -65,6 +67,7 @@ class StageTrackingView:
         self.anchor=np.eye(4) if last is None or session.global_frame else last.T_map_base.copy()
         self.inverse=np.linalg.inv(self.anchor)
     def fixed_reference(self, **kwargs):return self.session.fixed_reference(**kwargs)
+    def matched_keyframes(self):return self.session.matched_keyframes()
     @property
     def last_timestamp(self):
         last=self.session.last_result

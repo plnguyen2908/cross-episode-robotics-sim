@@ -3,10 +3,10 @@ import numpy as np
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
 from cross_episode_sim.navigation.fixed_map import freeze_map,map_digest
 from cross_episode_sim.navigation.shaped_docking import RobotBox
-from cross_episode_sim.navigation.carry_departure import make_carry_departure,FrozenBaseDepartureDocking
+from cross_episode_sim.navigation.carry_departure import make_carry_departure
 
 
-def test_frozen_departure_uses_base_footprint_not_payload_veto():
+def test_frozen_departure_has_no_second_shape_veto():
     grid=ObservedNavigationMap(MapConfig(extent_m=4.,resolution=.05))
     grid.floor_views[:]=3
     # Upper-cabinet point overlaps the extended payload, outside the base.
@@ -15,12 +15,10 @@ def test_frozen_departure_uses_base_footprint_not_payload_veto():
     base=RobotBox('robot_0/base/collision',np.array([0,0,.25]),np.eye(3),np.array([.25,.25,.2]))
     payload=NS(geometry=NS(boxes=lambda q:[base]))
     skill=make_carry_departure(grid,payload,known_map_only=True)
-    assert isinstance(skill.docking,FrozenBaseDepartureDocking)
+    from cross_episode_sim.navigation.recorded_departure import RecordedDeparture
+    assert isinstance(skill,RecordedDeparture)
     assert not skill.runtime_collision_stop
-    checker=skill.docking.make_checker(np.zeros(3),np.zeros(7))
-    assert checker.clear(np.zeros(3))
-    assert not checker.clear(np.array([.5,0,0]))  # Obstacle still blocks base.
-    assert checker.swept(np.zeros(3),np.array([-.3,0,0]))
+    assert skill.docking.checker is None
     assert map_digest(grid)==before
 
 

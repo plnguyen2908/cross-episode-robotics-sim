@@ -39,6 +39,26 @@ def placement_docks(targets, current_pose, distances=(.58,.66,.50), angle_count=
     return sorted(result,key=cost)
 
 
+def retained_arm_clear(boxes, pose, support, base_height=0., margin=.05):
+    """Is the carried arm posture clear of the observed support at this dock?
+
+    ``boxes`` are calibrated robot boxes in the base frame at the retained
+    joints; ``support`` holds measured support points in the dock's map frame.
+    Arm planning starts from this posture, so a link resting within the margin
+    of the support leaves no valid first motion. The base footprint is checked
+    separately by the route layer.
+    """
+    support=np.asarray(support,float).reshape(-1,3)
+    if not len(support):return True
+    c,s=np.cos(pose[2]),np.sin(pose[2])
+    local=support-np.r_[np.asarray(pose[:2],float),base_height]
+    local=np.c_[c*local[:,0]+s*local[:,1],-s*local[:,0]+c*local[:,1],local[:,2]]
+    for box in boxes:
+        if box.name.startswith('robot_0/base/'):continue
+        if np.all(np.abs((local-box.center)@box.axes)<=box.half+margin,axis=1).any():return False
+    return True
+
+
 def plan_to_any_dock(dock, pose, q, candidates, max_nodes=4000):
     """One shared A* search to any observed, facing dock, not one search per pose."""
     import heapq

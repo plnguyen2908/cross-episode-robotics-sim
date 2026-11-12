@@ -168,3 +168,35 @@ payload and live-state handoffs. Log the actual interface and redock decisions.
 Keep the prior qualified non-Qwen set-table behavior accessible with
 `--legacy-m2t2-interface`; changing the Qwen dispatch is not requalification of
 all five tasks. Test each physical recipe separately.
+
+## Object-grasp contact matching — November 11, 2026
+
+User decision: remove the additional 1.5 cm predicted-contact-to-target-surface
+veto before arm planning in the object pickup executors and focused household
+proposal path. Keep upstream visual target selection/cropping, valid action
+representations, native cuRobo motion planning, physical grasp execution and
+private task scoring. A failed contact-matching filter is not evidence that a
+physical grasp failed. Removing it does not certify IK, correct-object pickup,
+or full-task success. Appliance handle grounding is a separate path.
+
+## Grocery docking uses the frozen 2D map — November 11, 2026
+
+User decision: basket placement docking/redocking must use the frozen observed
+2D occupied map at the calibrated base height and calibrated base footprint.
+Do not project countertop/overhead-only observations into base-height obstacles.
+Do not veto candidate base poses
+or routes using fresh depth, reconstructed held-object volume, or retained arm
+3D overlap. Apply this to candidate filtering and subsequent route planning.
+Keep physical collisions, localization, Qwen ranking, native base-route planning,
+and post-arrival cuRobo arm planning. Unknown floor remains allowed for local
+redocking. This supersedes earlier retained-arm/payload sweep requirements for
+this grocery docking path only; physical success still requires testing.
+
+## Qwen table docking uses the frozen 2D map — November 11, 2026
+
+Extend frozen base-height 2D docking to Qwen dining-table placement. Do not
+reject docking candidates/routes using a second live-depth mast, arm or held
+payload overlap check. Keep calibrated base-footprint route planning, physical
+collisions, fresh post-arrival manipulation perception, native arm planning and
+private semantic scoring. Preserve the legacy non-Qwen implementation. A
+recorded-state component retry is not full-pipeline qualification.

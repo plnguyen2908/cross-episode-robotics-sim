@@ -17,6 +17,7 @@ def main():
     from cross_episode_sim.runtime.logging import TimestampedStream
     sys.stdout=TimestampedStream(sys.stdout);sys.stderr=TimestampedStream(sys.stderr)
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--proposal-executor',help='Isolated proposal experiment; original collision cloud remains intact')
     p.add_argument('--pick-executor',default='scripts/test_m2t2_pick.py',help='Isolated executor experiment')
     p.add_argument('--pick',type=Path)
     p.add_argument('--navigation',type=Path)
@@ -156,6 +157,7 @@ def main():
                 if result.returncode:return result.returncode
             cmd=[sys.executable,'scripts/m2t2_worker.py','--input',str(a.output/'input.npz'),'--output',str(a.output/'predictions.json'),'--checkpoint','unused']
             if a.focused_proposals:cmd[1]='scripts/household_grasp_proposals.py'
+            if a.proposal_executor:cmd[1]=a.proposal_executor
             result=runtime.run(cmd,log)
             if result.returncode:return result.returncode
             command=[sys.executable,a.pick_executor,'--source',str(source),'--input',str(a.output/'input.npz'),'--predictions',str(a.output/'predictions.json'),'--output',str(a.output/'physics')]

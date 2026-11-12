@@ -104,3 +104,12 @@ def test_prior_support_history_is_time_filtered(tmp_path):
     restore_start_context(grid,tmp_path,2.)
     assert len(grid.inherited_support_poses)==2
     assert np.allclose(grid.inherited_support_poses[:,0],[0.,-.1])
+
+
+def test_redock_backend_error_fails_the_dock_not_the_recipe():
+    calls=[]
+    original=M2T2SkillInterface({'pick':lambda **kw:calls.append(kw) or SkillOutcome(False,'no fresh target')})
+    def redock(**kw):raise FileNotFoundError('failed_call_005/report.json')
+    result=QwenSkillInterface(original,redock).execute_skill('pick',{'target':'bowl','redock':True})
+    assert len(calls)==1 and not result['success']
+    assert not result['redock']['success'] and 'FileNotFoundError' in result['redock']['reason']

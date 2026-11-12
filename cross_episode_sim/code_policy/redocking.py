@@ -24,6 +24,7 @@ class SensorRedocking:
         self.runtime, self.sensors, self.mapper = runtime, sensors, mapper
         self.geometry = RobotGeometry(runtime.model)
         self.pointer = MolmoPointer()
+        self.grocery_pointers = {}
         self.target_point = None;self.target_label = None
 
     def observe(self, target):
@@ -35,7 +36,16 @@ class SensorRedocking:
         matches=[]
         for key in ('navigation', 'wrist'):
             camera = packet.cameras[key]
-            result = self.pointer.point(Image.fromarray(camera.rgb), target)
+            pointer=self.pointer
+            if target in ('packaged drink','packaged snack'):
+                from ..perception.portable_object_pointing import GroceryPointer
+                if target not in self.grocery_pointers:
+                    self.grocery_pointers[target]=GroceryPointer(self.pointer,target)
+                pointer=self.grocery_pointers[target]
+            result = pointer.point(Image.fromarray(camera.rgb), target)
+            if 'category_verification' in result:
+                print('GROCERY_CATEGORY_EVIDENCE',json.dumps(dict(camera=key,target=target,
+                    proposals=result['category_verification'])),flush=True)
             if result['points']:
                 _, _, valid = camera_points(camera)
                 T = tracking.T_map_base
@@ -58,12 +68,47 @@ class SensorRedocking:
                     return packet, tracking, point, key
         if matches:
             point,key=min(matches,key=lambda item:np.linalg.norm(item[0]-self.target_point))
-            if np.linalg.norm(point-self.target_point)>.18:
-                raise RuntimeError('Navigation target not confirmed in fresh views; refusing to switch objects')
-            self.target_point=point.copy()
-            self.target_confirmed=True
-            return packet,tracking,point,key
+            if np.linalg.norm(point-self.target_point)<=.18:
+                self.target_point=point.copy()
+                self.target_confirmed=True
+                return packet,tracking,point,key
+        if getattr(self,'preserve_target',False) and self.target_label==target and self.target_point is not None:
+            # Pointing can miss an instance in one frame. The object navigation
+            # observed is still confirmed by its own fresh depth surface, which
+            # cannot select another instance.
+            T=tracking.T_map_base;local=(self.target_point-T[:3,3])@T[:3,:3]
+            print('REDOCK_TARGET_EVIDENCE',json.dumps(dict(target=target,pointed=[dict(camera=key,
+                gap_m=float(np.linalg.norm(p-self.target_point))) for p,key in matches])),flush=True)
+            for key,camera,support,component,measured in self.tracked_surface(packet,local):
+                gap=float(np.min(np.linalg.norm(component-local,axis=1)))
+                associated=bool(local[2]>support+.012 and gap<.05)
+                print('REDOCK_TRACK_CONFIRMATION',json.dumps(dict(camera=key,target=target,surface_gap_m=gap,
+                    observed_support_z=support,object_surface_points=len(component),accepted=associated)),flush=True)
+                if associated:
+                    self.target_point=T[:3,:3]@measured+T[:3,3];self.target_confirmed=True
+                    return packet,tracking,self.target_point.copy(),key
+        if matches:
+            raise RuntimeError('Navigation target not confirmed in fresh views; refusing to switch objects')
         raise RuntimeError('Target not visible; use navigate/explore before redocking')
+
+    def tracked_surface(self, packet, local):
+        """Fresh above-support depth surface at a previously observed target, per camera."""
+        from ..control.observed_grasp_planner import observed_target_mask
+        from ..sensors.onboard import without_robot_points
+        for key in ('navigation', 'wrist'):
+            camera=packet.cameras[key];cloud,_,_=camera_points(camera)
+            cloud=without_robot_points(cloud,camera)
+            if not len(cloud):continue
+            near=cloud[np.linalg.norm(cloud[:,:2]-local[:2],axis=1)<.28]
+            if len(near)<30:continue
+            levels,counts=np.unique(np.round(near[:,2]/.005),return_counts=True)
+            support=float(levels[counts.argmax()]*.005)
+            try:component=cloud[observed_target_mask(cloud,local,support)]
+            except RuntimeError:continue
+            measured=np.median(component,axis=0)
+            # Choose an actual surface sample, not a centroid in empty air.
+            measured=component[np.argmin(np.linalg.norm(component-measured,axis=1))]
+            yield key,camera,support,component,measured
 
     def move(self, target, purpose, distance, output, lateral_offset=None):
         if not isinstance(target, str) or not target.strip():
@@ -87,7 +132,10 @@ class SensorRedocking:
         pose = np.r_[T[:2,3], math.atan2(T[1,0], T[0,0])]
         delta = point[:2] - pose[:2];initial_distance = float(np.linalg.norm(delta))
         bearing = math.atan2(delta[1], delta[0])
-        if (purpose=='pick' and getattr(self,'preserve_target',False)
+        normal=getattr(self,'approach_normal_map',None)
+        frontal_ok=(not getattr(self,'strict_frontal',False) or
+            (normal is not None and abs(wrap(math.atan2(-normal[1],-normal[0])-pose[2]))<.06))
+        if (frontal_ok and purpose=='pick' and getattr(self,'preserve_target',False)
                 and .45<=initial_distance<=.65 and abs(wrap(bearing-pose[2]))<.12):
             # No base motion: navigation already supplies a useful dock for
             # this freshly confirmed object. Arm planning remains mandatory.
@@ -110,8 +158,9 @@ class SensorRedocking:
         # do not paint unknown cells free or apply this to cross-room exploration.
         docking.require_observed_support = False
         checker = docking.make_checker(pose, packet.arm.position)
+        offsets=(0.,) if getattr(self,'strict_frontal',False) else (0., .15, -.15, .30, -.30)
         candidates = [np.r_[point[:2] - distance*np.array([math.cos(bearing+a), math.sin(bearing+a)]), bearing+a]
-                      for a in (0., .15, -.15, .30, -.30)]
+                      for a in offsets]
         if lateral_offset is not None:
             tangent=np.array([-math.sin(bearing),math.cos(bearing)])
             candidates=[np.r_[point[:2]-distance*np.array([math.cos(bearing),math.sin(bearing)])+lateral_offset*tangent,bearing]]
@@ -122,8 +171,9 @@ class SensorRedocking:
             # Same observed target, but varying standoff and bearing rather than
             # assuming every fixture can be approached at one fixed radius.
             distances=tuple(dict.fromkeys((distance,.65,.75,.85,1.0)))
+            offsets=(0.,) if getattr(self,'strict_frontal',False) else (0.,.30,-.30,.60,-.60,.90,-.90)
             broad=[np.r_[point[:2]-r*np.array([math.cos(bearing+a),math.sin(bearing+a)]),bearing+a]
-                   for r in distances for a in (0.,.30,-.30,.60,-.60,.90,-.90)]
+                   for r in distances for a in offsets]
             feasible=[];rejected=[]
             for i,g in enumerate(broad):
                 if not checker.clear(g):

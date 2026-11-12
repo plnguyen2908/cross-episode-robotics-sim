@@ -77,11 +77,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   boxes,world_stats=build_observed_boxes(g,T,points,target,support_height=support_height,local_resolution=.01 if shallow_confined else .025)
   print('OBSERVED_WORLD',world_stats,flush=True)
   artifacts.write_text(a.output/'observed_world.json',json.dumps([dict(name=b.name,pose=b.pose,dims=b.dims) for b in boxes],indent=2))
-  from cross_episode_sim.control.m2t2_policy import filter_observed_contacts
-  before=len(rows);contact_mask=observed_target_mask(points,target,world_stats['support_z'])
-  rows=filter_observed_contacts(rows,points[contact_mask])
-  artifacts.write_text(a.output/'proposal_filter.json',json.dumps(dict(before=before,after=len(rows),reason='Predicted contact must match connected observed target surface',tolerance_m=.015),indent=2))
-  if not rows:raise RuntimeError('No M2T2 contacts match the observed target surface; no arm path attempted')
+  # Target selection/cropping is upstream. Do not veto learned proposals
+  # again with a hard contact-to-surface distance threshold before planning.
+  contact_mask=observed_target_mask(points,target,world_stats['support_z'])
+  artifacts.write_text(a.output/'proposal_filter.json',json.dumps(dict(
+      before=len(rows),after=len(rows),enabled=False,
+      reason='No additional contact matching; target-conditioned proposals go to arm planning'),indent=2))
   from cross_episode_sim.control.household_grasp import grasp_world_capacity
   capacity=grasp_world_capacity(requested_category,len(boxes),points[contact_mask])
   arm=sensor_arm_planner(kinematics=robot_calibration(m,d,a.output/'robot'),collision_cache={'cuboid':capacity, 'mesh':2},activation_distance=.012 if a.household_grasp else None)

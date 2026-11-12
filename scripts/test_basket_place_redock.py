@@ -8,7 +8,8 @@ from scipy.spatial import cKDTree
 from cross_episode_sim.runtime.episode import episode_sensors as OnboardSensorInterface,load_checkpoint
 from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
-from cross_episode_sim.navigation.shaped_docking import RobotGeometry,ShapedDocking
+from cross_episode_sim.navigation.shaped_docking import RobotGeometry
+from cross_episode_sim.navigation.basket_docking import FrozenBasketDocking
 from cross_episode_sim.control.observed_payload import ObservedPayload
 from cross_episode_sim.control.observed_placement import supported_interior,free_approach_targets
 from cross_episode_sim.control.onboard_base import OnboardBaseActuator
@@ -52,15 +53,12 @@ if a.observed_map is not None:
  raise ValueError('Legacy map-frame mode is unsupported; provide --continuation-map from the physical start checkpoint')
 a.continuation_map=a.continuation_map or a.start
 from cross_episode_sim.navigation.map_continuation import restore_observed_map
-from cross_episode_sim.navigation.fixed_map import freeze_map,map_digest,live_obstacle_points
+from cross_episode_sim.navigation.fixed_map import freeze_map,map_digest
 supports=restore_observed_map(grid,a.continuation_map)+supports
 if artifacts.owner(a.continuation_map) is not None:
  grid.config=MapConfig(**json.loads(artifacts.read_text(a.continuation_map/'summary.json'))['config'])
 frozen_digest=freeze_map(grid);wall_start=time.monotonic()
-class LoadedDock(ShapedDocking):
- def make_checker(self,pose,q):
-  return checker
-dock=LoadedDock(grid,geo,max_nodes=3000);route=None;dock_selections=[]
+dock=FrozenBasketDocking(grid,geo,max_nodes=3000);route=None;dock_selections=[]
 from cross_episode_sim.control.execution_monitor import PlannedMotionMonitor
 execution_monitor=PlannedMotionMonitor()
 def execution_guard(forward,yaw,dt):
@@ -89,18 +87,17 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     if not supports:supports.append(pose.copy())
     if np.linalg.norm(pose[:2]-supports[-1][:2])>.025:supports.append(pose.copy())
     if checker is None:
-     checker=payload.checker(grid,packet.arm.position,pose,supports)
-     # Match SensorRedocking: unknown floor is allowed locally, while the
-     # retained arm/payload sweep still checks every measured obstacle.
+     checker=dock.make_checker(pose,packet.arm.position)
+     # Only the frozen occupied columns and calibrated base footprint
+     # constrain local routing; arm/payload planning happens after arrival.
      checker.require_observed_support=False
     checker.remember_support(pose)
-    if route is None:checker.update_live_points(live_obstacle_points(packet,tracking))
   if not tracking.accepted:
    base.step(0,0);continue
   T=tracking.T_map_base;pose=np.r_[T[:2,3],np.arctan2(T[1,0],T[0,0])]
   if tick%50==0:print('DOCK_PROGRESS',round(float(d.time-start),2),pose.tolist(),flush=True)
   if route is None:
-   candidates=[];chosen_targets={};reach_cache={};rejected={}
+   candidates=[];chosen_targets={};reach_cache={};rejected={};rejected_details=[]
    proposal_checker=checker
    distances=(.50,.55,.60,.65) if perception_meta.get('interior_refinement') else (.50,.55,.60,.65,.75)
    proposals=(frontal_docks(targets,front_normal_map,distances) if front_normal_map is not None else
@@ -109,10 +106,13 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     if front_normal_map is not None and frontal_heading_error(proposal.pose,front_normal_map)>np.deg2rad(8.):
      rejected['not_frontal']=rejected.get('not_frontal',0)+1;continue
     if not proposal_checker.clear(proposal.pose):
-     reason=proposal_checker.detail['reason'];rejected[reason]=rejected.get(reason,0)+1;continue
+     reason='frozen_map_base_collision' if proposal_checker.detail.get('part')=='frozen_base_footprint' else proposal_checker.detail['reason']
+     rejected[reason]=rejected.get(reason,0)+1
+     rejected_details.append(dict(pose=proposal.pose.tolist(),reason=reason,detail=proposal_checker.detail.copy()))
+     continue
     candidates.append(proposal.pose);chosen_targets[tuple(proposal.pose)]=proposal.target
     if len(candidates)>=60:break
-   artifacts.write_text(a.output/'candidate_summary.json',json.dumps(dict(feasible=len(candidates),rejected=rejected,candidates=[p.tolist() for p in candidates]),indent=2))
+   artifacts.write_text(a.output/'candidate_summary.json',json.dumps(dict(feasible=len(candidates),rejected=rejected,rejected_details=rejected_details,candidates=[p.tolist() for p in candidates]),indent=2))
    print('FACING_DOCKS',len(candidates),'rejected',rejected,flush=True)
    perception_report=json.loads(artifacts.read_text(a.perception/'report.json'))
    candidates,selection=rank_docks(grid,pose,candidates,
@@ -176,6 +176,7 @@ report.update(docking_policy='qwen_ranked_observed_candidates',qwen_selections=d
     observed_front=front,frontal_docking=front is not None,
     pre_dock_arm_ik=False,fresh_manipulation_observation_required=True,
     unknown_floor_policy='allowed_for_local_redock',observed_obstacle_checks=True,
-    retained_posture=True,posture_reason='loaded arm retained through observed swept checks',
+    retained_posture=True,posture_reason='retained arm; frozen-map base routing only',
+    base_collision_source='frozen_2d_base_height_slice',live_depth_collision_veto=False,arm_payload_docking_veto=False,
     duration_exception='loaded route turns and terminal settling exceeded target' if d.time-start>15 else None)
 artifacts.write_text(a.output/'report.json',json.dumps(report,indent=2));print(json.dumps(report),flush=True)

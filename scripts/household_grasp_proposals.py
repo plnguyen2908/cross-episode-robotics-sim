@@ -8,7 +8,7 @@ import json
 import numpy as np
 import torch
 from cross_episode_sim.runtime import artifacts
-from cross_episode_sim.control.m2t2_policy import M2T2Policy, grasp_to_tcp, filter_observed_contacts
+from cross_episode_sim.control.m2t2_policy import M2T2Policy, grasp_to_tcp
 from cross_episode_sim.control.observed_grasp_planner import observed_target_mask
 
 
@@ -39,7 +39,6 @@ def main():
             rows.extend(dict(tcp=grasp_to_tcp(g).tolist(),confidence=float(s),
                              contact=c.tolist(),sampling_pass=sample)
                         for g,s,c in zip(poses,scores,contacts))
-    rows=filter_observed_contacts(rows,surface)
     rows.sort(key=lambda row:-row['confidence'])
     result=dict(candidates=rows,focused_points=int(crop.sum()),target_points=len(surface),
                 scope='observed-object crop; full collision scene retained by executor')

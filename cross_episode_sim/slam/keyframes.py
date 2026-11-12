@@ -155,6 +155,11 @@ class KeyframeTracker:
             self.frames.append(Keyframe(uv,xyz,desc,pose.copy(),self.index));self.anchor=len(self.frames)-1
         return pose,n,rmse,status
 
+    def refine(self,pose):
+        """Replace the pose just tracked, and of a keyframe just added from it, by a better sensor estimate."""
+        self.pose=pose.copy();self.previous_frame.pose=pose.copy()
+        if self.frames[-1].index==self.index:self.frames[-1].pose=pose.copy()
+
     def accept_odometry(self,pose,rgb,depth):
         """Accept a sensor-estimated bridge pose, never a simulator pose."""
         self.pose=pose.copy();self.lost=False;self.recovery_candidate=None

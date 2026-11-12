@@ -1462,3 +1462,334 @@ view generated zero learned and zero measured-footprint placement candidates;
 the second drink was not released into the basket. Closer docking alone has
 not solved this case. The earlier isolated tuck/place pass is not evidence of
 full grocery-task reliability.
+
+## November 11: remove the second frozen-carry departure veto
+
+`set_table_qwen_current03` picked its first bowl successfully but carry executed
+zero simulated seconds. `ObservedUndock` rejected departure with
+`undock_route_unverified` / `frozen_base_footprint`. Qwen had just accepted and
+executed a short approach; carry applied a different, vertically projected
+clearance calculation before reaching the saved cross-room route.
+
+The default frozen-map carry factory now uses `RecordedDeparture`. It reverses
+the recent continuous onboard SLAM approach until it reconnects to the room
+transit region. It does not rerun the projected-shape or payload collision veto
+on that traveled connection, and it never clears occupied map cells. Native
+base control, physical collisions, localization, and downstream frozen-map
+A*/route planning remain. The non-frozen exploration departure is unchanged.
+Missing or discontinuous approach history cannot be invented; it is reported as
+`recorded_departure_unavailable`. The old optional overlap flag is not needed
+for this default frozen-map path.
+
+Physical regression `runs/set_table_carry_reverse01` reset the exact failed
+carry state from `current03`, using its recorded observed map, route graph and
+Qwen approach poses. It reached the dining destination with gripper contact
+retained: **success**, **52.10 simulated seconds**, **50.89 wall seconds**.
+Departure reconnected in **12.22 simulated seconds**. No rendering was performed
+during execution; the frozen map digest was unchanged. The downstream route
+planner repaired the cached route using its existing frozen-map planning logic.
+This qualifies this carry component, not a full new set-table episode. The
+cross-room route exceeds the 5–15 s typical atomic target; its remaining travel
+and turning time is not claimed to be fully optimized.
+
+- [Physical carry report](/nobackup/le/cross-episode-qwen-capx/runs/set_table_carry_reverse01/test/report.json)
+- [Timestamped log](/nobackup/le/cross-episode-qwen-capx/runs/set_table_carry_reverse01/live.log)
+- [Original rejected-departure map](/nobackup/le/cross-episode-qwen-capx/runs/set_table_qwen_current03/map_review/carry_map.png)
+
+## November 11: release groceries above existing basket contents
+
+The user permits stacking/dropping inside the basket; a fully exposed empty
+floor patch is not required. `test_basket_place.py` now observes the whole basket
+mask and proposes releases over its measured upper-wall/rim outline. The payload
+projection must fit inside that outline with a 2.5 cm margin. Release height is
+above the observed rim/contents. Disconnected overhead geometry is excluded from
+content-height estimation but remains in the collision scene. This is a geometric
+fallback, **not a learned M2T2 placement prediction**. Tilted wrist alternatives
+are included, with unchanged cuRobo approach/payload path validation and actual
+physical gripper release. Private basket scoring permits a stable support chain
+through other contained contents, while requiring full XY containment and no
+remaining gripper contact; balancing on the rim is not sufficient.
+
+`basket_drop_contents01` incorrectly included an overhead surface in release
+height. `basket_drop_contents02` corrected the height but rejected all 41 wrist
+poses before motion. `basket_drop_contents03` added tilted orientations and
+successfully placed the previously failing second bottle on its **first motion
+candidate**, with **9.56 simulated seconds**, **24.60 placement wall seconds**
+(**27.84 s including stage setup**). Private basket scoring returned success;
+the first bottle remained supported. The visual settling heuristic was
+inconclusive within 2 seconds; the separate physical scorer confirmed the final
+released object was stable and contained. This is a recorded-state placement
+component result, not a full grocery-task pass.
+
+- [Component result](/nobackup/le/cross-episode-qwen-capx/runs/basket_drop_contents03/episode/report.json)
+- [Release video](/nobackup/le/cross-episode-qwen-capx/runs/basket_drop_contents03/successful_drop.mp4)
+
+Full set-table rerun `set_table_qwen_current04` uses the corrected frozen carry
+and was started before the basket-only edits. Full grocery rerun and its result
+must be reported separately; neither run is qualified by this component pass.
+
+## November 11: remove the object-pick contact-distance veto
+
+At the user's request, remove the additional 1.5 cm nearest-target-surface
+contact filter from `test_m2t2_pick.py`, `test_household_contact_pick.py`, and
+`household_grasp_proposals.py`. Upstream target selection/proposal cropping and
+cuRobo motion planning remain; no motion or grasp success is fabricated.
+
+`set_table_pick_no_contact_veto01` reset the second-bowl failure from
+`set_table_qwen_current04` and reused its observed cloud/target. M2T2 again
+returned 68 target candidates. The executor no longer rejected them at contact
+matching, but motion planning still returned `No collision-checked reachable
+M2T2 candidate` (92 logged planning rejections, zero simulated motion). This is
+**not a successful pickup**. The 15 M2T2/household grasp unit tests passed.
+
+`grocery_sort_current12` was interrupted before changing shared pickup scripts;
+`grocery_sort_current13` restarts the full recipe with both changes and its own
+OneRing worker on port 51514. Full-task success remains pending.
+
+## November 11: target-conditioned set-table grasp input
+
+Diagnosis of the second-bowl failure: all 68 retained full-scene proposals were
+behind the selected bowl on a neighboring surface. Their nearest-contact
+distance to the observed bowl was 5.8–7.5 cm; TCP x was 0.724–0.734 m while the
+bowl's observed x extent was 0.474–0.657 m. Removing the extra contact-distance
+veto exposed the invalid task targeting but did not make those poses reachable.
+
+`target_pick_proposals.py` now supplies M2T2 with the selected connected RGB-D
+object surface plus the nearby observed counter. It does not discard proposals
+with a post-inference surface-distance threshold. The executor still receives
+the complete original scene for collision geometry. There is no simulator
+object pose or oracle grasp in this change.
+
+`set_table_bowl_target_crop01` physically picked the previously failing bowl
+from the identical recorded start: **success**, **7.68 simulated seconds**, bowl
+lift **25.9 cm**, sustained gripper contact. It tried one unsuccessful approach
+before the successful candidate. There were 52,005 learned raw proposals from
+three samples; this is an inference crop result, not a count of executed grasps.
+The broad output size remains an efficiency consideration for future hard cases.
+
+- [Pickup report](/nobackup/le/cross-episode-qwen-capx/runs/set_table_bowl_target_crop01/episode/report.json)
+- [Successful pickup video](/nobackup/le/cross-episode-qwen-capx/runs/set_table_bowl_target_crop01/successful_pick.mp4)
+
+`TargetConditionedHouseholdPipeline` uses this proposal stage for set-table
+bowl/cup calls and delegates all other execution to the existing Qwen household
+pipeline. `run_target_conditioned_household.py` launches this qualification
+without hot-editing the already-running grocery recipe. Full set-table run
+`set_table_qwen_current05` is pending; a component pass does not qualify the
+complete task or the new cup pickups.
+
+
+## First-carry station handoff repair — November 11, 2026
+
+Full `set_table_qwen_current05` and `grocery_sort_current13` both failed at the
+first loaded room transit after a successful pickup. The set-table status was
+`known_route_unavailable`; grocery returned `room_route_unobserved` following
+repeated transit-region recovery. No complete task success was achieved.
+
+Departure previously selected its endpoint using `policy.explorer.free`, while
+routing used a separate follower costmap with different inherited observed
+support. It could finish in a cell the next follower could not use. Additionally,
+set-table discarded the station-based A* fallback when a cached polyline did not
+satisfy the tracking margin. This was not an absence of explored room routes.
+
+`FixedMapNavigator.prepare_transit()` now retains observed station endpoints
+even when cached graph routing needs A* repair. `departure_region()` selects
+the destination-connected region on that same follower costmap. The carry
+executor uses this region before handing off to the follower. Sensor pose
+tracking, native map planning, physical collisions and private scoring remain.
+The map is not cleared or expanded to force a route.
+
+Physical retries from the two failed carry starting states:
+
+| Retry | Physical result | Simulated seconds | Wall seconds |
+|---|---|---:|---:|
+| `set_table_carry_shared_region01` | Destination reached, bowl retained | 47.80 | 46.85 |
+| `grocery_carry_shared_region01` | Destination reached, drink retained | 64.50 | 55.86 |
+
+Both report an unchanged frozen map. These are isolated carry qualifications,
+not full-task passes. These cross-room routes exceed the 5–15 second typical
+atomic target; route following and turns remain duration optimization work.
+Full integration reruns are `set_table_qwen_current06` and
+`grocery_sort_current14`; their outcome must be read from their final reports.
+
+## Basket docking: frozen 2D routing — November 11, 2026
+
+`grocery_sort_current14` passed its first cross-room carry (48.4 s wall), but
+purple-basket interior refinement rejected all four dock candidates using the
+retained arm/payload 3D checker, before calling Qwen. The user requested removal
+of this veto. The run was intentionally interrupted before editing its code;
+set-table continued on its separate placement path.
+
+`FrozenBasketDocking` now uses the existing frozen occupied-column base-footprint
+planner for both candidate selection and A* route planning. The basket executor
+no longer refreshes live obstacle points or creates a payload-shaped docking
+checker. Local unknown floor remains allowed. Physical contacts, localization,
+Qwen ranking and subsequent cuRobo manipulation stay enabled. This change does
+not certify arm/payload clearance while the base moves.
+
+Ten targeted tests passed, including preserved wall avoidance and unchanged
+frozen map. `grocery_basket_frozen2d01` is the physical retry from the first failed
+purple-basket refinement state; inspect its report for qualification status.
+
+The `grocery_basket_frozen2d01` component finished without placement: its five
+proposed docks were excluded by the frozen occupied-column **base footprint**,
+not the removed arm/payload/live-depth veto. This test restores the saved physical
+state and observed floor context, then builds fresh local perception; it is not
+an exact replay of the original full frozen occupancy array. No placement success
+is claimed. Rejection summaries now retain per-pose details and identify this
+remaining planner result as `frozen_map_base_collision`.
+
+### Corrected base-height projection
+
+The first 2D conversion projected every occupied height into a base obstacle.
+That is stricter than a base-only collision model: an overhead countertop can
+become a floor-level wall. `FrozenBasketDocking` now derives a read-only 2D
+occupied layer from frozen observations intersecting the calibrated base-height
+band, including a 3.5 cm vertical margin. A planar oriented-footprint checker
+uses that layer for candidate filtering and route sweeps. It consumes no fresh
+depth or held-object/arm geometry and never alters the underlying map.
+A regression test distinguishes overhead-only points from actual base-height
+walls; nine docking/ranking tests passed.
+
+`grocery_failed_dock_place_probe01` tried placing directly from the previous
+failed dock; all proposed arm paths were rejected, so skipping redocking alone
+did not fix this state. `grocery_basket_frozen2d02` tests the corrected docking
+and production placement from that same physical start. Physical outcome pending.
+
+`grocery_basket_frozen2d02` **passed** all five production component stages and
+private physical placement scoring: the original held drink was released and
+physically supported inside the purple basket. Initial docking took 29.22 s
+simulated / 68.00 s wall; interior refinement 32.22 / 75.20 s; placement
+10.02 / 46.24 s. Both dock stages retained the held object and left the map
+unchanged. This establishes first-placement recovery from the failed state,
+not full grocery-task qualification or compliance with every timing target.
+
+## Cup proposal regression diagnosis
+
+`set_table_qwen_current06` completed both bowl transfers, then searched without
+physical progress on the first cup. It was interrupted to inspect the exact saved
+RGB-D input. The newly introduced target-context crop was dispatched for cups as
+well as bowls. It produced 53,752 raw proposals versus hundreds in earlier
+full-scene cup calls. The executor then sorted by shoulder distance minus a
+confidence term. Recomputed proposals on the saved input show 1,426 of its first
+3,000 entries with tool centers below 0.95 m (counter at 0.915 m), even though
+48,664 raw proposals have downward-facing tool approach axes. The original log
+contains 501 IK/path rejections and 251 target/gripper-linkage overlap rejections.
+The displayed proposals are recomputed, not an archived original proposal list.
+No physical cup pickup failure is claimed: no grasp was executed at this stage.
+
+## Qwen table docking uses frozen base occupancy
+
+`set_table_qwen_current07` placed the first bowl, then failed second-bowl
+placement docking before any base movement: 143 candidates were rejected by
+the loaded 3D checker, and the remaining route was rejected for mapped points
+overlapping the mast. This is a planning rejection, not measured physical
+collision. The cup pickup changes were not reached in that full run.
+
+The Qwen branch in `test_m2t2_place_redock_astar.py` now uses the same frozen
+base-height 2D footprint planner as basket docking. Candidate filtering and
+route planning no longer add a live-depth mast/arm/payload veto. Legacy non-Qwen
+docking, physical collisions, post-arrival arm planning and scoring remain.
+
+`set_table_frozen2d_dock01` restored the failed second-bowl carry state and
+rebuilt local onboard map observations with recorded floor context. It passed
+observation, docking and placement: 60 candidate docks, final target 0.511 m
+ahead and 0.009 m lateral, retained grasp during docking, then physically
+released/supported bowl on the table. Docking took 21.22 simulated seconds /
+55.99 wall seconds; placement stage took 26.93 wall seconds. The dock's observed
+map digest was unchanged. This is component evidence with a rebuilt local map,
+not an exact replay of the original full frozen map or a full-task pass.
+Nine docking/ranking tests passed. Full qualification is running separately in
+`set_table_qwen_current08`.
+
+## Grocery category verification and table return recovery
+
+The second-drink approach in `grocery_sort_current15` followed a snack-block
+false positive. `PointingSupervisor` previously assigned the requested category
+to every Molmo point with a valid mask. `GroceryPointer` now independently
+classifies each proposed crop with Qwen as drink, snack, other or unknown before
+accepting it. Navigation and redocking share this implementation and preserve
+the navigation target association through estimated-map transforms. This uses
+only RGB evidence; no simulator object IDs, category bindings or colors.
+Per-proposal responses are retained in navigation events and redocking logs.
+
+`grocery_perception_verified01` tested both onboard views from two recorded
+states. The earlier view accepted two bottles and two snack blocks; the failed
+close view accepted two snack blocks and no drinks. Replaying the original
+three Molmo proposals at the exact recorded timestamp rejected its two snack
+points and retained the actual bottle point. This is perception qualification,
+not a successful full grocery episode. Crop classification adds measured model
+latency (roughly 5–7 seconds total per tested image/category with two proposals).
+
+`set_table_qwen_current08` physically placed the first bowl, but the direct
+joint interpolation back to tuck was rejected before any return motion. The
+return backend now reuses `stow_after_fixture`: fresh 1 cm onboard depth,
+calibrated robot geometry, checked withdrawal waypoints and native planning.
+`set_table_return_retry03` passed from the saved failed-return state: upward
+withdrawal then tuck, 6.16 simulated seconds, 10.59 wall seconds inside stow,
+five stable joint samples. Earlier retries using coarse navigation occupancy
+were rejected; they are not successes. The failed original executed no tuck.
+
+Successful placement clears held-object bookkeeping before attempting empty-arm
+return. A return failure can no longer resurrect an already released payload.
+The table path shares the component completion helper, covered by a regression
+test with a deliberately failed return. 55 focused perception, redocking and
+handoff tests passed. Full task requalification remains pending.
+
+### Small-drop table placement — November 11
+
+`set_table_qwen_current09` failed before releasing its first bowl: its precise
+placement candidates had no validated arm/payload path. The table executor now
+tries observed, unoccupied support patches with the current held orientation
+and 9 cm bottom clearance before its existing learned placement candidates.
+It releases at that pose and reverses the validated incoming arm path. These
+are geometric release proposals, not learned M2T2 outputs. Physical collisions,
+arm/payload planning and semantic support scoring remain enabled.
+
+`set_table_small_drop02` passed physical support scoring from that failed state:
+16.50 simulated seconds and 78.54 wall seconds, including perception/planning.
+Five candidate rejections preceded the successful sixth drop proposal. The
+visual settling check was inconclusive after two seconds; private physical
+support scoring passed. The 15-second motion target is exceeded by 1.5 seconds;
+the current executor retains readiness holds, the reverse withdrawal and the
+two-second visual-settling allowance. It still processes the learned proposals
+before trying the drop, which leaves a wall-time optimization outstanding.
+The earlier 5 cm drop test rejected all drop candidates and was interrupted
+before exhausting its legacy fallback. Neither test is a full-task success.
+
+Video: [small-drop placement](../runs/set_table_small_drop02/small_drop.mp4).
+Geometry and existing policy tests: 50 passed.
+
+### Grocery target on the tabletop — November 11
+
+The first pickup failure in `grocery_sort_current16` was traced to the source
+observation, not merely an empty post-dock pointing response. Replaying the
+original navigation frame showed FastSAM's selected mask included the bottle
+and a large tabletop patch. The ring-only support estimate used the lower
+floor outside that mask, so the filter retained 5,123 pixels and the resulting
+"bottle" target lay on the table at z=0.769 m in the estimated map.
+
+`grocery_surface.above_support_mask` now considers broad horizontal support
+planes inside the mask as well as its surrounding ring. On that exact recorded
+frame it retains 311 bottle pixels; the corrected sensor target is z=0.852 m.
+This branch is used for grocery masks, not bowl/cup perception. A regression
+test covers a merged tabletop/object mask whose outer ring observes floor.
+
+`GroceryRedocking` associates the corrected semantic target with a fresh
+above-support connected surface. A close association preserves the established
+label instead of requiring another whole-image Molmo search. A local crop
+classification alone is insufficient: the initial debugging probe projected
+the bad target onto the table, and Qwen nevertheless called its crop a bottle.
+That probe is not valid target-confirmation evidence.
+
+`grocery_handoff_pick04` reprocessed the original RGB-D/SLAM observation, then
+reset to the failed navigation endpoint and ran the current redock and pickup
+components. Redock passed at 0.547 m (13.46 simulated seconds, 25.16 wall seconds).
+The bottle pickup passed (10.12 simulated seconds, approximately 0.244 m lift).
+The simulator reset and final scoring are private; execution uses only onboard
+observations, stored sensor evidence and estimated poses. This is a component
+regression, not a full task or original frozen-map qualification. The separate
+basket-docking rotation failure remains unresolved.
+
+Artifacts: `runs/grocery_mask_diagnosis01/`,
+`runs/grocery_handoff_pick04/`; pickup video:
+[corrected bottle pickup](../runs/grocery_handoff_pick04/pick.mp4).

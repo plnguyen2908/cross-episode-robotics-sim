@@ -56,9 +56,51 @@ class GroceryPointer:
     """Clarify visible packaging without object IDs, colors or scene bindings."""
     from .target_language import GROCERY_DESCRIPTIONS as descriptions
 
-    def __init__(self, pointer, category):
+    def __init__(self, pointer, category, verifier=None):
         self.pointer = pointer
+        self.category = category
         self.description = self.descriptions[category]
+        self.verifier = verifier
 
     def point(self, image, target):
-        return self.pointer.point(image, self.description)
+        import time
+        started=time.monotonic()
+        result = self.pointer.point(image, self.description)
+        verified=self.verify(image,result)
+        verified['wall_seconds']=time.monotonic()-started
+        return verified
+
+    def verify(self,image,result):
+        """Confirm proposals, including a projected sensor track, from current RGB."""
+        import math,time
+        started=time.monotonic()
+        accepted, evidence = [], []
+        if result.get('points') and self.verifier is None:
+            self.verifier = LocalVLM(device='cuda:0')
+        for point in result.get('points', []):
+            x,y=map(float,point)
+            if not (math.isfinite(x) and math.isfinite(y) and 0<=x<image.width and 0<=y<image.height):
+                continue
+            marked=image.copy()
+            ImageDraw.Draw(marked).ellipse((x-6,y-6,x+6,y+6),outline='magenta',width=2)
+            half=max(24,round(min(image.size)*.10))
+            crop=image.crop((max(0,int(x)-half),max(0,int(y)-half),
+                             min(image.width,int(x)+half),min(image.height,int(y)+half))).resize((384,384))
+            answer=self.verifier.label_with_prompt([marked,crop],
+                'Classify the actual object at the magenta point, using the full scene and unmarked crop. '
+                'The proposal can be wrong. Choose independently of what was requested. '
+                'packaged drink: identifiable beverage bottle, can, or printed beverage carton, with visible packaging evidence. '
+                'packaged snack: a small plain solid-colored rectangular block/box used as a snack prop in this scene. '
+                'A plain block is NOT a drink. A chair, robot, table or floor is other. '
+                'Use unknown if occluded or too small to distinguish. '
+                'Return JSON with category (packaged drink, packaged snack, other, unknown) and a short description of visible evidence.',
+                max_new_tokens=120)
+            try:
+                label=parse_label(answer,tuple(self.descriptions))
+            except (ValueError,KeyError):
+                label=dict(category='unknown',description='Invalid classifier response')
+            keep=label['category']==self.category
+            evidence.append(dict(point=[x,y],requested=self.category,response=answer,accepted=keep))
+            if keep:accepted.append(point)
+        return dict(result,points=accepted,category_verification=evidence,
+                    pointing_wall_seconds=result.get('wall_seconds'),wall_seconds=time.monotonic()-started)

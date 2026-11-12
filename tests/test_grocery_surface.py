@@ -31,3 +31,14 @@ def test_mixed_segment_removes_table_and_retains_connected_object():
     expected = np.zeros_like(mask);expected[23:35, 24:36] = True
     depth[expected] = 1.08
     np.testing.assert_array_equal(above_support_mask(camera(depth), mask), expected)
+
+
+def test_merged_table_mask_with_floor_in_surrounding_ring():
+    # The old ring-only estimate chose the lower floor and called the whole
+    # tabletop a grocery. The bottle is the only above-table component.
+    depth=np.full((64,64),1.50)
+    mask=np.zeros(depth.shape,bool);mask[12:50,12:50]=True
+    depth[mask]=1.23
+    bottle=np.zeros_like(mask);bottle[25:35,29:36]=True
+    depth[bottle]=1.10
+    np.testing.assert_array_equal(above_support_mask(camera(depth),mask),bottle)

@@ -27,7 +27,7 @@ m,d=load_checkpoint(a.dock)
 c=MolmoSpacesController(m,d);hold={g:c.robot_view.get_move_group(g).noop_ctrl.copy() for g in ('base','arm','gripper')};geo=RobotGeometry(m);q=c.robot_view.get_move_group('arm').joint_pos.copy();tool_points=artifacts.load_array(a.dock/'observed_payload_tool.npy') if artifacts.exists(a.dock/'observed_payload_tool.npy') else None;payload=ObservedPayload(geo,tool_points) if tool_points is not None else None;tcp=geo.fk(q)[geo.tcp_body]@geo.tcp_local
 # Private scoring remembers only the initially held bowl, never a destination pose.
 from cross_episode_sim.evaluation.grasp_contact import contact_root_lookup
-bowl_roots=[int(m.jnt_bodyid[j]) for j in range(m.njnt) if m.jnt_type[j]==mujoco.mjtJoint.mjJNT_FREE and any(word in (m.body(int(m.jnt_bodyid[j])).name or '').lower() for word in ('bowl','cup','mug'))]
+bowl_roots=[int(m.jnt_bodyid[j]) for j in range(m.njnt) if m.jnt_type[j]==mujoco.mjtJoint.mjJNT_FREE and ((a.semantic_receptacle and 'basket' in a.semantic_receptacle) or any(word in (m.body(int(m.jnt_bodyid[j])).name or '').lower() for word in ('bowl','cup','mug')))]
 private_lookup=contact_root_lookup(m.body_parentid,bowl_roots);finger_bodies={i for i in range(m.nbody) if (m.body(i).name or '').startswith('robot_0/gripper/')};initially_held=set()
 for contact in d.contact:
  b1,b2=map(int,m.geom_bodyid[[contact.geom1,contact.geom2]])
@@ -62,7 +62,8 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
  try:
   raw=sensors.capture();tracking=slam.update(raw.cameras['navigation'],raw.timestamp)
   grid.update(raw.cameras['navigation'],tracking)
-  detector=PointMaskDetector(categories=(a.receptacle,),free_support=True);surfaces=[];points=[];colors=[];preferred_contacts=[]
+  is_basket=bool(a.semantic_receptacle and 'basket' in a.semantic_receptacle)
+  detector=PointMaskDetector(categories=((a.semantic_receptacle if is_basket else a.receptacle),),free_support=not is_basket);surfaces=[];points=[];colors=[];preferred_contacts=[];basket_points=[]
   cached=a.dock/'observed_table_surface_base.npy'
   use_memory=(a.semantic_receptacle is not None and 'basket' in a.semantic_receptacle and artifacts.exists(cached) and r.get('semantic_receptacle')==a.semantic_receptacle)
   if use_memory:surfaces.append(artifacts.load_array(cached))
@@ -75,6 +76,15 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   # Refresh the container mask so placement can use that newly visible space.
   if a.observed_aperture:
    detections={k:[] for k in raw.cameras}
+  elif is_basket:
+   # Identify the whole container, not only a visible empty floor patch.
+   from dataclasses import replace
+   from cross_episode_sim.perception.container_masks import enclosing_container_mask
+   detections={}
+   for k,camera in raw.cameras.items():
+    _,masks=detector.segmenter.segment(camera.rgb[:,:,::-1].copy())
+    rows=detector.detect(camera.rgb,masks=masks)
+    detections[k]=[replace(v,label=a.receptacle,mask=enclosing_container_mask(v.mask,masks)) for v in rows]
   elif a.semantic_receptacle and ('interior' in a.receptacle or 'inside' in a.receptacle):
    from cross_episode_sim.perception.basket_interior import container_interior_detections
    detections={k:container_interior_detections(camera.rgb,a.semantic_receptacle,a.receptacle) for k,camera in raw.cameras.items()}
@@ -117,6 +127,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   for key,camera in packet.cameras.items():
    for detection in detections[key]:
     if detection.label==a.receptacle:
+     if is_basket and detection.mask is not None:
+      valid=camera.valid_depth & detection.mask
+      if camera.robot_mask is not None:valid &= ~camera.robot_mask
+      vv,uu=np.where(valid);zz=camera.depth_m[vv,uu]
+      cloud=np.c_[(uu-camera.K[0,2])*zz/camera.K[0,0],(vv-camera.K[1,2])*zz/camera.K[1,1],zz]@camera.T_base_optical[:3,:3].T+camera.T_base_optical[:3,3]
+      basket_points.append(cloud[np.isfinite(cloud).all(1)])
      if a.semantic_receptacle and ('interior' in a.receptacle or 'inside' in a.receptacle):
       from cross_episode_sim.perception.interior_support import interior_support_points
       if 'basket' in a.semantic_receptacle:
@@ -141,6 +157,9 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    surface=aperture_support_points(np.concatenate(points),aperture)
    if len(surface):surfaces.append(surface)
    artifacts.write_text(a.output/'aperture_evidence.json',json.dumps(dict(aperture=aperture,measured_support_points=len(surface)),indent=2))
+  if not surfaces and is_basket and basket_points:
+   # The opening/contents can be observed even when the floor is occluded.
+   surfaces.extend(basket_points)
   if not surfaces:raise RuntimeError('No freshly observed support surface for '+a.receptacle)
   surface=np.concatenate(surfaces);points=np.concatenate(points);colors=np.concatenate(colors);del detector
   if a.semantic_receptacle and 'basket' in a.semantic_receptacle and r.get('placement_target_base') is not None:
@@ -164,7 +183,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   import torch
   torch.cuda.empty_cache()
   held=tool_points@tcp[:3,:3].T+tcp[:3,3]
-  artifacts.save_archive(a.output/'input.npz',points=points,rgb=colors,held_points=held,ee_pose=tcp,table_surface=surface,preferred_contacts=np.asarray(preferred_contacts).reshape(-1,3))
+  basket_cloud=np.concatenate(basket_points) if basket_points else np.empty((0,3))
+  if is_basket and r.get('placement_target_base') is not None:
+   basket_cloud=basket_cloud[np.linalg.norm(basket_cloud[:,:2]-np.asarray(r['placement_target_base'])[:2],axis=1)<.45]
+  from cross_episode_sim.control.basket_drop import basket_drop_candidates
+  drop_rows=basket_drop_candidates(basket_cloud,points,held,tcp) if is_basket else []
+  artifacts.save_archive(a.output/'input.npz',points=points,rgb=colors,held_points=held,ee_pose=tcp,table_surface=surface,basket_opening_points=basket_cloud,preferred_contacts=np.asarray(preferred_contacts).reshape(-1,3))
   if a.observe_only:
    center=(held[:,:2].min(0)+held[:,:2].max(0))/2
    radius=float(np.linalg.norm(held[:,:2]-center,axis=1).max()+.03)
@@ -172,8 +196,8 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    footprint_available=True
    if a.semantic_receptacle and 'basket' in a.semantic_receptacle:
     from cross_episode_sim.control.container_footprint import interior_placement_candidates
-    footprint_available=bool(interior_placement_candidates(surface,points,held,tcp,radius,prefer_upright=True))
-   artifacts.write_text(a.output/'report.json',json.dumps(dict(observation_success=True,placement_footprint_available=footprint_available,semantic_receptacle=a.semantic_receptacle,scope='Fresh onboard table/held-object perception only; no placement executed'),indent=2))
+    footprint_available=bool(drop_rows or interior_placement_candidates(surface,points,held,tcp,radius,prefer_upright=True))
+   artifacts.write_text(a.output/'report.json',json.dumps(dict(observation_success=True,placement_footprint_available=footprint_available,drop_candidates=len(drop_rows),empty_floor_required=not is_basket,semantic_receptacle=a.semantic_receptacle,scope='Fresh onboard table/held-object perception only; no placement executed'),indent=2))
    print('TABLE_OBSERVED',len(surface),flush=True)
    raise SystemExit(0)
   from cross_episode_sim.runtime.episode import current_runtime
@@ -236,6 +260,14 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    witness=validate_witness(r['placement_witness'],surface,points,held,tcp)
    print('DOCK_PLACEMENT_WITNESS', 'fresh footprint confirmed' if witness else 'fresh footprint unavailable; using alternatives',flush=True)
    if witness is not None:release_candidates.insert(0,witness)
+  if drop_rows:
+   # Prefer releasing above the contents over searching for an empty floor.
+   # Round-robin orientations so one unreachable wrist pose cannot monopolize attempts.
+   drop_groups={}
+   for row in drop_rows:drop_groups.setdefault(row['group'],[]).append(row)
+   drop_diverse=[group[i] for i in range(max(map(len,drop_groups.values()))) for group in drop_groups.values() if i<len(group)]
+   release_candidates=drop_diverse[:60]+release_candidates
+   print('BASKET_DROP_CANDIDATES',len(drop_rows),'empty floor not required',flush=True)
   if a.max_candidates>0:release_candidates=release_candidates[:a.max_candidates]
   for candidate_index,row in enumerate(release_candidates,1):
    print('PLACE_ATTEMPT',candidate_index,'of',len(release_candidates),'clearance_m',row['release_clearance_m'],'contact',row['contact'],flush=True)
@@ -295,11 +327,16 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   artifacts.write_text(a.output/'private_release_score.json',json.dumps(score_diagnostics,indent=2))
   from cross_episode_sim.evaluation.released_support import released_support_success
   success=released_support_success(score_diagnostics)
+  if is_basket:
+   from cross_episode_sim.evaluation.basket_support import basket_release_score
+   basket_score=basket_release_score(m,d,initially_held,a.semantic_receptacle)
+   success=basket_score['success']
+   artifacts.write_text(a.output/'private_basket_score.json',json.dumps(basket_score,indent=2))
  except Exception as e:error=str(e);print(type(e).__name__,error,flush=True)
  frame()
 grid.save(a.output);slam.save(a.output/'slam')
 execution_success=error is None and phase=='score'
-artifacts.write_text(a.output/'report.json',json.dumps(dict(execution_success=execution_success,observed_release_stable=bool(locals().get('visually_stable',False)),success=success,phase=phase,error=error,warnings=warnings,wall_seconds=time.monotonic()-wall_start,video_status='deferred',simulated_seconds=float(d.time-start),planning_rejections=events,receptacle=a.receptacle,scope='command execution; legacy vessel/table private diagnostic is not generic task scoring',isolated_initial_state=a.isolated_initial_state,source_docking_scope=r.get('scope','unspecified')),indent=2));print('PLACE_EXECUTION_COMPLETED',execution_success,'LEGACY_BOWL_TABLE_DIAGNOSTIC',success,'FULL_TASK_SCORE', 'pending',flush=True)
+artifacts.write_text(a.output/'report.json',json.dumps(dict(execution_success=execution_success,observed_release_stable=bool(locals().get('visually_stable',False)),success=success,phase=phase,error=error,warnings=warnings,wall_seconds=time.monotonic()-wall_start,video_status='deferred',simulated_seconds=float(d.time-start),planning_rejections=events,receptacle=a.receptacle,scope='command execution plus private basket support/containment scoring' if a.semantic_receptacle and 'basket' in a.semantic_receptacle else 'command execution; legacy vessel/table private diagnostic is not generic task scoring',isolated_initial_state=a.isolated_initial_state,source_docking_scope=r.get('scope','unspecified')),indent=2));print('PLACE_EXECUTION_COMPLETED',execution_success,'BASKET_COMPONENT_SCORE' if a.semantic_receptacle and 'basket' in a.semantic_receptacle else 'LEGACY_BOWL_TABLE_DIAGNOSTIC',success,'FULL_TASK_SCORE', 'pending',flush=True)
 # Preserve the actual resulting physics state for the next pipeline stage.
 # This is harness-only state, never exposed to perception or action selection.
 checkpoint=a.output/'private_checkpoint';checkpoint.mkdir()

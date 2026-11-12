@@ -50,6 +50,43 @@ class PointingSupervisor:
     def refine_mask(self, camera, mask):
         return mask
 
+    def pointed_mask(self,camera,masks,u,v,tracking):
+        """Smallest object-sized mask under the point, else an adjacent one that measured depth supports.
+
+        A point on a small distant object can miss its mask by a few pixels and
+        land on the surface behind it. That surface mask is not the object, so
+        take the nearest object-sized mask within 1% of the image width that
+        locates as this category. Without one, behavior is unchanged.
+        """
+        import numpy as np
+        from ..sensors.onboard import without_robot_points
+        from .visual_targets import Detection,locate_detection
+        def located(mask):
+            yy,xx=np.where(mask)
+            box=(float(xx.min()),float(yy.min()),float(xx.max()+1),float(yy.max()+1))
+            return locate_detection(camera,Detection(self.label,1.,box,mask=mask),tracking.T_map_base)
+        def robot(point):
+            # Calibrated robot volumes and encoders only: an arm link beside the point is not the object.
+            T=tracking.T_map_base;return not len(without_robot_points((T[:3,:3].T@(point-T[:3,3]))[None],camera))
+        sized=[m for m in masks if m.shape==camera.depth_m.shape and 30<=m.sum()<.15*m.size]
+        choices=[m for m in sized if m[v,u]]
+        mask=self.refine_mask(camera,min(choices,key=lambda m:m.sum())) if choices else None
+        if mask is not None and located(mask) is not None:return mask
+        radius=max(4,round(.01*camera.depth_m.shape[1]));near=[]
+        for index,other in enumerate(sized):
+            if other[v,u]:continue
+            y0,x0=max(0,v-radius),max(0,u-radius)
+            yy,xx=np.where(other[y0:v+radius+1,x0:u+radius+1])
+            if not len(yy):continue
+            distance=float(np.min(np.hypot(xx+x0-u,yy+y0-v)))
+            if distance<=radius:near.append((distance,index,other))
+        for _,_,other in sorted(near,key=lambda item:item[:2]):
+            other=self.refine_mask(camera,other)
+            if other is None:continue
+            point=located(other)
+            if point is not None and not robot(point):return other
+        return mask
+
     def observe(self,packet,tracking):
         import numpy as np
         from PIL import Image
@@ -67,13 +104,10 @@ class PointingSupervisor:
                 masks=[np.asarray(m,bool) for m in masks]
                 for x,y in result['points']:
                     u,v=int(x),int(y)
-                    choices=[m for m in masks if m.shape==camera.depth_m.shape and m[v,u] and 30<=m.sum()<.15*m.size]
-                    if not choices:continue
-                    mask=min(choices,key=lambda m:m.sum())
-                    mask=self.refine_mask(camera,mask)
+                    mask=self.pointed_mask(camera,masks,u,v,tracking)
                     if mask is None:continue
                     if any(np.array_equal(mask,d.mask) for d in detections):continue
                     yy,xx=np.where(mask)
                     detections.append(Detection(self.label,1.,(float(xx.min()),float(yy.min()),float(xx.max()+1),float(yy.max()+1)),mask=mask))
             self.targets.update(camera,detections,tracking,packet.timestamp)
-            self.events.append(dict(timestamp=packet.timestamp,camera=camera.frame_id,raw=result['raw'],wall_seconds=result['wall_seconds'],masks=len(detections),targets=[dict(id=t.track_id,position=t.position.tolist(),last_seen=t.last_seen,observations=t.observations) for t in self.targets.targets]))
+            self.events.append(dict(timestamp=packet.timestamp,camera=camera.frame_id,raw=result['raw'],wall_seconds=result['wall_seconds'],category_verification=result.get('category_verification',[]),masks=len(detections),targets=[dict(id=t.track_id,position=t.position.tolist(),last_seen=t.last_seen,observations=t.observations) for t in self.targets.targets]))

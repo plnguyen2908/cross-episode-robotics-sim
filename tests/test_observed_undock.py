@@ -166,3 +166,25 @@ def test_portal_arrival_uses_planned_pose_tolerance_not_exact_grid_cell():
     T=np.eye(4);T[:2,3]=[.49,.025]  # Neighbor cell, within 4 cm of checked goal.
     cmd=skill.step(NS(timestamp=0.,arm=NS(position=np.zeros(7))),NS(accepted=True,T_map_base=T),free,0.)
     assert cmd['status']=='undock_complete' and skill.error is None
+
+
+def test_localization_correction_during_departure_is_replanned_from_the_new_estimate():
+    grid=ObservedNavigationMap(MapConfig(extent_m=4,resolution=.05))
+    checker=NS(clear=lambda p:True,swept=lambda a,b:True,detail=None)
+    dock=NS(grid=grid,events=[],make_checker=lambda *args:checker)
+    skill=ObservedUndock(dock);free=np.ones(grid.floor_views.shape,bool)
+    packet=NS(timestamp=0.,arm=NS(position=np.zeros(7)));T=np.eye(4)
+    step=lambda now:skill.step(packet,NS(accepted=True,T_map_base=T),free,now)
+    def jump(now):
+        # The final turn has begun when the estimate moves 6 cm sideways,
+        # outside the validated free interior.
+        T[:2,3]=dock.goal[:2];T[1,3]+=.06
+        skill.follower.rotating=True;skill.goal_region=np.zeros_like(free)
+        return step(now)
+    assert step(0.)['status']=='observed_undock_to_transit'
+    goal=dock.goal.copy();result=jump(1.)
+    assert result['forward']==0 and skill.error is None and skill.follower is None
+    assert dock.events[-1]['event']=='undock_replanned'
+    assert step(1.1)['status']=='observed_undock_to_transit' and not np.allclose(dock.goal,goal)
+    jump(2.);step(2.1);jump(3.)
+    assert skill.error=='Dock turn drift requires replanning'

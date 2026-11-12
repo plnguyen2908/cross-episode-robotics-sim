@@ -92,6 +92,19 @@ def test_failed_place_retains_hand_and_never_runs_empty_return(tmp_path,success)
     assert ctx['continuation']==(tmp_path/'return' if success else placed)
 
 
+def test_successful_release_stays_empty_when_return_posture_fails(tmp_path):
+    from cross_episode_sim.evaluation.sensor_household import SensorHouseholdPipeline
+    pipeline=object.__new__(SensorHouseholdPipeline)
+    def fail(*args):raise RuntimeError('return planning failed')
+    pipeline.stage=fail
+    placed=tmp_path/'release';dock=tmp_path/'dock'
+    ctx=dict(root=tmp_path,number=2,held='bowl',carry=tmp_path/'carry')
+    with pytest.raises(RuntimeError,match='return planning failed'):
+        pipeline._finish_component_place(ctx,dict(success=True),placed,lambda *a:None,observed_map=dock)
+    assert ctx['held'] is None and ctx['carry'] is None
+    assert ctx['continuation']==placed
+
+
 def test_microwave_loaded_approach_does_not_choose_lateral_shortcut(tmp_path,monkeypatch):
     from cross_episode_sim.code_policy.household_session import HouseholdSession
     from cross_episode_sim.navigation import aperture_dock

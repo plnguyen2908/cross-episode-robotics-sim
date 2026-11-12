@@ -35,12 +35,8 @@ class FrozenBaseDepartureDocking(ShapedDocking):
 
 def make_carry_departure(grid, payload, *, known_map_only, allow_initial_overlap_exit=False):
     if known_map_only:
-        result=ObservedUndock(FrozenBaseDepartureDocking(grid,payload.geometry),
-                              runtime_collision_stop=False,
-                              motion_config=HouseExplorationConfig())
-        if allow_initial_overlap_exit:
-            from .overlap_departure import LocalOverlapDeparture
-            result=LocalOverlapDeparture(result)
-        return result
+        from .recorded_departure import RecordedDeparture
+        # No second shape/height-projection veto on a traveled approach.
+        return RecordedDeparture(grid)
     from cross_episode_sim.control.observed_payload import PayloadDocking
     return ObservedUndock(PayloadDocking(grid,payload))

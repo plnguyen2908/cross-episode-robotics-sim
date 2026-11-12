@@ -12,7 +12,7 @@ class ObservedUndock:
         self.max_distance=max_distance;self.goal_heading=goal_heading
         self.planner=planner or plan_to_any_dock
         self.docking=docking;self.follower=None;self.last_frame=None
-        self.velocity=np.zeros(2);self.started=None;self.error=None;self.budget=30.
+        self.velocity=np.zeros(2);self.started=None;self.error=None;self.budget=30.;self.replans=0
 
     def step(self,packet,tracking,free,now):
         stop=lambda status:dict(status=status,forward=0.,yaw=0.)
@@ -98,7 +98,14 @@ class ObservedUndock:
                 return stop('undock_complete')
         else:
             try:desired=np.array(self.follower.command(pose))
-            except RuntimeError as exc:self.error=str(exc);return stop('undock_tracking_error')
+            except RuntimeError as exc:
+                if str(exc)!='Dock turn drift requires replanning' or self.replans>=2:
+                    self.error=str(exc);return stop('undock_tracking_error')
+                # A localization correction moved the estimate off the checked
+                # segment. Stop and check a new departure from where it is now.
+                self.replans+=1;self.follower=None;self.started=now;self.velocity[:]=0.
+                dock.events.append(dict(event='undock_replanned',position=pose[:2].tolist(),reason=str(exc)))
+                return stop('observed_undock_to_transit')
         if self.follower.complete:
             if not self.erode_goals:
                 # Portal goals are geometric exit poses, not a room-transit
