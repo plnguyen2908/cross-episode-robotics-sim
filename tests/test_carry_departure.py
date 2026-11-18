@@ -16,8 +16,11 @@ def test_frozen_departure_has_no_second_shape_veto():
     payload=NS(geometry=NS(boxes=lambda q:[base]))
     skill=make_carry_departure(grid,payload,known_map_only=True)
     from cross_episode_sim.navigation.recorded_departure import RecordedDeparture
-    assert isinstance(skill,RecordedDeparture)
-    assert not skill.runtime_collision_stop
+    from cross_episode_sim.navigation.carry_departure import RecordedThenCheckedDeparture
+    # The recorded retrace is used first; a shape-checked fallback only replaces it
+    # when the approach cannot be retraced (tests/test_carry_departure_fallback.py).
+    assert isinstance(skill,RecordedThenCheckedDeparture) and isinstance(skill.active,RecordedDeparture)
+    assert not skill.active.runtime_collision_stop
     assert skill.docking.checker is None
     assert map_digest(grid)==before
 

@@ -20,7 +20,14 @@ def test_retreat_uses_observed_route_and_stops_on_new_collision(monkeypatch):
     checker.clear=lambda p:False;checker.detail={'reason':'observed_3d_collision'}
     packet.timestamp=.1
     result=skill.step(packet,tracking,np.ones(grid.floor_views.shape,bool),.1)
-    assert result['forward']==0 and skill.error=='undock_clearance_stop'
+    # The stop is immediate. Since fix82 the departure then replans from where
+    # it stands (twice at most); with everything blocked no route is found and
+    # it ends without moving.
+    assert result['forward']==0 and any(e['event']=='undock_clearance_stop' for e in dock.events)
+    monkeypatch.setattr('cross_episode_sim.navigation.observed_undock.plan_to_any_dock',lambda *a:False)
+    packet.timestamp=.2
+    result=skill.step(packet,tracking,np.ones(grid.floor_views.shape,bool),.2)
+    assert result['forward']==0 and skill.error=='undock_route_unverified'
 
 def test_no_observed_open_floor_does_not_move():
     grid=ObservedNavigationMap(MapConfig(extent_m=4,resolution=.1))

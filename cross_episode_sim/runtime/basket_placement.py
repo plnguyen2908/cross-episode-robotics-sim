@@ -12,8 +12,12 @@ import numpy as np
 from . import artifacts
 
 
-def refine_basket_dock(pipeline,root,source,receptacle,description,station,number):
-    """Observe after arrival, then physically recenter before arm planning."""
+def refine_basket_dock(pipeline,root,source,receptacle,description,station,number,retry=True):
+    """Observe after arrival, then physically recenter before arm planning.
+
+    A redock that completes its route but ends just outside the heading
+    tolerance is observed again and recentred once from where it stopped.
+    """
     from ..perception.receptacle_front import interior_dock_anchor,observed_front,frontal_heading_error
     perception=root/'basket_close_perception'
     pipeline.stage(f'{number}_observe_interior',[sys.executable,'scripts/test_basket_place.py',
@@ -30,12 +34,26 @@ def refine_basket_dock(pipeline,root,source,receptacle,description,station,numbe
                     refinement_needed=not aligned,pre_dock_arm_ik=False)
     artifacts.write_text(perception/'report.json',json.dumps(evidence))
     print('BASKET_INTERIOR_REDOCK',json.dumps(evidence),flush=True)
-    if aligned:return source
+    if aligned:
+        if not retry:
+            # The stop pose of the missed redock, now measured as aligned.
+            arrival=json.loads(artifacts.read_text(source/'report.json'))
+            artifacts.write_text(source/'report.json',json.dumps(dict(arrival,docking_success=True,
+                docking_confirmed_by='fresh interior observation after the redock stopped')))
+        return source
     dock=root/'basket_refined_dock'
     pipeline.stage(f'{number}_refine_dock',[sys.executable,'scripts/test_basket_place_redock.py',
         '--start',str(source),'--perception',str(perception),'--continuation-map',str(source),
         '--output',str(dock)],dock/'report.json','docking_success')
     result=json.loads(artifacts.read_text(dock/'report.json'))
+    if not result.get('docking_success') and retry and result.get('error') is None and result.get('fixed_map_unchanged'):
+        # The route was completed with the object held; only the final heading missed.
+        print('BASKET_REDOCK_RETRY',json.dumps(dict(heading_error_rad=result.get('docking_heading_error_rad'))),flush=True)
+        again=root/'basket_redock_retry';again.mkdir(exist_ok=True)
+        stopped=pipeline.checkpoint(again/'handoff',dock)
+        artifacts.save_array(stopped/'observed_payload_tool.npy',artifacts.load_array(dock/'observed_payload_tool.npy'))
+        artifacts.write_text(stopped/'report.json',json.dumps(dict(result,initialization_valid=True)))
+        return refine_basket_dock(pipeline,again,stopped,receptacle,description,station,f'{number}_retry',retry=False)
     if not result.get('docking_success'):
         raise RuntimeError('Basket interior redock failed: '+str(result.get('error')))
     # Placement must observe again after moving; the old cloud is not reused.
@@ -181,6 +199,22 @@ def place_in_basket(pipeline, root, carry, receptacle, description, station, num
         recovery=root/f'basket_recovery_{index}';recovery.mkdir(exist_ok=True)
         source=refine_basket_dock(pipeline,recovery,source,receptacle,description,station,f'{number}_recovery_{index}')
         dock=source;docking=json.loads(artifacts.read_text(dock/'report.json'))
+        # A long held item can itself hide the basket from the wrist camera once
+        # the arm is tucked again. Try the place from the raised arm, which just
+        # showed the interior, before tucking.
+        revealed=root/f'place_revealed_{index}';name=f'{number}_place_revealed_{index}'
+        pipeline.stage(name,[sys.executable,script,'--dock',str(dock),
+            '--receptacle',description,'--semantic-receptacle',receptacle,
+            '--output',str(revealed)],revealed/'report.json','execution_success')
+        result=json.loads(artifacts.read_text(revealed/'report.json'))
+        if result.get('execution_success') or result.get('phase')!='observe':
+            placed=revealed
+            if result.get('execution_success'):
+                for stage in getattr(pipeline,'stages',[]):
+                    if stage['name'].startswith(f'{number}_place') and not stage['success']:
+                        stage['recovered_by']=name
+            progress('basket_view_clearance','completed')
+            continue
         tuck_payload_before_place(runtime,payload,recovery/'loaded_tuck')
         source=pipeline.checkpoint(recovery/'placement_handoff',dock)
         artifacts.save_array(source/'observed_payload_tool.npy',payload)

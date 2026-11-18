@@ -11,7 +11,12 @@ def support_backend(receptacle, region, aperture_available=False):
     return 'generic'
 
 
-def prepare_support_view(runtime, tool_points, root, kind, aperture=None, *, cabinet_distances=None, cabinet_offsets=None, cabinet_require_observed_support=True):
+# Datagen oracle cabinet stand poses: (distance from the door plane, metres past
+# the closed handle on the side away from the hinge). First is the oracle's own.
+ORACLE_CABINET_SIDE_DOCKS=((.51,.33),(.59,.33),(.43,.33),(.51,.25),(.59,.25),(.67,.33))
+
+
+def prepare_support_view(runtime, tool_points, root, kind, aperture=None, *, cabinet_distances=None, cabinet_offsets=None, cabinet_require_observed_support=True, cabinet_side_docks=None):
     """Retain the grasp while exposing the support; no privileged scene input."""
     from ..control.held_view_posture import raise_held_view
     from ..navigation.shaped_docking import RobotGeometry
@@ -40,7 +45,10 @@ def prepare_support_view(runtime, tool_points, root, kind, aperture=None, *, cab
     if kind == 'cabinet':
         from ..navigation.aperture_dock import dock_to_aperture
         options = {'offsets': cabinet_offsets} if cabinet_offsets is not None else {}
+        from ..control.held_view_posture import arm_start_clear
         dock_to_aperture(runtime, aperture, tool_points, root/'aperture_dock',
                          distances=cabinet_distances or (.65,.60,.70,.55),
-                         multi_goal=cabinet_distances is not None, require_observed_support=cabinet_require_observed_support, **options)
+                         multi_goal=cabinet_distances is not None, require_observed_support=cabinet_require_observed_support,
+                         arm_clear=lambda attempt: arm_start_clear(runtime, tool_points, root/f'arm_start_check_{attempt}'),
+                         side_docks=cabinet_side_docks, **options)
     return tool_points

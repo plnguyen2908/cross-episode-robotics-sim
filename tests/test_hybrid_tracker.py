@@ -46,6 +46,35 @@ def test_bridge_keeps_the_motion_that_explains_depth(monkeypatch):
     assert ok and overlap==1. and np.allclose(delta,np.eye(4))
 
 
+def slid(meters):
+    T=np.eye(4);T[0,3]=meters;return T
+
+
+def test_bridge_prefers_a_step_inside_the_limit_over_a_slide_along_a_blank_wall(monkeypatch):
+    import open3d as o3d
+    rgb,d,K=scene();t=HybridRGBDTracker(K,np.eye(4));info=np.eye(6)*d.size
+    # Depth cannot tell the two apart on a blank wall and may favor the slide.
+    monkeypatch.setattr(t,'depth_disagreement',lambda previous,depth,delta:.0017 if delta[0,3]>.2 else .0024)
+    for order in ([slid(.217),slid(.024)],[slid(.024),slid(.217)]):
+        answers=iter([(True,delta,info) for delta in order])
+        monkeypatch.setattr(o3d.pipelines.odometry,'compute_rgbd_odometry',lambda *a:next(answers))
+        ok,delta,overlap=t.bridge_delta((rgb,d),rgb,d)
+        assert ok and np.allclose(delta,slid(.024))
+
+
+def test_bridge_still_reports_a_slide_when_no_term_stays_inside_the_limit(monkeypatch):
+    import open3d as o3d
+    rgb,d,K=scene();t=HybridRGBDTracker(K,np.eye(4));info=np.eye(6)*d.size
+    answers=iter([(True,slid(.3),info),(True,slid(.25),info)])
+    monkeypatch.setattr(o3d.pipelines.odometry,'compute_rgbd_odometry',lambda *a:next(answers))
+    ok,delta,overlap=t.bridge_delta((rgb,d),rgb,d)
+    assert ok and not t.plausible(delta,overlap)
+    t.update(rgb,d);monkeypatch.setattr(t.keys,'update',lambda rgb,depth:(None,0,float('inf'),'no verified keyframe match'))
+    monkeypatch.setattr(t,'bridge_delta',lambda *a:(True,slid(.25),1.))
+    pose,n,rmse,status=t.update(rgb,d)
+    assert pose is None and status=='odometry and keyframe tracking lost' and t.lost
+
+
 def weak_tracker(monkeypatch,matched,bridged,n):
     rgb,d,K=scene();t=HybridRGBDTracker(K,np.eye(4),planar_base=False);t.update(rgb,d);calls=[]
     def keys_update(rgb,depth):
@@ -71,8 +100,11 @@ def test_stage_can_keep_matched_keyframes():
     from cross_episode_sim.slam.rgbd import RGBDMapper
     from cross_episode_sim.slam.session import TrackingSession
     mapper=RGBDMapper(fuse_dense=False);view=TrackingSession(mapper,global_frame=True).view()
-    with view.matched_keyframes():assert not mapper.refine_weak
-    assert mapper.refine_weak
+    with view.matched_keyframes():
+        assert not mapper.refine_weak
+        # Station exploration turns in place for long stretches: the issued-motion bound stays on.
+        assert mapper.bound_bridges
+    assert mapper.refine_weak and mapper.bound_bridges
 
 
 def test_unrefined_weak_match_is_kept(monkeypatch):

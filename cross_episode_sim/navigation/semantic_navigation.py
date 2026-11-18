@@ -96,7 +96,7 @@ class SemanticNavigator:
         self.resense_until=None;self.resense_attempts=0
         self.last_detection=-np.inf;self.detection_period=detection_period
         self.detection_wall_seconds=0.;self.detection_calls=0
-        self.last_target_probe=-np.inf;self.retry_after={};self.attempts={};self.attempt_observations={}
+        self.last_target_probe=-np.inf;self.retry_after={};self.probe_failures={};self.attempts={};self.attempt_observations={}
         self.view_offsets=(0.,.45,-.45,.7,-.7);self.view_index=0;self.view_arrived_at=None
         self.inspection_started=None;self.view_plan_stamp=None;self.planned_heading=None;self.needs_confirmation=False
         self.mode='explore';self.terminal=None;self.started=None;self.last_detections={};self.alignment_started=None
@@ -121,9 +121,7 @@ class SemanticNavigator:
         self.mode='explore';self.follower.terminal=None;self.follower.path=[]
         self.follower.goal=None;self.follower.target=None
         self.alignment_started=None;self.view_plan_stamp=None
-        # A paused exploration path may no longer start at the current position.
-        self.explorer.path=[];self.explorer.goal=None;self.explorer.last_time=now
-        self.explorer.velocity=np.zeros(2)
+        self.explorer.resume(now)
         return self.follower._stop('recover_'+reason)
 
     def observe(self,packet,tracking):
@@ -168,6 +166,7 @@ class SemanticNavigator:
         else:self.inspection_started=None
         if self.mode!='explore' and self.follower.target is not None and not any(t is self.follower.target for t in self.targets.targets):
             self.mode='explore';self.follower.terminal=None;self.follower.path=[]
+            self.explorer.resume(now)
         self.follower.camera=packet.cameras['navigation'];self.follower.base_pose=tracking.T_map_base
         xy=tracking.T_map_base[:2,3]
         if self.resense_until is not None:
@@ -186,7 +185,11 @@ class SemanticNavigator:
                 self.explorer._sync_support();self.follower._sync_support()
                 self.follower.support|=self.explorer.support
                 self.follower.target=target
-                if self.follower._plan(xy,now) is None:
+                reason=self.follower._plan(xy,now)
+                if reason is not None and self.probe_failures.get(target.track_id)!=reason:
+                    self.probe_failures[target.track_id]=reason
+                    self.follower.events.append(dict(time=now,event='target_probe_failed',track=target.track_id,reason=reason))
+                if reason is None:
                     self.follower.phase='travel';self.follower.terminal=None
                     self.follower.last_time=now;self.follower.velocity=np.zeros(2)
                     self.follower.last_progress=xy.copy();self.follower.progress_time=now

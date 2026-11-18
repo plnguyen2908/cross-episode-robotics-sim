@@ -60,3 +60,41 @@ def test_unknown_floor_allowed_without_erasing_obstacles_or_floor_map():
     assert not checker.swept(np.zeros(3),goal)
     assert checker.detail['reason']=='observed_3d_collision'
     assert grid.evidence[row,col,2]==2 and not grid.floor_views.any()
+
+
+def _square_base_at_wall():
+    """A 0.48 m square base and a wall it only just fits against when facing it."""
+    from cross_episode_sim.navigation.shaped_docking import ShapedDocking,ObservedShapeChecker
+    class Checker:
+        swept=ObservedShapeChecker.swept
+        detail=None
+        def clear(self,pose):
+            c,s=np.cos(pose[2]),np.sin(pose[2])
+            return pose[0]+.24*(abs(c)+abs(s))<=.30
+    class Dock(ShapedDocking):
+        def make_checker(self,pose,q):return Checker()
+    return Dock(None,None,max_nodes=3000),Checker()
+
+
+def test_dock_too_tight_to_turn_at_is_reached_by_a_straight_run_in():
+    from cross_episode_sim.navigation.placement_docks import plan_to_any_dock
+    dock,checker=_square_base_at_wall()
+    start=np.array([.05,-.12,0.]);goal=np.array([.05,0.,0.]);q=np.zeros(7)
+    assert checker.clear(start) and checker.clear(goal)
+    assert not checker.swept(goal,goal+np.r_[0,0,.1]) and not checker.swept(goal,goal-np.r_[0,0,.1])
+    # The turn-at-the-dock routes alone cannot make this 12 cm sideways move.
+    assert not dock.plan_candidates(start,q,[goal]) and not plan_to_any_dock(dock,start,q,[goal])
+    assert plan_ranked_docks(dock,start,q,[goal])
+    assert dock.events[-1]['event']=='straight_in_approach'
+    path=[start]+list(dock.path)
+    assert all(checker.swept(a,b) for a,b in zip(path[:-1],path[1:]))
+    assert np.allclose(path[-1],goal) and path[-2][2]==goal[2] and path[-2][0]<goal[0]
+
+
+def test_straight_run_in_is_not_offered_through_an_obstacle():
+    from cross_episode_sim.navigation.qwen_docks import plan_straight_in
+    dock,checker=_square_base_at_wall()
+    start=np.array([-.6,0.,0.]);q=np.zeros(7)
+    assert not plan_straight_in(dock,start,q,[np.array([.07,0.,0.])])  # Dock itself overlaps the wall.
+    behind=np.array([.05,0.,np.pi])  # Facing away: the run-in would start inside the wall.
+    assert not plan_straight_in(dock,start,q,[behind])

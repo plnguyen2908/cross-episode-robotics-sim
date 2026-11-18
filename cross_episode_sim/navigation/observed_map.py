@@ -70,6 +70,28 @@ observability and footprint checks; it still requires live local sensing.
         self._changed_regions=[]
         self.fusion_region=None
 
+    def opened_leaf_mask(self, hinge_xy, open_handle_xy, *, extension=.06, half_thickness=.03, top=1.0, bottom=None):
+        """Voxels of a door leaf this robot opened, from its own estimate.
+
+        hinge -> opened handle (+extension past the handle) as a thin vertical
+        slab from the lowest obstacle layer up to `top`. Used to add the
+        open leaf to a frozen navigation map, which otherwise still shows
+        the door closed (navigation and carry run on the exploration map).
+        """
+        hinge=np.asarray(hinge_xy,float)[:2];end=np.asarray(open_handle_xy,float)[:2]
+        delta=end-hinge;length=float(np.linalg.norm(delta))
+        if not np.isfinite([*hinge,*end]).all() or length<.1:raise ValueError('Invalid opened leaf')
+        row,col=np.indices(self.floor_views.shape)
+        xy=self.cell_to_world(np.stack([col,row],axis=-1))-hinge
+        axis=delta/length;along=xy@axis;across=abs(xy@np.array([-axis[1],axis[0]]))
+        columns=(along>=0)&(along<=length+extension)&(across<=max(half_thickness,.5*self.config.resolution))
+        nz=self.evidence.shape[2]
+        heights=self.config.min_obstacle_height+(np.arange(nz)+.5)*self.config.height_resolution
+        # `bottom` limits the slab to a height band (an opened drawer hangs above
+        # the floor; a door leaf reaches down to it).
+        band=(heights<=top) if bottom is None else ((heights<=top)&(heights>=bottom))
+        return columns[:,:,None]&band[None,None,:]
+
     def invalidate_observed_door(self, hinge_xy, closed_handle_xy, *, half_thickness=.08, endpoint_margin=.10):
         """Forget the observed leaf interior, never certify it as traversable.
 

@@ -8,6 +8,12 @@ def transform(points, matrix):
     return points @ matrix[:2, :2].T + matrix[:2, 3]
 
 
+# A station entry recorded where its furniture was seen from, never reached.
+SIGHTING = 'exploration_sighting'
+# A station entry recorded where exploration stood at its furniture.
+STANDOFF = 'exploration_standoff'
+
+
 class RouteMemory:
     def __init__(self):
         self.routes = []
@@ -16,7 +22,7 @@ class RouteMemory:
         self.stations = {}
         self.poses = []
 
-    def record(self, poses, anchor, start, end):
+    def record(self, poses, anchor, start, end, start_kind='successful_transit_endpoint'):
         points = np.asarray([p[:2, 3] for p in poses])
         if len(points) < 2 or not start or not end:
             return
@@ -28,10 +34,11 @@ class RouteMemory:
         self.poses.extend([anchor @ pose for pose in poses])
         route_id = len(self.routes)-1
         self.edges.extend((offset+i,offset+i+1,route_id) for i in range(len(world)-1))
-        for label,index,pose in ((start,offset,poses[0]),(end,len(self.nodes)-1,poses[-1])):
+        for label,index,pose,kind in ((start,offset,poses[0],start_kind),
+                                      (end,len(self.nodes)-1,poses[-1],'successful_transit_endpoint')):
             global_pose = anchor @ pose
             self.stations.setdefault(label,[]).append(dict(node=index,
-                pose=global_pose.copy(),kind='successful_transit_endpoint'))
+                pose=global_pose.copy(),kind=kind))
 
     def record_dock(self, poses, anchor, station):
         """Remember a successful local approach, without certifying future grasps."""
@@ -139,11 +146,15 @@ def record_exploration(slam, landmarks, success, *, destination_ready=True):
     first=int(candidates[0])
     if len(poses[first:])<2:return dict(recorded=False,reason='No station-to-station segment')
     destination='dining table' if destination_ready else 'exploration endpoint'
-    memory.record(poses[first:],slam.anchor,'kitchen',destination)
+    # Exploration replaces the recognition viewpoints with its counter stand-off
+    # once it has stood there. Without that visit the kitchen end is only where
+    # the counter was recognised from. Say so; a loaded carry continues from there.
+    kind=STANDOFF if confirmed['kitchen'].get('reached') else SIGHTING
+    memory.record(poses[first:],slam.anchor,'kitchen',destination,start_kind=kind)
     # A recognition viewpoint can be across the room, or even through a door.
     # Keep the traveled graph, but do not alias a remote sighting as a reached
     # table destination. The existing fixed-map target navigator uses the
     # table's observed geometry until a successful transit/dock is recorded.
     return dict(recorded=True,source='successful_station_exploration',
-                start='kitchen',end=destination,samples=len(poses)-first,
+                start='kitchen',start_kind=kind,end=destination,samples=len(poses)-first,
                 continuous_session=session is not None)

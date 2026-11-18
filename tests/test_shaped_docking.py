@@ -379,3 +379,50 @@ def test_unverified_surface_on_a_frozen_map_falls_back_to_the_observation_turn()
     result=d.step(packet,NS(accepted=True,T_map_base=np.eye(4)),0.)
     assert [e['event'] for e in d.events][:2]==['surface_unverified','observe_approach_floor']
     assert d.terminal is None and result['forward']==0 and result['yaw']<0
+
+
+def standoff_dock(monkeypatch,clear_from,reason='observed_3d_collision',reach_to=9.):
+    """A pickup step on a counter whose face blocks every stand-off closer than clear_from."""
+    from cross_episode_sim.navigation import docking_candidates
+    from cross_episode_sim.navigation.local_scan import ScanConfig
+    target=np.array([2.,.3,1.]);gap=lambda c:float(np.linalg.norm(np.asarray(c)[:2]-target[:2]))
+    monkeypatch.setattr(docking_candidates,'observed_surface',lambda *a:(np.array([1.8,-1.,.9]),np.array([2.4,1.,.9]),np.array([-1.,0.])))
+    d=ShapedDocking(grid(),NS(boxes=lambda q:boxes(),reach=lambda pregrasp,q:'solution' if np.linalg.norm(pregrasp[:2])<=reach_to else None))
+    d.reset(NS(position=target));checker=NS(detail={})
+    def clear(candidate):
+        checker.detail={} if gap(candidate)>=clear_from else dict(reason=reason)
+        return gap(candidate)>=clear_from
+    # No route is accepted here; the step only has to show what it offers.
+    checker.clear=clear;checker.swept=lambda a,b:False;offered=[]
+    monkeypatch.setattr(d,'make_checker',lambda pose,q:checker)
+    monkeypatch.setattr(d,'plan_candidates',lambda pose,q,candidates,source:offered.extend(gap(c) for c in candidates) or False)
+    packet=NS(timestamp=0.,arm=NS(position=np.array(ScanConfig().stowed_arm)),cameras={})
+    T=np.eye(4);T[:2,3]=[1.,.3]
+    d.step(packet,NS(accepted=True,T_map_base=T),0.)
+    return d,offered
+
+
+def test_pickup_steps_outward_when_the_whole_standoff_band_collides(monkeypatch):
+    # Set-table fix run 17, call 2: the bowl sat deep on the counter, both
+    # stand-offs of the band put the base corner in the counter face and
+    # nothing farther out was tried, although .70 m was clear and reachable.
+    d,offered=standoff_dock(monkeypatch,clear_from=.70)
+    assert np.allclose(offered,[.705,.73,.755,.78,.805])
+    event=next(e for e in d.events if e['event']=='pickup_standoff_extended')
+    assert np.isclose(event['blocked_to_m'],.63) and np.allclose(event['standoffs_m'],offered)
+    assert not any(e['event']=='pickup_candidates_rejected' for e in d.events)
+
+
+def test_pickup_standoff_extension_keeps_the_band_reach_and_floor_rules(monkeypatch):
+    # A clear stand-off inside the band is used as before.
+    d,offered=standoff_dock(monkeypatch,clear_from=.60)
+    assert np.allclose(offered,[.63]) and not any(e['event']=='pickup_standoff_extended' for e in d.events)
+    # Unobserved floor is for the wrist scan and exploration, not for standing farther back.
+    d,offered=standoff_dock(monkeypatch,clear_from=.70,reason='unobserved_base_support')
+    assert not offered and d.events[0]['event']=='pickup_candidates_rejected'
+    # Only stand-offs the arm reaches are offered, and none beyond the limit.
+    d,offered=standoff_dock(monkeypatch,clear_from=.70,reach_to=.74)
+    assert np.allclose(offered,[.705,.73])
+    d,offered=standoff_dock(monkeypatch,clear_from=.90)
+    assert not offered and d.events[0]['event']=='pickup_candidates_rejected'
+

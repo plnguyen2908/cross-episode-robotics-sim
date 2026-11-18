@@ -28,10 +28,19 @@ def rim_variants(row):
 def main():
     p=argparse.ArgumentParser();p.add_argument('--input',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True);a=p.parse_args()
-    x=artifacts.load_array(a.input);policy=M2T2Policy('unused','external/M2T2');start=time.monotonic()
+    x=artifacts.load_array(a.input);start=time.monotonic()
     from scripts.household_grasp_proposals import focused_cloud
     crop,surface=focused_cloud(x['points'],x['target'])
-    report=propose_pick_grasps(policy,x['points'][crop],x['rgb'][crop],x['target'],3,8)
+    from cross_episode_sim.perception.rpc import configured_client
+    graspgenx=configured_client('graspgenx')
+    if graspgenx is not None:
+        # Same opt-in pick backend as every other pick; the rim variants below
+        # still pivot each proposal about its observed contact.
+        from cross_episode_sim.control.graspgenx_policy import endpoint_proposals
+        report=dict(candidates=endpoint_proposals(graspgenx,surface),proposal_model='graspgenx')
+    else:
+        report=propose_pick_grasps(M2T2Policy('unused','external/M2T2'),x['points'][crop],x['rgb'][crop],x['target'],3,8)
+        report['proposal_model']='m2t2'
     report['focused_points']=int(crop.sum())
     report['full_world_points']=len(x['points'])
 

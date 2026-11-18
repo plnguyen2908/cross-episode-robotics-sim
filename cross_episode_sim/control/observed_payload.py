@@ -94,6 +94,7 @@ def reconstruct_held_points(packet, geometry, radius=.35):
 
 class PayloadDocking(ShapedDocking):
     """Shared base routing with the observed held surface in every sweep."""
+    edge_first=False  # not a pickup among neighbouring instances
     def __init__(self, grid, payload):
         super().__init__(grid, payload.geometry)
         self.payload = payload
@@ -156,3 +157,21 @@ def refine_held_payload(packet, geometry, prior_points_tool):
     combined=np.concatenate([prior,aligned,live])
     _,ids=np.unique(np.floor(combined/.005).astype(int),axis=0,return_index=True)
     return combined[ids],dict(live_points=len(live),agreement=agreement,max_residual_m=float(distances.max()),attachment_translation_m=shift.tolist())
+
+
+def live_checked_payload(packet, geometry, carried_points_tool):
+    """Carried held-object points widened by the surface the cameras see in the hand now.
+
+    The carried estimate is the pre-grasp surface placed at the planned grasp
+    pose. The object settles in the fingers on lift and swings during a long
+    carry (4-room fix run 7: the bowl turned about 10 degrees), so part of it
+    leaves the estimate's box, stays in the collision scene and blocks the arm
+    as an obstacle that moves with the tool. Use before filtering the held
+    object out of a scene. A live surface that does not match the carried one
+    changes nothing: furniture near the tool must not be erased as payload.
+    """
+    carried=np.asarray(carried_points_tool,float)
+    try:points,detail=refine_held_payload(packet,geometry,carried)
+    except ValueError as error:return carried,dict(refined=False,reason=str(error))
+    grown=np.maximum(0.,np.maximum(carried.min(0)-points.min(0),points.max(0)-carried.max(0)))
+    return points,dict(detail,refined=True,extent_growth_m=grown.tolist())

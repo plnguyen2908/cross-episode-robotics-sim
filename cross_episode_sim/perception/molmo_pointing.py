@@ -50,6 +50,10 @@ class PointingSupervisor:
     def refine_mask(self, camera, mask):
         return mask
 
+    def verify_mask(self, camera, mask, tracking):
+        """Optional category check of a pointed mask: None, or evidence with `accepted`."""
+        return None
+
     def pointed_mask(self,camera,masks,u,v,tracking):
         """Smallest object-sized mask under the point, else an adjacent one that measured depth supports.
 
@@ -98,7 +102,7 @@ class PointingSupervisor:
             cameras.append(packet.cameras['wrist'])
         for camera in cameras:
             result=self.pointer.point(Image.fromarray(camera.rgb),self.label+'s')
-            detections=[]
+            detections=[];handled=[];checked=[]
             if result['points']:
                 _,masks=self.segmenter.segment(camera.rgb[:,:,::-1].copy())
                 masks=[np.asarray(m,bool) for m in masks]
@@ -106,8 +110,13 @@ class PointingSupervisor:
                     u,v=int(x),int(y)
                     mask=self.pointed_mask(camera,masks,u,v,tracking)
                     if mask is None:continue
-                    if any(np.array_equal(mask,d.mask) for d in detections):continue
+                    if any(np.array_equal(mask,other) for other in handled):continue
+                    handled.append(mask)
+                    verdict=self.verify_mask(camera,mask,tracking)
+                    if verdict is not None:
+                        checked.append(dict(verdict,point=[float(x),float(y)]))
+                        if not verdict['accepted']:continue
                     yy,xx=np.where(mask)
                     detections.append(Detection(self.label,1.,(float(xx.min()),float(yy.min()),float(xx.max()+1),float(yy.max()+1)),mask=mask))
             self.targets.update(camera,detections,tracking,packet.timestamp)
-            self.events.append(dict(timestamp=packet.timestamp,camera=camera.frame_id,raw=result['raw'],wall_seconds=result['wall_seconds'],category_verification=result.get('category_verification',[]),masks=len(detections),targets=[dict(id=t.track_id,position=t.position.tolist(),last_seen=t.last_seen,observations=t.observations) for t in self.targets.targets]))
+            self.events.append(dict(timestamp=packet.timestamp,camera=camera.frame_id,raw=result['raw'],wall_seconds=result['wall_seconds'],category_verification=result.get('category_verification',[])+checked,masks=len(detections),targets=[dict(id=t.track_id,position=t.position.tolist(),last_seen=t.last_seen,observations=t.observations) for t in self.targets.targets]))

@@ -81,3 +81,42 @@ def export_final_diagnostics(runtime):
         path.parent.mkdir(parents=True,exist_ok=True)
         if isinstance(value,str):path.write_text(value)
         elif isinstance(value,dict):np.savez_compressed(path,**value)
+
+
+def persist_under(runtime, roots, model=None, data=None, model_link=None):
+    """Diagnostic only: write in-memory artifacts below `roots` to disk.
+
+    Pipeline handoffs live in memory during a run, so a failed stage cannot be
+    replayed afterwards. Arrays become .npy/.npz, text stays text, and a
+    'live episode model' marker becomes the live model (with the live state
+    next to it) when given. Never read back by the policy.
+    """
+    import mujoco
+    roots=[str(Path(r).resolve()) for r in roots]
+    written=0
+    for path,value in list(getattr(runtime,'artifacts',{}).items()):
+        if not any(path==r or path.startswith(r+'/') for r in roots):continue
+        target=Path(path);target.parent.mkdir(parents=True,exist_ok=True)
+        try:
+            if isinstance(value,dict):np.savez_compressed(target if target.suffix=='.npz' else str(target)+'.npz',**value)
+            elif isinstance(value,np.ndarray):np.save(target,value)
+            elif value=='live episode model' and (model is not None or model_link is not None):
+                # One model file per episode is already on disk for the state
+                # recordings: link to it. Writing the 570 MB model once per
+                # hand-off put 8-11 GB into every failed run and filled the
+                # shared disk on 2026-11-18.
+                if model_link is not None and Path(model_link).exists():
+                    if not target.exists():
+                        import os
+                        os.link(model_link,target)
+                elif model is not None:mujoco.mj_saveModel(model,str(target),None)
+                else:continue
+                if data is not None:
+                    state=np.empty(mujoco.mj_stateSize(model,mujoco.mjtState.mjSTATE_INTEGRATION))
+                    mujoco.mj_getState(model,data,state,mujoco.mjtState.mjSTATE_INTEGRATION)
+                    np.save(target.with_name('state_at_failure.npy'),state)
+            elif isinstance(value,str):target.write_text(value)
+            else:continue
+            written+=1
+        except (OSError,ValueError,TypeError):continue
+    return written

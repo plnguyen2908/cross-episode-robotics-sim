@@ -64,16 +64,25 @@ class HybridRGBDTracker:
         h,w=depth.shape;K=self.K
         intr=o3d.camera.PinholeCameraIntrinsic(w,h,K[0,0],K[1,1],K[0,2],K[1,2])
         opts=o3d.pipelines.odometry.OdometryOption();opts.depth_max=6.;opts.depth_diff_max=.1
-        best=(False,np.eye(4),0.);best_error=float('inf')
+        best=(False,np.eye(4),0.);best_rank=(True,float('inf'))
         # The hybrid term under-rotates beside weakly textured walls and doors.
         # Solve both terms and keep the motion that better explains measured depth.
         for term in (o3d.pipelines.odometry.RGBDOdometryJacobianFromHybridTerm,o3d.pipelines.odometry.RGBDOdometryJacobianFromColorTerm):
             try:ok,delta,info=o3d.pipelines.odometry.compute_rgbd_odometry(previous,rgbd,intr,np.eye(4),term(),opts)
             except RuntimeError:continue
             if not ok or not np.isfinite(delta).all():continue
-            error=self.depth_disagreement(previous_raw[1],depth,delta)
-            if error<best_error:best=(True,delta,float(info[5,5])/(h*w));best_error=error
+            overlap=float(info[5,5])/(h*w)
+            # Depth agrees with any slide along a blank wall, so it cannot rank
+            # one. A step the tracker would reject must not displace one it
+            # would accept (2-room fix run 9: a 0.22 m slide over a 0.02 m step).
+            rank=(not self.plausible(delta,overlap),self.depth_disagreement(previous_raw[1],depth,delta))
+            if rank<best_rank:best=(True,delta,overlap);best_rank=rank
         return best
+
+    @staticmethod
+    def plausible(delta,overlap):
+        """One frame's step: enough shared view, and no farther than the base moves in a frame."""
+        return bool(np.isfinite(delta).all() and overlap>=.15 and np.linalg.norm(delta[:3,3])<=.2)
 
     def update(self,rgb,depth):
         if np.count_nonzero(depth)<depth.size*.1:
@@ -86,7 +95,7 @@ class HybridRGBDTracker:
             # A few clustered matches fit a noisy pose, and a keyframe added from it
             # keeps that error. Prefer the frame-to-frame step when depth supports it.
             ok,delta,overlap=self.bridge_delta(self.previous_raw,rgb,depth)
-            if ok and overlap>=.15 and np.linalg.norm(delta[:3,3])<=.2:
+            if ok and self.plausible(delta,overlap):
                 matched=self.depth_disagreement(self.previous_raw[1],depth,np.linalg.inv(pose)@self.pose)
                 if self.depth_disagreement(self.previous_raw[1],depth,delta)<.9*matched:
                     pose=self.bounded(self.planar(self.pose@np.linalg.inv(delta)),commanded);self.keys.refine(pose)
@@ -99,7 +108,7 @@ class HybridRGBDTracker:
         if pose is None:
             if self.previous_raw is None or self.lost:return None,0.,rmse,status
             ok,delta,overlap=self.bridge_delta(self.previous_raw,rgb,depth)
-            if not ok or not np.isfinite(delta).all() or overlap<.15 or np.linalg.norm(delta[:3,3])>.2:
+            if not ok or not self.plausible(delta,overlap):
                 self.lost=True;self.keys.lost=True;self.recovery_candidate=None;return None,overlap,float('inf'),'odometry and keyframe tracking lost'
             pose=self.bounded(self.planar(self.pose@np.linalg.inv(delta)),commanded)
             status='odometry bridge'

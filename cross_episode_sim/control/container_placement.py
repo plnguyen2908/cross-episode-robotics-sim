@@ -9,7 +9,7 @@ from scipy.spatial.transform import Rotation
 from .observed_placement import supported_interior,unoccupied_contacts
 
 
-def interior_placement_candidates(surface, scene_points, held_points, tcp, radius):
+def interior_placement_candidates(surface, scene_points, held_points, tcp, radius, edge_margin=.03):
     surface=np.asarray(surface,float);held=np.asarray(held_points,float);tcp=np.asarray(tcp,float)
     valid=supported_interior(surface,surface,radius)
     valid &= unoccupied_contacts(surface,scene_points,radius,float(np.ptp(held[:,2])+.05))
@@ -29,7 +29,7 @@ def interior_placement_candidates(surface, scene_points, held_points, tcp, radiu
             rotation=tilt@Rotation.from_euler('z',yaw,degrees=True).as_matrix()
             relative=(held-tcp[:3,3])@rotation.T
             bottom=np.r_[(relative[:,:2].min(0)+relative[:,:2].max(0))/2,relative[:,2].min()]
-            extent=float(np.linalg.norm(relative[:,:2]-bottom[:2],axis=1).max()+.03)
+            extent=float(np.linalg.norm(relative[:,:2]-bottom[:2],axis=1).max()+edge_margin)
             admissible=supported_interior(surface,contacts,extent)
             admissible &= unoccupied_contacts(contacts,scene_points,extent,float(np.ptp(relative[:,2])+.05))
             for contact,accepted in zip(contacts,admissible):

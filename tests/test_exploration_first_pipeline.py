@@ -4,6 +4,13 @@ import pytest
 from cross_episode_sim.evaluation.sensor_set_table import SensorSetTablePipeline
 
 
+@pytest.fixture(autouse=True)
+def articulated_sources(monkeypatch):
+    # These stub sources have no compiled model; the frozen-joint check needs one.
+    monkeypatch.setattr('cross_episode_sim.evaluation.fixture_articulation.require_articulated',
+                        lambda source:dict(fixture_joints_checked=True))
+
+
 def source(tmp_path):
     p=tmp_path/'source';p.mkdir()
     (p/'config.json').write_text(json.dumps({'task':'set_table','scene':{'people':1}}))

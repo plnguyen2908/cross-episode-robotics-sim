@@ -36,3 +36,31 @@ def fixture_pointing_supervisor(pointer,segmenter,label):
     if any(word in label.lower() for word in ('microwave','cabinet','drawer','fridge')):
         pointer=ApplianceAssociatedPointer(pointer,label.removeprefix('handle on '))
     return PointingSupervisor(pointer,segmenter,label)
+
+
+# A countertop microwave is about 0.45 m tall and 0.75 m wide: its door handle is
+# within this height band and reach of any point on its body. A cabinet-door
+# handle under the counter (0.43 m below the microwave's, same x, in fix102) is not.
+APPLIANCE_BODY_HEIGHT_BAND=.30
+APPLIANCE_BODY_REACH=.60
+
+
+def appliance_body_points(pointer,camera,valid,appliance):
+    """Observed 3D points (camera_points frame) where the pointer marks the appliance itself."""
+    import numpy as np
+    from PIL import Image
+    from ..control.sensor_appliance_backend import pixel_point
+    bodies=[]
+    for pixel in pointer.point(Image.fromarray(camera.rgb),appliance).get('points',[]):
+        try:local=pixel_point(camera,valid,pixel)
+        except ValueError:continue
+        if np.isfinite(local).all():bodies.append(np.asarray(local,float))
+    return bodies
+
+
+def on_appliance_body(point,bodies):
+    """True when a handle point lies in the height band and reach of a pointed appliance body."""
+    import numpy as np
+    point=np.asarray(point,float)
+    return any(abs(point[2]-b[2])<=APPLIANCE_BODY_HEIGHT_BAND and np.linalg.norm(point[:2]-b[:2])<=APPLIANCE_BODY_REACH
+               for b in bodies)

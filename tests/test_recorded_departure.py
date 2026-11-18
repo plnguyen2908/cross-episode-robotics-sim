@@ -122,3 +122,90 @@ def test_retrace_reports_progress_only_forward_along_the_path():
     for x in np.arange(.4,1.01,.1):follower.command(np.array([x,0.,0.]))
     for x in np.arange(1.,-.01,-.1):follower.command(np.array([x,.1,np.pi]))
     assert follower.complete and follower.command(np.array([0.,.1,np.pi]))==(0.,0.)
+
+
+def retrace(skill,start,free,later=None,steps=3000):
+    """Drive a unicycle on the departure's commands; later replaces free after planning."""
+    true=np.array(start,float)
+    for step in range(steps):
+        c,s=np.cos(true[2]),np.sin(true[2])
+        T=np.eye(4);T[:2,:2]=[[c,-s],[s,c]];T[:2,3]=true[:2]
+        command=skill.step(NS(),NS(accepted=True,T_map_base=T),free if later is None or not step else later,step*.02)
+        if command['status'] in ('undock_complete',skill.error):break
+        true+=np.r_[command['forward']*np.cos(true[2]),command['forward']*np.sin(true[2]),command['yaw']]*.02
+    return command,true
+
+
+def test_departure_ends_with_the_base_inside_the_transit_region():
+    # Set-table fix run 6, call 8: the retrace stopped 3 cm short of an endpoint
+    # 7 cm inside the region, in a cell just outside it, and transit planning
+    # refused its start cell. Approaches cross the region boundary obliquely
+    # at many offsets; every completed departure must stand inside.
+    grid=ObservedNavigationMap(MapConfig(extent_m=4.,resolution=.05))
+    yy,xx=np.indices(grid.floor_views.shape)
+    x=grid.origin[0]+(xx+.5)*.05;y=grid.origin[1]+(yy+.5)*.05
+    for slope in (0.,.3,.7,1.):
+        free=x+slope*y<-.2
+        for heading in (0.,.2,.4):
+            for offset in np.arange(0.,.05,.01):
+                along=np.linspace(-1.,0.,35)[:,None]*[np.cos(heading),np.sin(heading)]+[offset,0.]
+                history=poses(along[:,0]);history[:,1,3]=along[:,1]
+                skill=RecordedDeparture(grid,history)
+                command,true=retrace(skill,[*along[-1],heading],free)
+                assert command['status']=='undock_complete',(slope,heading,offset)
+                col,row=grid.world_to_cell(true[:2])
+                assert free[row,col],(slope,heading,offset)
+                assert not skill.overrun
+
+
+def test_stop_short_of_the_region_continues_a_bounded_distance():
+    grid=ObservedNavigationMap(MapConfig(extent_m=4.,resolution=.05))
+    yy,xx=np.indices(grid.floor_views.shape)
+    x=grid.origin[0]+(xx+.5)*.05
+    history=poses(np.linspace(-1.,0.,35))
+    # The region seen while following ends 10 cm deeper than when planned.
+    skill=RecordedDeparture(grid,history)
+    command,true=retrace(skill,[0.,0.,0.],x<-.2,later=x<-.4)
+    assert command['status']=='undock_complete' and true[0]<-.4
+    assert 0<skill.overrun<=skill.max_overrun
+    assert skill.docking.events[-1]['event']=='continue_to_transit_region'
+    # Never an unbounded drive over floor that was not retraced.
+    skill=RecordedDeparture(grid,history)
+    command,true=retrace(skill,[0.,0.,0.],x<-.2,later=x<-.9)
+    assert command['status']==skill.error=='recorded_departure_short_of_transit'
+    assert true[0]>-.2-.111-.05-skill.max_overrun-.03
+    assert command['forward']==0 and command['yaw']==0
+
+
+def test_narrow_region_still_yields_a_departure():
+    grid=ObservedNavigationMap(MapConfig(extent_m=4.,resolution=.05))
+    yy,xx=np.indices(grid.floor_views.shape)
+    x=grid.origin[0]+(xx+.5)*.05
+    free=(x<-.2)&(x>-.36)  # three cells wide: no sample is deep inside it
+    skill=RecordedDeparture(grid,poses(np.linspace(-1.,0.,35)))
+    command,true=retrace(skill,[0.,0.,0.],free)
+    col,row=grid.world_to_cell(true[:2])
+    assert command['status']=='undock_complete' and free[row,col]
+
+
+def test_long_approach_beside_a_table_is_still_reversed():
+    grid=ObservedNavigationMap(MapConfig(extent_m=8.,resolution=.05))
+    yy,xx=np.indices(grid.floor_views.shape)
+    free=(grid.origin[0]+(xx+.5)*.05)<-2.9
+    history=poses(np.linspace(-3.2,0.,120))  # 2.8 m outside the transit region
+    route=reverse_approach(grid,history,np.zeros(3),free,margin=.1)
+    assert route is not None and route[-1,0]<-3. and np.linalg.norm(np.diff(route,axis=0),axis=1).sum()>2.9
+    assert reverse_approach(grid,history,np.zeros(3),free,max_distance=1.5) is None
+
+
+def test_redock_corrections_are_not_retraced():
+    grid=ObservedNavigationMap(MapConfig(extent_m=4.,resolution=.05))
+    yy,xx=np.indices(grid.floor_views.shape)
+    free=(grid.origin[0]+(xx+.5)*.05)<-.7
+    wiggle=np.r_[np.linspace(-1.,-.3,30),np.tile(np.r_[np.linspace(-.3,-.4,4),np.linspace(-.4,-.3,4)],3),np.linspace(-.3,0.,12)]
+    history=poses(wiggle)
+    route=reverse_approach(grid,history,np.zeros(3),free)
+    steps=np.diff(route[:,0])
+    assert (steps<0).all() and np.abs(steps).max()<=.25  # monotonic retreat, no jump
+    assert np.linalg.norm(np.diff(route,axis=0),axis=1).sum()<1.  # 1.5 m were traveled
+    assert all(np.isclose(history[:,0,3],x).any() for x in route[1:,0])  # recorded positions only

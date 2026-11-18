@@ -8,8 +8,8 @@ LABELS=('dining table','kitchen')
 POINTING_LABELS={'dining table':'dining table','kitchen':'kitchen counter'}
 
 class FurnitureMap:
-    def __init__(self,pointer,segmenter,remembered=(),period=8.):
-        self.pointer=pointer;self.segmenter=segmenter;self.landmarks=[];self.period=period;self.last=-float('inf');self.events=[]
+    def __init__(self,pointer,segmenter,remembered=()):
+        self.pointer=pointer;self.segmenter=segmenter;self.landmarks=[];self.events=[]
         # This task has one kitchen station and one dining-table destination.
         # Collapse legacy surface fragments; retain the strongest observed anchor.
         for label in LABELS:
@@ -18,7 +18,6 @@ class FurnitureMap:
                 item=copy.deepcopy(max(candidates,key=lambda x:x['observations']))
                 item['label']=label;self.landmarks.append(item)
         self.query_views={label:[] for label in LABELS}
-        self.last_discovery={label:-float('inf') for label in LABELS}
 
     def add(self,label,points,pose,timestamp):
         points=np.asarray(points)
@@ -34,7 +33,8 @@ class FurnitureMap:
         item.update(position=position.tolist(),observed_bounds=[lo.tolist(),hi.tolist()],last_seen=float(timestamp),observations=item['observations']+1)
         item['evidence'].append(dict(timestamp=float(timestamp),points=len(points)))
         # A sensor-observed robot viewpoint, not a simulator furniture parking pose.
-        if not any(np.linalg.norm(np.array(p)-pose[:3,3])<.2 for p in item['viewpoints']):item['viewpoints'].append(pose[:3,3].tolist())
+        # A stand-off the robot already reached is the station; later remote sightings do not add to it.
+        if not item.get('reached') and not any(np.linalg.norm(np.array(p)-pose[:3,3])<.2 for p in item['viewpoints']):item['viewpoints'].append(pose[:3,3].tolist())
         return item
 
     def queries(self, pose, timestamp):
@@ -42,6 +42,8 @@ class FurnitureMap:
 
         Cache negatives too. Time alone must not restart queries at an unchanged
         viewpoint. Different rooms/views remain eligible even for known labels.
+        View change alone paces discovery: a scan sweeps one field of view in
+        about two seconds, so a timer between new views skips most of a turn.
         """
         xy=np.asarray(pose[:2,3]);yaw=np.arctan2(pose[1,0],pose[0,0])
         due=[]
@@ -58,10 +60,8 @@ class FurnitureMap:
                     continue
                 reason='confirm_candidate'
             else:
-                if timestamp-self.last_discovery[label]<self.period:continue
                 view=dict(xy=xy.copy(),yaw=yaw,pending=False,attempts=0,last=-float('inf'))
                 self.query_views[label].append(view)
-                self.last_discovery[label]=timestamp
                 reason='new_view'
             due.append((label,view,reason))
         return due

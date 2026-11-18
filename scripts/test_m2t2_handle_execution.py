@@ -10,7 +10,7 @@ from cross_episode_sim.control.m2t2_policy import parallel_gripper_symmetries
 from cross_episode_sim.navigation.shaped_docking import RobotGeometry
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
 from cross_episode_sim.recording.deferred import StateVideoRecorder
-p=argparse.ArgumentParser();p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--center-length',action='store_true');p.add_argument('--prefer-deep-contact',action='store_true',help='Try angled full-depth cabinet contacts before shallow fallbacks');p.add_argument('--center-handle',action='store_true');p.add_argument('--candidate-offset',type=int,default=0);p.add_argument('--target',type=int,default=1);p.add_argument('--max-candidates',type=int,default=8);p.add_argument('--curobo-fallback',action='store_true');p.add_argument('--grasp-ranking',choices=['handle_axis','horizontal'],default='handle_axis');p.add_argument('--surface-filter',action='store_true');p.add_argument('--voxel-size',type=float,default=.02);p.add_argument('--contact-backoff',type=float,default=0.);p.add_argument('--approach-stand-off',type=float,default=.06);p.add_argument('--align-panel',action='store_true');p.add_argument('--pull-distance',type=float,default=0.);p.add_argument('--open-to-stop',action='store_true');p.add_argument('--open-step',type=float,default=.04);p.add_argument('--clearance-approach',action='store_true',default=__import__('os').environ.get('SENSOR_FIXTURE_CLEARANCE_APPROACH')=='1');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+p=argparse.ArgumentParser();p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--center-length',action='store_true');p.add_argument('--prefer-deep-contact',action='store_true',help='Try angled full-depth cabinet contacts before shallow fallbacks');p.add_argument('--center-handle',action='store_true');p.add_argument('--candidate-offset',type=int,default=0);p.add_argument('--target',type=int,default=1);p.add_argument('--max-candidates',type=int,default=8);p.add_argument('--curobo-fallback',action='store_true');p.add_argument('--grasp-ranking',choices=['handle_axis','horizontal'],default='handle_axis');p.add_argument('--surface-filter',action='store_true');p.add_argument('--voxel-size',type=float,default=.02);p.add_argument('--contact-backoff',type=float,default=0.);p.add_argument('--approach-stand-off',type=float,default=.06);p.add_argument('--align-panel',action='store_true');p.add_argument('--pull-distance',type=float,default=0.);p.add_argument('--open-to-stop',action='store_true');p.add_argument('--open-step',type=float,default=.04);p.add_argument('--base-assist-pull',type=float,default=0.,help='Map-checked distance the base may back away while holding the handle');p.add_argument('--open-target',type=float,default=.30);p.add_argument('--stop-at-target',action='store_true',help='End the pull at --open-target instead of the mechanical stop');p.add_argument('--arm-pull-limit',type=float,default=None,help='Arm-only part of the pull; the base assist covers the rest');p.add_argument('--clearance-approach',action='store_true',default=__import__('os').environ.get('SENSOR_FIXTURE_CLEARANCE_APPROACH')=='1');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 if not 0<a.open_step<=.04:raise ValueError('Contact segment must be in (0, 0.04] m')
 from cross_episode_sim.runtime.episode import current_runtime
 runtime=current_runtime()
@@ -137,10 +137,14 @@ if chosen:
   if a.open_to_stop and grasp_present:
    phase='incremental_pull';T=np.asarray(r['executed_tcp']);last_progress=0.;last_safe_q=q().copy()
    planner.fast_ik=True  # Grasp selection is fixed; follow the held handle locally.
-   for distance in np.arange(a.open_step,1.001,a.open_step):
+   # A drawer pulled to its mechanical stop (60 cm, fix78) ends at the robot's
+   # shoulder and leaves the hand no collision-free way to let go and withdraw.
+   arm_limit=min(a.open_target,a.arm_pull_limit) if (a.stop_at_target and a.arm_pull_limit) else a.open_target
+   for distance in np.arange(a.open_step,(arm_limit if a.stop_at_target else 1.)+.001,a.open_step):
     goal=T[:3,3]+distance*normal
     try:segment=planner.plan(q(),goal,T[:3,:3])
     except RuntimeError as exc:
+     print('PULL_BLOCKED',json.dumps(dict(distance=float(distance),error=str(exc)[:200])),flush=True)
      stop_reason='arm_path_blocked';pull_events.append(dict(distance=float(distance),error=str(exc)));break
     resisted=False
     for cmd in segment:
@@ -167,8 +171,46 @@ if chosen:
     if resisted:
      stop_reason='resisted_motion';verify_q=q().copy();break
     last_progress=progress;last_safe_q=q().copy();verify_q=segment[-1].copy()
-   else:stop_reason='travel_budget_exhausted'
-   report.update(stop_reason=stop_reason,pull_events=pull_events)
+   else:stop_reason=('arm_limit_reached' if arm_limit<a.open_target-1e-6 else 'opened_to_target') if a.stop_at_target else 'travel_budget_exhausted'
+   opening_distance=float(last_progress)
+   if a.base_assist_pull>0 and stop_reason in ('arm_path_blocked','resisted_motion','arm_limit_reached') and .08<=last_progress<a.open_target:
+    # The arm alone cannot pull a drawer far from a 0.65 m dock: it folds into
+    # its own self-collision margin after 12-24 cm (fix76). Keep the grasp and
+    # back the base away along the pull direction. The distance was checked
+    # against the robot's own map by the caller. Base encoders detect the
+    # drawer's stop (the base stops following its setpoint); finger encoders
+    # detect a lost grasp.
+    phase='base_assisted_pull'
+    qids=[m.joint('robot_0/'+n).qposadr[0] for n in ('base_x','base_y','base_theta')]
+    base_start=np.asarray(d.qpos[qids]).copy();heading=base_start[2];arm_hold=q().copy()
+    direction=np.array([np.cos(heading)*normal[0]-np.sin(heading)*normal[1],np.sin(heading)*normal[0]+np.cos(heading)*normal[1]])
+    direction/=np.linalg.norm(direction)
+    budget=min(a.base_assist_pull,a.open_target-last_progress);speed=.05;commanded=0.;base_stop='reached_target'
+    mapper=getattr(runtime,'mapper',None) if runtime is not None else None
+    while commanded<budget:
+     commanded=min(budget,commanded+speed*.02)
+     action={k:v.copy() for k,v in hold.items()};action['arm']=arm_hold;action['gripper']=np.array([255.])
+     base_target=base_start.copy();base_target[:2]+=commanded*direction;action['base']=base_target;controller.step(action)
+     for _ in range(round(.02/m.opt.timestep)):mujoco.mj_step(m,d)
+     recording.record(phase)
+     if mapper is not None:mapper.record_control(speed*float(normal[0]),0.,.02,speed*float(normal[1]))
+     moved=float((np.asarray(d.qpos[qids])[:2]-base_start[:2])@direction)
+     finger=np.array([d.joint(n).qpos[0] for n in ['robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint']])
+     if np.min(finger)>.79:base_stop='grasp_lost';break
+     if commanded-moved>.03:base_stop='resisted_motion';break
+    # Hold where the base actually is; never leave a setpoint pulling on a stop.
+    settled=np.asarray(d.qpos[qids]).copy();hold['base']=settled
+    for _ in range(25):
+     action={k:v.copy() for k,v in hold.items()};action['arm']=arm_hold;action['gripper']=np.array([255.]);controller.step(action)
+     for _ in range(round(.02/m.opt.timestep)):mujoco.mj_step(m,d)
+     recording.record(phase)
+    moved=float((np.asarray(d.qpos[qids])[:2]-base_start[:2])@direction)
+    opening_distance=float(last_progress+moved)
+    pull_events.append(dict(base_assisted=True,commanded_distance=float(commanded),base_progress=moved,stop=base_stop,arm_stop=stop_reason))
+    print('BASE_ASSISTED_PULL',json.dumps(pull_events[-1]),flush=True)
+    stop_reason={'reached_target':'opened_to_target','resisted_motion':'resisted_motion','grasp_lost':'grasp_lost'}[base_stop]
+    verify_q=arm_hold
+   report.update(stop_reason=stop_reason,pull_events=pull_events,opening_distance=opening_distance)
   elif a.open_to_stop:
    report.update(stop_reason=stop_reason,pull_events=[])
 

@@ -12,6 +12,11 @@ the existing IK, swept collision and measured grip checks remain required.
 Pads clear of that volume can still clip a corner: the faces they would close
 on then run oblique to the pads and the object slides out. face_skew measures
 that angle on the same completed volume.
+
+A proposal can also sit off the target's middle along the closing line. One pad
+then starts almost on the target and its finger linkage sweeps through the
+target on the way down. centred moves such an endpoint onto the middle of the
+completed volume that lies between the open pads.
 """
 import itertools
 
@@ -21,6 +26,10 @@ import numpy as np
 # at most 36. A stricter 30 degree limit left a live snack pick searching for
 # over ten minutes, so the limit sits between the two recorded groups.
 MAX_FACE_SKEW_DEG = 40.
+# A recorded snack-box pick had every top-down proposal 5-11 mm off the middle
+# of a 54 mm wide box and all of them rejected by the swept linkage check.
+MIN_CENTRING_SHIFT = .003
+MAX_CENTRING_SHIFT = .02
 
 
 def support_prism(target_surface, support_z, cell=.004):
@@ -62,6 +71,36 @@ class PadEnclosure:
         points = (self.points-tcp[:3, 3]) @ tcp[:3, :3]
         return any(np.any(np.all(np.abs((points-center) @ axes) <= half+self.margin, axis=1))
                    for center, axes, half in self.pads)
+
+    def centred(self, tcp):
+        """The endpoint moved along its closing line onto the target's middle, or None.
+
+        Only when the whole completed target at the pads fits between them: a
+        rim or wall grasp, with more target beyond a pad, is left where it is.
+        """
+        tcp = np.asarray(tcp, float)
+        points = (self.fine-tcp[:3, 3]) @ tcp[:3, :3]
+        slab = points[(points[:, 0] >= self.width[0]) & (points[:, 0] <= self.width[1])
+                      & (points[:, 2] >= self.depth[0]) & (points[:, 2] <= self.depth[1])]
+        if len(slab) < 20:
+            return None
+        low, high = slab[:, 1].min(), slab[:, 1].max()
+        shift = (low+high)/2
+        if high-low >= 2*(self.opening-self.margin) or not MIN_CENTRING_SHIFT <= abs(shift) <= MAX_CENTRING_SHIFT:
+            return None
+        moved = tcp.copy()
+        moved[:3, 3] += shift*tcp[:3, 1]
+        return moved
+
+    def centred_variants(self, rows):
+        """Each proposal preceded by its centred endpoint, when it has one."""
+        for row in rows:
+            moved = self.centred(row['tcp'])
+            if moved is not None:
+                shift = moved[:3, 3]-np.asarray(row['tcp'])[:3, 3]
+                yield dict(row, tcp=moved.tolist(), contact=(np.asarray(row['contact'])+shift).tolist(),
+                           closing_centre_shift_m=float(np.linalg.norm(shift)))
+            yield row
 
     def face_skew(self, tcp, bins=8):
         """Largest angle in degrees between a facing target side and the pads.

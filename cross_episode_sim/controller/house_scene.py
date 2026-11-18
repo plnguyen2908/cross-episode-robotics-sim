@@ -59,12 +59,20 @@ def _make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m
                 descendants.add(child)
                 keep.add(original.body(child).name)
     frozen = 0
+    articulated = 0
     for body in spec.bodies:
         if body.name in keep or body.name.startswith('room_door_'):
             continue
         for joint in list(body.joints):
-            # Freezing articulated joints at their authored reference preserves
-            # their initial physical transform, including native doorway doors.
+            # User decision, November 16, 2026: every fixture articulation
+            # (cabinet doors, drawers, appliance doors, knobs) stays as authored
+            # in RoboCasa, not only the task-bound one. A task may use any
+            # eligible cabinet or drawer, and a robot cannot tell a frozen
+            # door from a working one by looking. Non-task loose objects
+            # (free joints) are still fixed at their authored poses.
+            if joint.type != mujoco.mjtJoint.mjJNT_FREE:
+                articulated += 1
+                continue
             spec.delete(joint)
             frozen += 1
     from cross_episode_sim.tasks.history_views import install_room_cameras
@@ -85,7 +93,8 @@ def _make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m
     return model, data, {'scene_xml': str(Path(scene_xml).resolve()), 'whole_house': True,
                          'original_bodies': original.nbody, 'original_geoms': original.ngeom,
                          'bodies_with_robot': model.nbody, 'geoms_with_robot': model.ngeom,
-                         'frozen_joints': frozen, 'native_poses_preserved': True,
+                         'frozen_joints': frozen, 'articulated_fixture_joints': articulated,
+                         'native_poses_preserved': True,
                          'room_doors': room_doors,
                          'cabinet_clearance': cabinet_clearance,
                          'floor_geometry': 'native, unchanged',

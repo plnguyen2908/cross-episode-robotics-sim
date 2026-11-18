@@ -22,10 +22,14 @@ class TrackingResult:
 class RGBDMapper:
     @contextmanager
     def matched_keyframes(self):
-        """Keep keyframe poses as matched for one stage; weak-match refinement resumes after it."""
-        self.refine_weak=False;self.bound_bridges=False
+        """Keep keyframe poses as matched for one stage; weak-match refinement resumes after it.
+
+        Bridged steps stay bounded by the issued base motion: scan turns facing
+        a blank wall otherwise slide the estimate with no translation commanded.
+        """
+        self.refine_weak=False
         try:yield
-        finally:self.refine_weak=True;self.bound_bridges=True
+        finally:self.refine_weak=True
     def record_control(self,forward,yaw,dt,lateral=0.):
         """Issued base motion bounds bridged steps; it is never integrated as progress."""
         if self.tracker is not None:self.tracker.command(forward,yaw,dt,lateral)

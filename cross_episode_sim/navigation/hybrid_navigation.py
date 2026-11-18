@@ -2,6 +2,25 @@
 import numpy as np
 from .house_exploration import HouseExplorer
 from .semantic_navigation import astar_observed
+from .edge_first import edge_first
+
+EDGE_LOOK_RANGE=1.6    # the docking planner's own close-range band
+EDGE_LOOK_ROUNDS=3     # pointing rounds: two form a track, the third settles its category
+EDGE_LOOK_SECONDS=4.
+
+
+def scan_stop_count_resets(status):
+    """Whether a local-scan step status clears the count of collision-stopped scan actions.
+
+    Only a completed action (or a status from outside the scan) does. A step
+    that merely starts an action must not: beside the counter the first 50 Hz
+    tick of each turn was clear and the second was stopped, so the count never
+    reached its limit and the robot twitched in place for over 60 simulated
+    seconds (fix144, last drive to the fridge: 686 scan predictions, no motion).
+    """
+    if status in {'await_fresh_ring_observation','ring_action_timeout'}:return False
+    return status=='ring_action_complete' or not str(status).startswith('ring_')
+
 
 class RoomWaypointFollower(HouseExplorer):
     def _depth(self,camera):
@@ -24,6 +43,12 @@ class RoomWaypointFollower(HouseExplorer):
             return None
         return 'room_route_unobserved'
 
+# A confirmed handle this close is left to the fixture skill's own redock.
+FIXTURE_HANDOFF_DISTANCE=2.
+# Handle heights (map z, metres) the arm reaches from a frontal dock.
+HANDLE_HEIGHT=(.25,1.35)
+
+
 class HybridNavigator:
     """Only sensor packets, SLAM estimates and inferred semantic maps enter.
 
@@ -44,6 +69,7 @@ class HybridNavigator:
         self.searched_viewpoints=[];self.room_approach=False
         self.tentative_attempted=set();self.tentative_until=None;self.proposal_inspection_started=None
         self.confirmation_since=None;self.done_at=None;self.found_target=None;self.object_search_success=False
+        self.edge_look=None;self.edge_looked_for=None
     def _switch(self,mode,now):
         if mode==self.mode:return
         self.events.append(dict(time=now,event='mode',previous=self.mode,next=mode))
@@ -171,13 +197,52 @@ class HybridNavigator:
         self._switch('search_recovery',now)
 
     def _target(self,xy,now):
+        preferred=getattr(self,'preferred_target',None)
+        if preferred is not None:
+            # Chosen from the whole-kitchen survey (CabinetSurvey): keep it
+            # rather than switching to whichever handle is nearest.
+            return preferred
         candidates=[t for t in (self.semantic.targets.targets+getattr(getattr(getattr(self,'pointing',None),'targets',None),'targets',[])) if t.label==self.semantic.target_label and t.observations>=2 and 0<=now-t.last_seen<=self.readiness.max_age]
         return min(candidates,key=lambda t:np.linalg.norm(t.position[:2]-xy)) if candidates else None
 
     def _reuse_docking_target(self):
         return (hasattr(self.semantic.grid,'fixed_obstacle_points')
                 and self.mode=='redock' and self.docking is not None
-                and getattr(self.docking,'target',None) is not None)
+                and getattr(self.docking,'target',None) is not None
+                and self.edge_look is None)
+
+    def _tracks(self):
+        return self.semantic.targets.targets+getattr(getattr(getattr(self,'pointing',None),'targets',None),'targets',[])
+
+    def _edge_look_due(self,xy):
+        """True at the close-range stop where the pickup dock is about to be planned.
+
+        The first sighting can be metres away, where neighbouring instances
+        are a few pixels wide and only one of them forms a track.
+        """
+        docking=self.docking;current=getattr(docking,'target',None)
+        return (self.edge_look is None and getattr(docking,'edge_first',False) and self.mode=='redock'
+                and current is not None and current is not self.edge_looked_for
+                and getattr(docking,'path',0) is None and not docking.terminal
+                and getattr(self,'pointing',None) is not None
+                and hasattr(self.semantic.grid,'fixed_obstacle_points')
+                and np.linalg.norm(current.position[:2]-xy)<=EDGE_LOOK_RANGE)
+
+    def _finish_edge_look(self,packet,tracking,now):
+        look,self.edge_look=self.edge_look,None
+        current=self.docking.target
+        seen=[t for t in self._tracks() if t is not current and t.label==self.semantic.target_label and t.observations>=2
+              and len({h['timestamp'] for h in getattr(t,'history',[]) if h['timestamp']>=look['stamp']})>=2]
+        chosen,measured=edge_first(current,seen,packet,tracking.T_map_base)
+        self.edge_looked_for=chosen
+        self.events.append(dict(time=now,event='edge_look',seconds=now-look['started'],seen=len(seen),instances=measured,
+                                current=np.asarray(current.position,float).tolist(),chosen=np.asarray(chosen.position,float).tolist()))
+        # Standing still to look is not docking time.
+        if getattr(self.docking,'started',None) is not None:self.docking.started+=now-look['started']
+        if chosen is not current:
+            self.found_target=chosen;self.semantic.required_track_id=getattr(chosen,'track_id',None)
+            self.docking.reset(chosen)
+            self.events.append(dict(time=now,event='prefer_edge_instance',track_id=getattr(chosen,'track_id',None)))
 
     def step(self,packet,tracking,now):
         stop=self.semantic.follower._stop
@@ -349,7 +414,7 @@ class HybridNavigator:
                 self.blocked_predictions+=1
                 if self.blocked_predictions>=3 and target is not None:
                     return self._request_redock(now)
-            elif result['status'] not in {'await_fresh_ring_observation','ring_action_timeout'}:
+            elif scan_stop_count_resets(result['status']):
                 self.blocked_predictions=0
             if result['status']=='local_done':
                 self.done_at=now;self.confirmation_since=now
@@ -366,14 +431,54 @@ class HybridNavigator:
                 if now-self.done_at>=3.2:self.terminal='object_found_unconfirmed';return stop(self.terminal)
                 return stop('confirm_found_object')
             self.found_target=min(fresh,key=lambda t:np.linalg.norm(t.position[:2]-xy))
+            if getattr(self.docking,'edge_first',False):
+                self.found_target,measured=edge_first(self.found_target,fresh,packet,tracking.T_map_base)
+                if measured:self.events.append(dict(time=now,event='edge_ranked_instances',instances=measured))
             self.object_search_success=True
             self.events.append(dict(time=now,event='object_found_verified',track_id=getattr(self.found_target,'track_id',None)))
+            if getattr(self,'fixture_handle',False):
+                # Any eligible cabinet/drawer counts; prefer a handle the arm
+                # can reach (a wall cabinet handle at 1.6 m was not).
+                reachable=[t for t in fresh if HANDLE_HEIGHT[0]<=float(t.position[2])<=HANDLE_HEIGHT[1]]
+                # Identity, not ==: targets hold numpy arrays and == raised
+                # 'truth value of an array is ambiguous' (fix66 drawer navigation).
+                if reachable and not any(t is self.found_target for t in reachable):
+                    self.found_target=min(reachable,key=lambda t:np.linalg.norm(t.position[:2]-xy))
+            reach=float(np.linalg.norm(self.found_target.position[:2]-xy))
+            if getattr(self,'fixture_handle',False) and reach<=FIXTURE_HANDOFF_DISTANCE:
+                # A door/drawer handle is confirmed nearby. The fixture skill
+                # redocks in front of the handle it observes itself (Qwen-ranked
+                # stand-offs), so do not run the object pickup dock here: with
+                # several identical cabinets it looped between a blocked dock and
+                # blocked search turns until redocking was exhausted.
+                self.events.append(dict(time=now,event='fixture_handle_handoff',distance_m=reach))
+                self.terminal='fixture_handle_found';return stop(self.terminal)
+            if getattr(self,'confined_target',False) and reach<=FIXTURE_HANDOFF_DISTANCE:
+                # An object inside an opened fridge or microwave is confirmed
+                # nearby. Its pick docks in front of the opening by itself
+                # (aligned front entry); the open-surface pickup dock here
+                # looked for a counter edge that an appliance shelf does not
+                # have and ran out its time (fix105: 452 s, shape_dock_timeout).
+                self.events.append(dict(time=now,event='confined_target_handoff',distance_m=reach))
+                self.terminal='confined_target_found';return stop(self.terminal)
             self.last_readiness=self.readiness.check(self.found_target,packet,tracking,self.semantic.grid)
             if self.last_readiness.ready:self.terminal='manipulation_ready';return stop(self.terminal)
             if self.last_readiness.reason=='reachability_unverified' and self.docking is None:
                 self.terminal='reachability_unverified';return stop(self.terminal)
             return self._request_redock(now)
         if self.docking is not None:
+            # Choose among neighbouring instances before the dock pose exists:
+            # stand still at the close-range stop, look, then dock once.
+            if self._edge_look_due(xy):
+                self.edge_look=dict(started=now,stamp=packet.timestamp)
+                self.events.append(dict(time=now,event='edge_look_started',track_id=getattr(self.docking.target,'track_id',None),
+                                        distance_m=float(np.linalg.norm(self.docking.target.position[:2]-xy))))
+                return stop('edge_look')
+            if self.edge_look is not None:
+                rounds=len({e['timestamp'] for e in self.pointing.events if e['timestamp']>=self.edge_look['stamp']})
+                if rounds<EDGE_LOOK_ROUNDS and now-self.edge_look['started']<EDGE_LOOK_SECONDS:return stop('edge_look')
+                self._finish_edge_look(packet,tracking,now)
+                return stop('edge_look_complete')
             # Category search may discover a better instance in the wrist view.
             # Change only while stopped, with fresh repeated visual evidence.
             current=getattr(self.docking,"target",None)

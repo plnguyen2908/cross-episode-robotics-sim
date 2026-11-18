@@ -11,11 +11,12 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     p.add_argument('--navigation-seconds',type=float,default=180.)
+    p.add_argument('--exploration-seconds',type=float,default=900.,help='Upper limit for house exploration only; it stops as soon as the stations are found')
     p.add_argument('--skip-video-render',action='store_true')
     p.add_argument('--legacy-m2t2-interface',action='store_true',help='Retain the prior M2T2-only dispatch, including the qualified set-table baseline')
     p.add_argument('--fail-fast',action='store_true',help='Legacy abort on first failed household skill; default attempts the full recipe.')
     a=p.parse_args()
-    pipeline=SensorHouseholdPipeline(a.source,a.output,navigation_seconds=a.navigation_seconds,
+    pipeline=SensorHouseholdPipeline(a.source,a.output,navigation_seconds=a.navigation_seconds,exploration_seconds=a.exploration_seconds,
         pointing_device='cuda:0',furniture_device='cuda:0',continue_on_failure=not a.fail_fast,
         qwen_interface=not a.legacy_m2t2_interface)
     try:report=pipeline.run()

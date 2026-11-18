@@ -16,8 +16,20 @@ GROCERY_DESCRIPTIONS = {
 }
 
 
+# Storage cabinets are the lower (base) cabinets the arm can reach. Wall-mounted
+# upper cabinets are not storage targets (live fix56: pointing chose a wall
+# cabinet handle 1.58 m up). Model inputs only; labels and scoring unchanged.
+# Prefer the biggest one (live fix57 opened a short compartment under the
+# stove top; a sideways bowl barely fits through its opening).
+STORAGE_CABINET = ('kitchen storage cabinet (a lower base cabinet below the countertop, '
+                   'not a wall-mounted upper cabinet; prefer the largest, tallest '
+                   'cabinet door, not a small compartment under the stove or a drawer)')
+
+
 def visual_target_text(text):
     """Expand singular/plural category mentions, preserving location qualifiers."""
+    if 'kitchen storage cabinet' in text and 'wall-mounted' not in text:
+        text = re.sub(r'\bkitchen storage cabinets?\b', STORAGE_CABINET, text, count=1)
     for category, description in GROCERY_DESCRIPTIONS.items():
         # Keep the already-qualified drink call sites unchanged; navigation's
         # GroceryPointer still uses its existing bottle/carton description.

@@ -3,6 +3,7 @@
 All geometry is in the stationary robot-base frame. This backend deliberately
 does not navigate: callers dock using the observed map before invoking it.
 """
+import json
 import numpy as np
 from PIL import Image
 from scipy.spatial import cKDTree
@@ -34,6 +35,17 @@ def pixel_point(camera, valid, pixel):
     return camera.T_base_optical[:3,:3]@np.array([
         (u-camera.K[0,2])*z/camera.K[0,0],(v-camera.K[1,2])*z/camera.K[1,1],z])+camera.T_base_optical[:3,3]
 
+
+
+# A second, positional description for keys that sit beside a look-alike neighbour. Benchmark on
+# 17 saved Start presses (wrist view, private scoring): the plain description chose Start 13 times,
+# the Stop key twice (fix138, fix149) and declined twice; taking the positional answer when the two
+# part by more than 2 cm chooses Start 14 times, Stop once (fix138: both answers were Stop) and
+# declines twice. The positional description alone pressed 20 and 58 cm off where the plain one
+# declined, so it is only a second look after the plain one located a key.
+SECOND_KEY_DESCRIPTIONS={'Start key at the bottom of the microwave keypad':
+    'Start key: the left one of the two wide keys at the bottom of the microwave keypad'}
+SECOND_KEY_AGREE_METRES=.02
 
 class SensorApplianceBackend:
     def __init__(self, *, capture, joints, fingers, command, geometry, arm,
@@ -75,7 +87,9 @@ class SensorApplianceBackend:
             self.event('reobserved_knob_track',center=observed.center.tolist(),angle=observed.angle)
             return observed
         errors=[]
-        for name in ('wrist','navigation'):
+        # A key is located in the wrist view only: the mast camera never put a
+        # zoom-in on the right key in 14 saved presses (button_pointing.py).
+        for name in (('wrist',) if kind=='button' else ('wrist','navigation')):
             camera,valid=views[name];im=Image.fromarray(camera.rgb)
             result=self.pointer.point(im,target)
             self.event('point_control',camera=name,result=result)
@@ -83,15 +97,32 @@ class SensorApplianceBackend:
                 # Resolve small control text at a larger image scale. This is
                 # an image-derived crop, never a scene object bounding box.
                 if kind=='button':
-                    x,y=pixel;w,h=im.size
-                    bounds=(max(0,int(x)-90),max(0,int(y)-90),min(w,int(x)+90),min(h,int(y)+90))
-                    crop=im.crop(bounds).resize((540,540))
-                    refined=self.pointer.point(crop,target)
-                    if refined['points']:
-                        px,py=refined['points'][0]
-                        pixel=(bounds[0]+px*(bounds[2]-bounds[0])/540,
-                               bounds[1]+py*(bounds[3]-bounds[1])/540)
-                    self.event('refine_button',camera=name,result=refined)
+                    from ..perception.button_pointing import locate_key,key_at_view_edge
+                    located,_,record=locate_key(self.pointer,im,target,lambda p:pixel_point(camera,valid,p),pixel)
+                    if located is not None and key_at_view_edge(located,im.size):
+                        record=dict(record,reason='key at the edge of the view');located=None
+                    second=SECOND_KEY_DESCRIPTIONS.get(target)
+                    if located is not None and second is not None:
+                        # The Start key sits beside the Stop key at the bottom of
+                        # the keypad; the plain description sometimes lands on
+                        # Stop (fix149, the press then switched nothing on).
+                        # Locate it again by its position in that row; when the
+                        # two answers part, the positional one is taken.
+                        hint=(self.pointer.point(im,second).get('points') or [None])[0]
+                        if hint is not None:
+                            again,_,_=locate_key(self.pointer,im,second,lambda p:pixel_point(camera,valid,p),tuple(hint))
+                            if again is not None and not key_at_view_edge(again,im.size):
+                                apart=float(np.linalg.norm(pixel_point(camera,valid,again)-pixel_point(camera,valid,located)))
+                                record=dict(record,second_description_apart_m=round(apart,3))
+                                if apart>SECOND_KEY_AGREE_METRES:located=again;record=dict(record,chosen_by='key position in the row')
+                    self.event('refine_button',camera=name,result=record)
+                    print('BUTTON_LOCATED',json.dumps(dict(target=target[:40],camera=name,located=located is not None,
+                        **{k:(v if not isinstance(v,np.generic) else v.item()) for k,v in record.items()})),flush=True)
+                    if located is None:
+                        # No blind press of the unrefined spot (17-20 cm off in
+                        # three saved presses).
+                        errors.append('key not located: '+str(record.get('reason')));continue
+                    pixel=located
                 try:
                     point=pixel_point(camera,valid,pixel)
                     observed=fit_control(self.points,point,kind)

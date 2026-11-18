@@ -215,3 +215,32 @@ def test_shape_graph_reconnects_visits_when_old_segment_is_now_blocked():
     assert np.linalg.norm(path[-1][:2]-[-2,.8])<=.12
     assert all(checker.swept(a,b) for a,b in zip([start]+path,path))
     assert not checker.clear(np.zeros(3))  # Joining never clears the obstacle.
+
+
+def test_exploration_marks_the_kitchen_station_as_a_sighting(monkeypatch):
+    from types import SimpleNamespace
+    from cross_episode_sim.navigation import route_memory as module
+    memory=RouteMemory();monkeypatch.setattr(module,'episode_routes',lambda:memory)
+    poses=np.repeat(np.eye(4)[None],3,axis=0);poses[:,0,3]=[0,1,2]
+    slam=SimpleNamespace(trajectory=poses,anchor=np.eye(4))
+    landmarks=[dict(label='kitchen',observations=2,viewpoints=[[0,0,0]]),dict(label='dining table',observations=2)]
+    assert module.record_exploration(slam,landmarks,True)['recorded']
+    assert [row['kind'] for row in memory.stations['kitchen']]==[module.SIGHTING]
+    assert [row['kind'] for row in memory.stations['dining table']]==['successful_transit_endpoint']
+    # A transit that actually ends at a station is never a sighting.
+    memory.record(poses,np.eye(4),'dining table','kitchen')
+    assert memory.stations['kitchen'][-1]['kind']=='successful_transit_endpoint'
+
+
+def test_exploration_that_stood_at_the_counter_records_a_standoff_station(monkeypatch):
+    from types import SimpleNamespace
+    from cross_episode_sim.navigation import route_memory as module
+    memory=RouteMemory();monkeypatch.setattr(module,'episode_routes',lambda:memory)
+    poses=np.repeat(np.eye(4)[None],5,axis=0);poses[:,0,3]=[0,1,2,3,4]
+    slam=SimpleNamespace(trajectory=poses,anchor=np.eye(4))
+    # The reached stand-off replaced the recognition viewpoint at x=0.
+    landmarks=[dict(label='kitchen',observations=2,viewpoints=[[2,0,0]],reached=True),dict(label='dining table',observations=2)]
+    seed=module.record_exploration(slam,landmarks,True)
+    assert seed['recorded'] and seed['start_kind']==module.STANDOFF and seed['samples']==3
+    station=memory.stations['kitchen'][0]
+    assert station['kind']==module.STANDOFF and station['pose'][0,3]==2
