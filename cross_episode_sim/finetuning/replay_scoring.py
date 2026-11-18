@@ -41,13 +41,19 @@ class CompositeReplayScorer:
                 else:local=model.geom_aabb[g,:3]+corners*model.geom_aabb[g,3:]
                 points.extend(local@data.geom_xmat[g].reshape(3,3).T+data.geom_xpos[g])
             self.vertices[r['role']]=(np.asarray(points)-body.xpos)@body.xmat.reshape(3,3)
-        self.on=False;self.duration={}
+        self.on=False;self.duration={};self.opened=set()
         self.rules=duration_rules(self.config['task'],json.loads((source/'initial_snapshot.json').read_text()))
         self.buttons={}
         if 'microwave' in self.bindings:
             self.buttons={k:model.geom('microwave_main_group_'+k+'_button').id for k in ('start','stop')}
 
     def observe(self,data):
+        # Private record of every door or drawer opened during the episode, for
+        # the progress count only (a fixture closed at the end earns progress
+        # only if it had been opened).
+        for role,b in self.bindings.items():
+            if b['kind']!='stove-knob' and role not in self.opened and any(
+                    abs(float(data.joint(x['joint']).qpos[0]))>=.03 for x in b.get('leaves',[b])):self.opened.add(role)
         if self.buttons:
             touched=set()
             for c in data.contact:
@@ -98,10 +104,15 @@ class CompositeReplayScorer:
                 fixtures[b['burner']]=dict(category='burner',active=.35<=q<=2*np.pi-.35)
             else:fixtures[role]=dict(closed=all(abs(float(data.joint(x['joint']).qpos[0]))<.03 for x in b.get('leaves',[b])),category={'kitchen_cabinet':'cabinet','cup_drawer':'drawer'}.get(role,role),room='kitchen')
         if 'microwave' in fixtures:fixtures['microwave']['active']=self.on
-        return dict(objects=objects,fixtures=fixtures,held=next(iter(held),None),simulation_time=float(data.time),evaluation=self.duration.copy())
+        evaluation=self.duration.copy();evaluation['opened_fixtures']=sorted(self.opened)
+        return dict(objects=objects,fixtures=fixtures,held=next(iter(held),None),simulation_time=float(data.time),evaluation=evaluation)
 
     def score(self,initial,data):
         return GOALS[self.config['task']](self.config['scene'],initial,self.snapshot(data))
+
+    def progress(self,initial,data):
+        from cross_episode_sim.evaluation.composite_goals import goal_progress
+        return goal_progress(self.config['task'],self.config['scene'],initial,self.snapshot(data))
 
 
 def load_replay_scene(source):

@@ -479,10 +479,18 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             import traceback
             traceback.print_exc();error=str(exc)
         finally:mujoco.mj_step=original_step
+        progress=None
         if scorer is not None:
             # Partial goal diagnostics are private and never returned to a skill.
             checks=scorer.score(initial,self.runtime.data)
-        report=dict(task=self.config['task'],success=success,checks=checks,error=error,
+            # Steps done out of steps required (private, like the checks; never
+            # part of success).
+            try:progress=scorer.progress(initial,self.runtime.data)
+            except Exception as exc:print('TASK_PROGRESS_UNAVAILABLE',str(exc)[:160],flush=True)
+            if progress is not None:
+                print('TASK_PROGRESS',json.dumps(dict(done=progress['done'],total=progress['total'],rate=progress['rate'],
+                    steps={k:f"{v['done']}/{v['total']}" for k,v in progress['steps'].items()})),flush=True)
+        report=dict(task=self.config['task'],success=success,checks=checks,progress=progress,error=error,
             completed_calls=sum(c['success'] for c in interface.history),planned_calls=len(self.plan),
             wall_seconds=time.monotonic()-started,stages=self.stages,source=str(self.source),
             skill_timings=timings,failed_calls=failures,attempted_calls=len(interface.history),
