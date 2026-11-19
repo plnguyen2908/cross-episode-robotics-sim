@@ -4,8 +4,10 @@ Datagen compiles scenes with only the task-bound cabinet/drawer articulated
 (controller/house_scene.py in the datagen checkout froze the rest). A
 sensor-only robot cannot tell a frozen cabinet from a working one, so the
 evaluation pipeline refuses such a scene (user decision, November 16, 2026).
-Rebuild it first with scripts/rearticulate_episode.py. No simulator state is
-read beyond joint names; this runs before any robot motion.
+Rebuild it first with scripts/rearticulate_episode.py, or load it through
+evaluation/articulated_scene.load_saved_scene, which restores every authored
+joint in memory (the agent-policy/Astra evaluation does this automatically).
+No simulator state is read beyond joint names; this runs before any robot motion.
 """
 import re
 from pathlib import Path

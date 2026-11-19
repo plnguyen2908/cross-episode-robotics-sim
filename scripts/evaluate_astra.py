@@ -47,7 +47,8 @@ def main():
     if a.limit:sources=sources[:a.limit]
     if not sources:raise ValueError('No evaluation scenes matched')
     for source in sources:
-        for name in ['action_recording/model.mjb','action_recording/initial_state.npz','initial_snapshot.json','config.json','task_manifest.json','instruction.txt']:
+        # scene.xml: frozen fixture joints are restored from it at load (articulated_scene).
+        for name in ['action_recording/model.mjb','action_recording/initial_state.npz','scene.xml','initial_snapshot.json','config.json','task_manifest.json','instruction.txt']:
             if not (source/name).is_file():raise FileNotFoundError(source/name)
     from cross_episode_sim.agent_policy.progress import Progress
     batch_log=Progress('Astra',interval=a.log_interval)

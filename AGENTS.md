@@ -200,3 +200,16 @@ payload overlap check. Keep calibrated base-footprint route planning, physical
 collisions, fresh post-arrival manipulation perception, native arm planning and
 private semantic scoring. Preserve the legacy non-Qwen implementation. A
 recorded-state component retry is not full-pipeline qualification.
+
+## All kitchen fixtures articulated — user decision, November 18, 2026
+
+A policy may open any cabinet, drawer or appliance, not only the one the
+demonstration used. New scenes keep every authored fixture hinge/slide
+(`controller/house_scene.py`); only non-task loose objects stay fixed. Episodes
+saved with frozen fixtures (v4 and earlier) are evaluated through
+`evaluation/articulated_scene.load_saved_scene`: it recompiles the episode's own
+`scene.xml` with all joints, copies the saved physical parameters and initial
+state by name, and refuses any start-pose change above 0.1 mm. Agent-policy,
+Astra and closed-model evaluations and replay scoring load scenes this way.
+Scoring accepts any eligible closed cabinet or drawer. Never change the saved
+dataset files; a new datagen batch with all joints is a new distribution.

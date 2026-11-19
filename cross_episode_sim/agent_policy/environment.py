@@ -11,11 +11,12 @@ class Environment:
         from cross_episode_sim.finetuning.replay_scoring import CompositeReplayScorer
         from cross_episode_sim.control.replay_fixtures import ReplayFixtures
         self.mj=mujoco; self.output=Path(output); self.source=Path(source)
-        self.model=mujoco.MjModel.from_binary_path(str(self.source/'action_recording/model.mjb'))
-        self.data=mujoco.MjData(self.model)
-        with np.load(self.source/'action_recording/initial_state.npz') as saved:
-            mujoco.mj_setState(self.model,self.data,saved['state'],int(saved['state_type']))
-        mujoco.mj_forward(self.model,self.data)
+        # Every cabinet, drawer and appliance joint is live, not only the one the
+        # demonstration used: the policy may choose any (user, November 18, 2026).
+        from cross_episode_sim.evaluation.articulated_scene import load_saved_scene
+        self.model,self.data,self.scene_report=load_saved_scene(self.source)
+        (self.output/'scene_articulation.json').write_text(json.dumps(
+            {**self.scene_report,'added_joints':len(self.scene_report['added_joints'])},indent=2))
         self.config=controller_config
         self.control=MolmoSpacesController(self.model,self.data,configuration=controller_config,native_action_noise=False)
         self.scorer=CompositeReplayScorer(self.model,self.data,self.source)

@@ -183,7 +183,8 @@ class CompositeReplayScorer:
 
 def load_replay_scene(source):
     from cross_episode_sim.data.export import Layout
-    source=Path(source);model=mujoco.MjModel.from_binary_path(str(source/'action_recording/model.mjb'));data=mujoco.MjData(model)
-    with np.load(source/'action_recording/initial_state.npz') as a:mujoco.mj_setState(model,data,a['state'],int(a['state_type']))
-    mujoco.mj_forward(model,data)
+    # Same scene the policy ran in: all fixture joints live (rebuilt from scene.xml
+    # when the saved model froze them), so saved rollout states load onto it.
+    from cross_episode_sim.evaluation.articulated_scene import load_saved_scene
+    source=Path(source);model,data,_=load_saved_scene(source)
     return model,data,Layout(model,'franka_tidybot'),CompositeReplayScorer(model,data,source)
