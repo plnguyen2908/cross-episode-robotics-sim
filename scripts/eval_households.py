@@ -11,10 +11,12 @@ every call. When a run ends its GPU takes the next queued episode. A summary tab
 (success, progress, calls, wall time) is printed at the end and written to
 <output>/summary.json. Ctrl-C stops every run.
 
-    python3 scripts/eval_households.py --split test_same_map --gpus 2,5,6,7
+    python3 scripts/eval_households.py --split test --gpus 2,5,6,7
 
---split runs every episode of a v4 split (from its manifest) for --tasks (default:
-set_table, warm_two_pots, unpack_and_sort_groceries).
+--split runs every episode of v4 splits (from their manifests) for --tasks (default:
+set_table, warm_two_pots, unpack_and_sort_groceries); --split test = test_same_map and
+test_new_map. Success rate and mean progress rate are reported overall, by room
+count, by task and by task x room count (live after each run, and summary_by_rooms.json).
 
 Suites (episodes under runs/): two_room = the three 2-room episodes that passed
 (fix186 pots, fix187 set table, fix190 grocery); multi_room = one v4 test_same_map
@@ -39,17 +41,46 @@ SHORT = {'warm_two_pots': 'pots', 'set_table': 'table', 'unpack_and_sort_groceri
          'clear_and_store': 'store', 'prepare_and_serve_meal': 'meal'}
 
 
-def label(source):
+def episode_meta(source):
     config = json.loads((source / 'config.json').read_text())
-    rooms = (config.get('dataset_sampling') or {}).get('requested_room_count')
-    return f"{SHORT.get(config['task'], config['task'])}-{rooms}r-{source.name.rsplit('_', 1)[-1]}"
+    return config['task'], (config.get('dataset_sampling') or {}).get('requested_room_count')
+
+
+def label(source):
+    task, rooms = episode_meta(source)
+    return f"{SHORT.get(task, task)}-{rooms}r-{source.name.rsplit('_', 1)[-1]}"
+
+
+def rates(rows):
+    """Success rate and mean progress rate; a run that ended without a report counts as 0 for both."""
+    progress = [r.get('progress_rate') or 0. for r in rows]
+    return dict(runs=len(rows), successes=sum(r.get('success') is True for r in rows),
+                success_rate=round(sum(r.get('success') is True for r in rows) / len(rows), 3) if rows else None,
+                mean_progress_rate=round(sum(progress) / len(progress), 3) if progress else None,
+                runs_without_report=sum(r.get('progress_rate') is None for r in rows))
+
+
+def by_rooms(results):
+    rows = list(results.values())
+    rooms = sorted({r['rooms'] for r in rows}, key=lambda x: (x is None, x))
+    tasks = sorted({r['task'] for r in rows})
+    return dict(overall=rates(rows),
+                by_rooms={str(k): rates([r for r in rows if r['rooms'] == k]) for k in rooms},
+                by_task={k: rates([r for r in rows if r['task'] == k]) for k in tasks},
+                by_task_and_rooms={f'{k}/{n}r': rates([r for r in rows if r['task'] == k and r['rooms'] == n])
+                                   for k in tasks for n in rooms if any(r['task'] == k and r['rooms'] == n for r in rows)})
+
+
+def fmt(x):
+    return f"{x['successes']}/{x['runs']} ok ({x['success_rate']:.0%}), progress {x['mean_progress_rate'] if x['mean_progress_rate'] is not None else '-'}"
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('episodes', nargs='*', type=Path)
     p.add_argument('--suite', choices=sorted(SUITES))
-    p.add_argument('--split', help='every episode of this dataset split from its manifest, e.g. test_same_map, test_new_map, dev_same_map, dev_new_map')
+    p.add_argument('--split', help='every episode of these dataset splits (comma list) from their manifests: '
+                   'test (= test_same_map,test_new_map), test_same_map, test_new_map, dev_same_map, dev_new_map')
     p.add_argument('--dataset', type=Path, default=ROOT / 'runs/all_open_fixed_v4', help='dataset for --split')
     p.add_argument('--tasks', default='set_table,warm_two_pots,unpack_and_sort_groceries', help='tasks taken from --split')
     p.add_argument('--gpus', default='2,5,6,7', help='comma-separated GPU ids, one run per GPU at a time')
@@ -61,7 +92,9 @@ def main():
     if a.split:
         sys.path.insert(0, str(ROOT))
         from cross_episode_sim.evaluation.test_sources import test_sources
-        for task in a.tasks.split(','):sources += test_sources(a.dataset, [a.split], task.strip())
+        splits = [s for x in a.split.split(',') for s in (['test_same_map', 'test_new_map'] if x == 'test' else [x])]
+        for split in splits:
+            for task in a.tasks.split(','):sources += test_sources(a.dataset, [split], task.strip())
     sources += [e.resolve() for e in a.episodes]
     if not sources:p.error('give episode folders or --suite')
     for s in sources:
@@ -105,13 +138,17 @@ def main():
             try:report = json.loads((folder / 'episode/report.json').read_text())
             except Exception:report = {}
             prog = report.get('progress') or {}
-            results[name] = dict(source=str(source), gpu=gpu, exit_code=code, success=report.get('success'),
+            task, rooms = episode_meta(source)
+            results[name] = dict(source=str(source), task=task, rooms=rooms, gpu=gpu, exit_code=code, success=report.get('success'),
                                  progress_done=prog.get('done'), progress_total=prog.get('total'), progress_rate=prog.get('rate'),
                                  completed_calls=report.get('completed_calls'), planned_calls=report.get('planned_calls'),
                                  wall_minutes=round((time.monotonic() - t0) / 60, 1), output=str(folder))
             (out / 'summary.json').write_text(json.dumps(results, indent=2))
+            stats = by_rooms(results);(out / 'summary_by_rooms.json').write_text(json.dumps(stats, indent=2))
             say(name, f"finished: success={report.get('success')} progress={prog.get('done')}/{prog.get('total')} "
                       f"in {results[name]['wall_minutes']} min")
+            say('eval', f"so far {len(results)}/{len(sources)} done | " +
+                ' | '.join(f"{k} rooms: {fmt(v)}" for k, v in stats['by_rooms'].items()))
 
     def stop(*_):
         say('eval', 'stopping all runs')
@@ -140,6 +177,17 @@ def main():
         r = results.get(name, {})
         print(f"{name:<{width}}  {str(r.get('success')):<7}  {r.get('progress_done')}/{r.get('progress_total'):<6}  "
               f"{r.get('completed_calls')}/{r.get('planned_calls'):<4}  {r.get('wall_minutes')} min")
+    if results:
+        stats = by_rooms(results)
+        print(f"\n== success rate and mean progress rate -> {out}/summary_by_rooms.json")
+        print(f"{'group':<34} runs  success   progress")
+        def row(name, x):
+            print(f"{name:<34} {x['runs']:<5} {x['successes']}/{x['runs']} {x['success_rate']:>5.0%}   "
+                  f"{x['mean_progress_rate'] if x['mean_progress_rate'] is not None else '-'}")
+        row('all', stats['overall'])
+        for k, x in stats['by_rooms'].items():row(f'{k} rooms', x)
+        for k, x in stats['by_task'].items():row(k, x)
+        for k, x in stats['by_task_and_rooms'].items():row(k, x)
 
 
 if __name__ == '__main__':
