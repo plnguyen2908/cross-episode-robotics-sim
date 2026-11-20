@@ -914,6 +914,18 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 artifacts.write_text(self.output/'skill_timings.json',json.dumps(timings,indent=2))
                 if not result['success']:
                     failures.append(dict(index=index,skill=call.skill,reason=result['reason']))
+                # Private task progress after every call, for watching a run
+                # (live.log and progress_log.jsonl). A read-only diagnostic like
+                # the final checks: never returned to a skill or used to decide.
+                if scorer is not None:
+                    try:
+                        p=scorer.progress(initial,self.runtime.data)
+                        line=dict(call=index+1,planned=len(self.plan),skill=call.skill,call_succeeded=bool(result['success']),
+                            done=p['done'],total=p['total'],rate=p['rate'],
+                            steps={k:f"{v['done']}/{v['total']}" for k,v in p['steps'].items()})
+                        print('TASK_PROGRESS_AFTER_CALL',json.dumps(line),flush=True)
+                        with open(self.output/'progress_log.jsonl','a') as log:log.write(json.dumps(line)+'\n')
+                    except Exception as exc:print('TASK_PROGRESS_UNAVAILABLE',str(exc)[:160],flush=True)
             if scorer is None:raise RuntimeError('No physical execution')
             checks=scorer.score(initial,self.runtime.data);success=all(checks.values())
         except Exception as exc:
