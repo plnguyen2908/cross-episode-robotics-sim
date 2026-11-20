@@ -13,6 +13,11 @@ state is carried over joint by joint, and every saved body must start within
 ``tolerance`` metres of where it was saved. The added fixture joints start at
 their authored (closed) positions. Nothing is written into the source folder,
 and no rebuilt model is kept on disk.
+
+Two-knob stove (user decision, November 19, 2026): the rebuild also deletes
+the five stove knobs no pot task uses (evaluation/stove_knobs.py), so every
+evaluated method sees the same stove. Only those bodies and their geoms may be
+absent from the rebuilt model; every other saved element must match.
 """
 import json
 from pathlib import Path
@@ -24,6 +29,14 @@ _JOINT_SIZES = {mujoco.mjtJoint.mjJNT_FREE: (7, 6), mujoco.mjtJoint.mjJNT_BALL: 
                 mujoco.mjtJoint.mjJNT_SLIDE: (1, 1), mujoco.mjtJoint.mjJNT_HINGE: (1, 1)}
 
 
+def _removed_bodies(old, new):
+    """Saved bodies the rebuild deliberately deleted (the unused stove knobs) and absent from ``new``."""
+    from cross_episode_sim.evaluation.stove_knobs import removed_knob_bodies
+    present = {new.body(b).name for b in range(new.nbody)}
+    return {name for name in removed_knob_bodies()
+            if mujoco.mj_name2id(old, mujoco.mjtObj.mjOBJ_BODY, name) >= 0 and name not in present}
+
+
 def carry_state(old, old_data, new, new_data):
     """Copy time, joints and actuators (by name), activations and mocap from old to new.
 
@@ -31,11 +44,13 @@ def carry_state(old, old_data, new, new_data):
     """
     new_data.time = old_data.time
     names = {new.joint(j).name: j for j in range(new.njnt)}
+    removed = _removed_bodies(old, new)
     missing = []
     for j in range(old.njnt):
         name = old.joint(j).name
         if name not in names:
-            missing.append(name)
+            if old.body(int(old.jnt_bodyid[j])).name not in removed:
+                missing.append(name)
             continue
         k = names[name]
         if old.jnt_type[j] != new.jnt_type[k]:
@@ -120,6 +135,37 @@ def _physical_fields(model, kind):
             yield name
 
 
+_VISUAL_GROUPS = ('global_', 'quality', 'headlight', 'map', 'scale', 'rgba')
+
+
+def copy_saved_visual(old, new):
+    """Copy the saved model's global visual settings (model.vis) into the rebuild.
+
+    Datagen's controller sets them at run time (e.g. headlight ambient 0.5),
+    and a fresh compile of scene.xml starts from MuJoCo defaults (ambient 0.1):
+    rebuilt scenes rendered darker than the saved episodes and their history
+    (found 2026-11-19 comparing onboard camera images). Materials, textures,
+    lights and geom colours already match; only these globals differed.
+    """
+    import numpy as np
+    for group in _VISUAL_GROUPS:
+        src, dst = getattr(old.vis, group), getattr(new.vis, group)
+        for field in dir(src):
+            if field.startswith('_'):
+                continue
+            value = getattr(src, field)
+            if callable(value):
+                continue
+            current = getattr(dst, field)
+            if isinstance(current, np.ndarray):
+                current[...] = value
+            else:
+                try:
+                    setattr(dst, field, value)
+                except (AttributeError, TypeError):
+                    pass
+
+
 def copy_saved_physics(old, new):
     """Give every shared element of ``new`` the exact physical parameters it had in ``old``.
 
@@ -138,6 +184,7 @@ def copy_saved_physics(old, new):
     for field in ('timestep', 'gravity', 'wind', 'magnetic', 'density', 'viscosity', 'impratio', 'tolerance',
                   'iterations', 'ls_iterations', 'integrator', 'cone', 'solver', 'noslip_iterations'):
         setattr(new.opt, field, getattr(old.opt, field))
+    copy_saved_visual(old, new)
     mismatch = []
     for kind, mapping in maps.items():
         if not mapping:
@@ -146,7 +193,11 @@ def copy_saved_physics(old, new):
         for name in _physical_fields(old, kind):
             if not np.array_equal(getattr(new, name)[dst], getattr(old, name)[src], equal_nan=True):
                 mismatch.append(name)
-    unmapped = {k: getattr(old, n) - len(maps[k]) for k, n in (('body', 'nbody'), ('geom', 'ngeom'), ('jnt', 'njnt'),
+    removed = _removed_bodies(old, new)
+    allowed = dict(body=len(removed), actuator=0,
+                   geom=sum(1 for g in range(old.ngeom) if old.body(int(old.geom_bodyid[g])).name in removed),
+                   jnt=sum(1 for j in range(old.njnt) if old.body(int(old.jnt_bodyid[j])).name in removed))
+    unmapped = {k: getattr(old, n) - len(maps[k]) - allowed[k] for k, n in (('body', 'nbody'), ('geom', 'ngeom'), ('jnt', 'njnt'),
                                                              ('actuator', 'nu'))}
     if mismatch or any(unmapped.values()):
         raise RuntimeError(f'Rebuilt scene differs from the saved one: fields {mismatch[:6]}, unmatched {unmapped}')
@@ -176,20 +227,34 @@ def _rebuild(source, old):
             if old.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE and not old.joint(j).name.startswith('robot')]
     dynamic = list(dict.fromkeys(free + list(manifest.get('dynamic_fixtures', []))))
     spawn = manifest['robot_spawn']
+    from cross_episode_sim.evaluation.stove_knobs import remove_extra_stove_knobs
     model, _, _ = make_house(source/'scene.xml', dynamic, spawn[:2], spawn[2] if len(spawn) > 2 else 0.,
-                             manifest.get('robot', 'franka_tidybot'))
+                             manifest.get('robot', 'franka_tidybot'), spec_edit=remove_extra_stove_knobs)
     return model
 
 
 def load_saved_scene(source, tolerance=1e-4):
+    """Return (model, data, report) for a saved episode as every evaluated method sees it."""
+    from cross_episode_sim.evaluation.stove_knobs import paint_kept_knobs, PAINTED_TASKS
+    source = Path(source)
+    model, data, report = _load_saved_scene(source, tolerance)
+    task = json.loads((source/'config.json').read_text()).get('task') if (source/'config.json').exists() else None
+    report['painted_knobs'] = paint_kept_knobs(model) if task in PAINTED_TASKS else []
+    return model, data, report
+
+
+def _load_saved_scene(source, tolerance=1e-4):
     """Return (model, data, report) for a saved episode with all fixture joints present."""
     from cross_episode_sim.evaluation.fixture_articulation import authored_fixture_joints
     source = Path(source)
     old, old_data = _saved(source)
     present = {old.joint(j).name for j in range(old.njnt)}
-    frozen = sorted(authored_fixture_joints(source/'scene.xml') - present)
-    if not frozen:
-        return old, old_data, dict(rebuilt=False, saved_joints=old.njnt, added_joints=[])
+    from cross_episode_sim.evaluation.stove_knobs import has_extra_stove_knobs, removed_knob_bodies
+    removed_names = set(removed_knob_bodies())
+    frozen = sorted(name for name in authored_fixture_joints(source/'scene.xml') - present
+                    if not any(name.startswith(body+'_') for body in removed_names))
+    if not frozen and not has_extra_stove_knobs(old):
+        return old, old_data, dict(rebuilt=False, saved_joints=old.njnt, added_joints=[], removed_stove_knobs=[])
     new = _rebuild(source, old)
     copy_saved_physics(old, new)
     new_data = mujoco.MjData(new)
@@ -198,10 +263,12 @@ def load_saved_scene(source, tolerance=1e-4):
     still = sorted(set(frozen) - {new.joint(j).name for j in range(new.njnt)})
     if still:
         raise RuntimeError(f'Rebuilt scene still lacks {len(still)} authored fixture joints, e.g. {still[:4]}')
+    removed = _removed_bodies(old, new)
     gaps = [(float(np.linalg.norm(new_data.body(old.body(b).name).xpos - old_data.body(old.body(b).name).xpos)),
-             old.body(b).name) for b in range(1, old.nbody)]
+             old.body(b).name) for b in range(1, old.nbody) if old.body(b).name not in removed]
     worst = max(gaps)
     if worst[0] > tolerance:
         raise RuntimeError(f'Rebuilt scene moves saved body {worst[1]} by {worst[0]*1000:.3f} mm')
     return new, new_data, dict(rebuilt=True, saved_joints=old.njnt, rebuilt_joints=new.njnt,
-                               added_joints=added, max_body_gap_m=worst[0], tolerance_m=tolerance)
+                               added_joints=added, max_body_gap_m=worst[0], tolerance_m=tolerance,
+                               removed_stove_knobs=sorted(removed))

@@ -51,10 +51,9 @@ class SensorSetTablePipeline:
         # Reset selection is harness-only. Execution always uses the same
         # onboard exploration policy, including observation-based door discovery.
         self.initial_doors=initial_doors;self.single_left_leaf=single_left_leaf
-        # Never evaluate on a scene whose unused cabinets/drawers were frozen
-        # at datagen compile time; rebuild it with all fixture joints first.
-        from cross_episode_sim.evaluation.fixture_articulation import require_articulated
-        require_articulated(self.source)
+        # Scenes are loaded through evaluation/articulated_scene.load_saved_scene
+        # (exploration stage), which rebuilds frozen fixture joints and applies
+        # the evaluation stove, so an original saved episode folder is accepted.
 
     def stage(self,name,command,report,success_key='success'):
         print(f'STAGE {len(self.stages)+1}: {name}',flush=True)
