@@ -11,6 +11,11 @@ every call. When a run ends its GPU takes the next queued episode. A summary tab
 (success, progress, calls, wall time) is printed at the end and written to
 <output>/summary.json. Ctrl-C stops every run.
 
+    python3 scripts/eval_households.py --split test_same_map --gpus 2,5,6,7
+
+--split runs every episode of a v4 split (from its manifest) for --tasks (default:
+set_table, warm_two_pots, unpack_and_sort_groceries).
+
 Suites (episodes under runs/): two_room = the three 2-room episodes that passed
 (fix186 pots, fix187 set table, fix190 grocery); multi_room = one v4 test_same_map
 episode per task with 3, 4 and 5 rooms; all = both (12 runs).
@@ -44,15 +49,26 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('episodes', nargs='*', type=Path)
     p.add_argument('--suite', choices=sorted(SUITES))
+    p.add_argument('--split', help='every episode of this dataset split from its manifest, e.g. test_same_map, test_new_map, dev_same_map, dev_new_map')
+    p.add_argument('--dataset', type=Path, default=ROOT / 'runs/all_open_fixed_v4', help='dataset for --split')
+    p.add_argument('--tasks', default='set_table,warm_two_pots,unpack_and_sort_groceries', help='tasks taken from --split')
     p.add_argument('--gpus', default='2,5,6,7', help='comma-separated GPU ids, one run per GPU at a time')
     p.add_argument('--output', type=Path, help='default runs/household_eval/batch_<time>')
     p.add_argument('--raw', action='store_true', help='show every line of every run')
+    p.add_argument('--list', action='store_true', help='print the selected episodes and exit')
     a = p.parse_args()
     sources = [ROOT / s for s in SUITES[a.suite]] if a.suite else []
+    if a.split:
+        sys.path.insert(0, str(ROOT))
+        from cross_episode_sim.evaluation.test_sources import test_sources
+        for task in a.tasks.split(','):sources += test_sources(a.dataset, [a.split], task.strip())
     sources += [e.resolve() for e in a.episodes]
     if not sources:p.error('give episode folders or --suite')
     for s in sources:
         if not (s / 'config.json').exists():p.error(f'not an episode folder: {s}')
+    if a.list:
+        for s in sources:print(label(s), s)
+        print(len(sources), 'episodes');return
     gpus = [g.strip() for g in a.gpus.split(',') if g.strip()]
     out = a.output or ROOT / 'runs/household_eval' / ('batch_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
     out.mkdir(parents=True, exist_ok=False)
