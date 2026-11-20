@@ -1,5 +1,6 @@
 """Select official test episodes from split manifests, never directory scans."""
 import json
+import os
 from pathlib import Path
 
 
@@ -11,9 +12,13 @@ def test_sources(dataset, splits, task):
         for row in manifest['episodes']:
             if task != 'all' and row['task'] != task:
                 continue
-            source = (root / row['folder']).resolve()
-            if not source.is_relative_to(root):
-                raise ValueError(f'Manifest path escapes split: {source}')
+            # The listed folder must lie inside the split as written. It may be
+            # a link (v4 test_same_map links the v3 episodes it keeps), so the
+            # check is on the normalised path, not the resolved target.
+            listed = Path(os.path.normpath(root / row['folder']))
+            if not listed.is_relative_to(root):
+                raise ValueError(f'Manifest path escapes split: {listed}')
+            source = listed.resolve()
             if source in sources:
                 raise ValueError(f'Duplicate test episode: {source}')
             sources.append(source)

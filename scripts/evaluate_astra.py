@@ -67,9 +67,10 @@ def main():
         splits=(['test_two_rooms','test_multi_room'] if a.split=='both' else
                 ['dev_same_map','dev_new_map'] if a.split=='dev_both' else [a.split])
         sources=test_sources(a.dataset,splits,a.task)
+        # By manifest, not by resolved location: v4 test_same_map episodes are
+        # links to the v3 episodes they keep, so they resolve outside the split.
         for split in splits:
-            split_root=(a.dataset/split).resolve()
-            source_splits.update({s:split for s in sources if s.is_relative_to(split_root)})
+            source_splits.update({s:split for s in test_sources(a.dataset,[split],a.task)})
         from cross_episode_sim.agent_policy.batch import room_counts
         rooms=room_counts(a.dataset,splits)
     if a.limit:sources=sources[:a.limit]

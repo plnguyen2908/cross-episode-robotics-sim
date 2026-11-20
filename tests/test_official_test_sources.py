@@ -27,3 +27,12 @@ def test_task_filter(tmp_path):
     root=tmp_path/'test_two_rooms';root.mkdir()
     (root/'manifest.json').write_text(json.dumps({'episodes':[{'task':'warm_two_pots','folder':'pot'}]}))
     assert test_sources(tmp_path,['test_two_rooms'],'set_table')==[]
+
+
+def test_linked_episode_inside_split_is_accepted(tmp_path):
+    # v4 test_same_map lists links to the v3 episodes it keeps.
+    elsewhere=tmp_path/'v3_episode';elsewhere.mkdir()
+    root=tmp_path/'test_same_map';(root/'batches').mkdir(parents=True)
+    (root/'batches'/'kept').symlink_to(elsewhere)
+    (root/'manifest.json').write_text(json.dumps({'episodes':[{'task':'set_table','folder':'batches/kept'}]}))
+    assert test_sources(tmp_path,['test_same_map'],'set_table')==[elsewhere.resolve()]
