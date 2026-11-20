@@ -549,7 +549,8 @@ def test_declined_key_is_retried_once_from_a_new_view():
     from cross_episode_sim.evaluation import sensor_household
     from cross_episode_sim.runtime import qwen_pipeline
     source=inspect.getsource(sensor_household)
-    assert "name!='push_button' or 'control_not_observed' not in str(exc)" in source
+    assert "name not in ('push_button','rotate_knob') or not retriable" in source
+    assert "'no_reachable_m2t2_knob_grasp' in str(exc)" in source
     assert "interface.redock(target=kw['target'],purpose='handle',face_first=True)" in source and "attempt('_retry')" in source
     call=inspect.getsource(qwen_pipeline.PipelineRedocking.__call__)
     assert 'face_first=False' in call and "if face_first and face_fixture is not None:raise RuntimeError('Target not visible" in call
@@ -566,8 +567,10 @@ def test_microwave_bar_grasp_slides_from_the_top_end_to_the_preferred_height():
 
 def test_short_close_threshold_catches_fix145_second_microwave_close():
     import cross_episode_sim.code_policy.panel_closing as pc
-    # 81.2 of 86.9 deg measured (door privately 4.2 deg open) must be finished; 1-3.5 deg short must not.
-    assert 86.9-81.2>pc.FINISH_SHORT_CLOSE_DEGREES>3.5
+    # 81.2 of 86.9 deg measured (door privately 4.2 deg open, fix145) and 84.3 of
+    # about 89 (4.7 deg open, fix162) must get the finishing stroke, which now
+    # pushes past closed; a door the robot measures within 1.5 deg is left.
+    assert 86.9-81.2>89.-84.3>pc.FINISH_SHORT_CLOSE_DEGREES>=1.
 
 
 def test_microwave_grasp_slide_must_move_toward_the_requested_height():

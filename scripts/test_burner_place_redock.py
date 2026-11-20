@@ -10,6 +10,12 @@ from cross_episode_sim.slam import create_mapper
 from cross_episode_sim.navigation.observed_map import ObservedNavigationMap,MapConfig
 from cross_episode_sim.navigation.shaped_docking import RobotGeometry,ShapedDocking
 from cross_episode_sim.control.observed_payload import ObservedPayload
+# Live depth this close (m) to the hand at the current pose is the carried object.
+HELD_HAND_RADIUS=.32   # fix176: the held pot reached 0.15 m beyond the tool point, rim ~0.27 m; the microwave above the stove was 0.5 m away
+# A measured burner further than this from any visible stove point is used as is (m).
+BURNER_SNAP_LIMIT=.05
+# Padding (m) around the robot outline for stand spots facing a burner (default 0.035).
+BURNER_DOCK_MARGIN=.015
 from cross_episode_sim.control.observed_placement import supported_interior,free_approach_targets
 from cross_episode_sim.control.onboard_base import OnboardBaseActuator
 from cross_episode_sim.navigation.dock_follower import DockFollower
@@ -38,6 +44,15 @@ if a.interior_view_approach:
 preferred_targets=np.asarray(x.get('preferred_contacts',[])).reshape(-1,3)
 from cross_episode_sim.navigation.qwen_docks import observed_approach_targets
 targets=observed_approach_targets(surface,preferred_targets)
+if len(preferred_targets) and 'stove burner' in str(json.loads(artifacts.read_text(a.perception/'report.json')).get('semantic_receptacle','')):
+ # The named burner comes from this robot's own knob measurement. When the
+ # held pot hides the burner disc from the pre-dock look, the nearest visible
+ # stove surface is beside it: fix180 snapped both burners 20 cm outward
+ # (surface points only 20 cm to the side) and both pots missed. Approach the
+ # measured burner itself; the place still needs fresh support after docking.
+ gap=float(np.min(np.linalg.norm(surface[:,:2]-preferred_targets[0][:2],axis=1))) if len(surface) else np.inf
+ if gap>BURNER_SNAP_LIMIT:
+  targets=np.asarray([preferred_targets[0]]);print('BURNER_DOCK_TARGET_REMEMBERED',json.dumps(dict(nearest_surface_m=round(gap,3))),flush=True)
 observation_approach_only=True
 artifacts.write_text(a.output/'approach_evidence.json',json.dumps(dict(observation_approach_only=observation_approach_only,surface_points=len(surface),release_authorized=False,reason='Fresh complete support disk remains mandatory before any release'),indent=2))
 target=targets[np.argmin(np.linalg.norm(targets[:,:2],axis=1))].copy()
@@ -82,9 +97,29 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     if np.linalg.norm(pose[:2]-supports[-1][:2])>.025:supports.append(pose.copy())
     if checker is None:
      checker=payload.checker(grid,packet.arm.position,pose,supports)
+     # Stand spots by the stove are bounded by the cabinet toe-kicks beside it:
+     # fix177 replay, nearly every burner dock was refused for floor points
+     # 0.5-1.5 cm inside the 3.5 cm padding (about 3 cm of real clearance).
+     # Use the reduced margin the redock already allows beside open doors;
+     # the shape check and physical collisions stay on.
+     checker.margin=BURNER_DOCK_MARGIN
      checker.require_observed_support=False  # Local redock: observed obstacles still constrain the entire sweep.
     checker.remember_support(pose)
-    if route is None:checker.update_live_points(live_obstacle_points(packet,tracking))
+    if route is None:
+     # Points within this distance of the hand at the current pose belong to the
+     # held pot (they move with the gripper), not to the stove: fix176 call 6,
+     # every one of 144 docks was refused by the gripper meeting points at its
+     # own height (1.197 m) where the pot hung, because the held-object model
+     # (attachment) did not cover the pot. Floor-level stove points stay.
+     # The carried pot is also in the stored map (it was updated during the
+     # carry), so drop such points from the stored and live sets alike.
+     checker.update_live_points(live_obstacle_points(packet,tracking))
+     tcp=geo.tcp_pose(packet.arm.position)[:3,3];Tm=tracking.T_map_base;hand=Tm[:3,:3]@tcp+Tm[:3,3]
+     keep=np.linalg.norm(checker.points-hand,axis=1)>=HELD_HAND_RADIUS
+     if not keep.all():
+      from scipy.spatial import cKDTree
+      print('DOCK_IGNORES_POINTS_AT_HAND',int((~keep).sum()),'hand_map',np.round(hand,3).tolist(),flush=True)
+      checker.points=checker.points[keep];checker.point_index=cKDTree(checker.points[:,:2]);checker.spatial_index=cKDTree(checker.points)
   if not tracking.accepted:
    base.step(0,0);continue
   T=tracking.T_map_base;pose=np.r_[T[:2,3],np.arctan2(T[1,0],T[0,0])]

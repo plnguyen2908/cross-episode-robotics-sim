@@ -25,7 +25,10 @@ UNFINISHED_CLOSE_DEGREES=6.
 # A push that ran all its commands is finished with a second stroke when it turned the leaf
 # this much less than the remembered opening (fix145, second microwave close: 81.2 of 86.9 deg
 # measured, 5.7 short, door privately left 4.2 deg open; finished closes measured 1-3.5 short).
-FINISH_SHORT_CLOSE_DEGREES=4.5
+# Lowered from 4.5: fix162's microwave push turned 84.3 of about 89 deg, was
+# taken as finished, and left the door 4.7 deg open (the scorer's limit is
+# 1.7). The finishing stroke now pushes past closed (PUSH_CLOSE_FINAL_PRESS).
+FINISH_SHORT_CLOSE_DEGREES=1.5
 # Doors whose push-close aims this far (deg) past the remembered closed position,
 # so the leaf ends against its frame (microwave: 2.0-2.6 deg ajar without it in
 # four replays; the scorer's closed limit is 1.7 deg). Must stay under the

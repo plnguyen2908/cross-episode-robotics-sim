@@ -15,12 +15,16 @@ class GripRetention:
     0.2 s (fix144 calls 19 and 27; both carries then drove on to the dining
     table and the next 'place' reported success with an empty hand). Before a
     loss the joints moved at most 0.016 rad.
+
+    Only closing counts. A held pot that slides in the grip pushes the fingers
+    apart instead: fix167 call 25, -0.05 rad over 12 s with the pot still
+    between both pads (private), and the carry was stopped as 'lost'.
     """
     def __init__(self,reference,change=GRIP_LOSS_JOINT_CHANGE,ticks=GRIP_LOSS_TICKS):
         self.reference=dict(reference);self.change=float(change);self.ticks=int(ticks);self.count=0
 
     def lost(self,current):
         """Feed the current joint positions (name -> rad); True once the loss has lasted long enough."""
-        moved=any(abs(float(current[name])-value)>self.change for name,value in self.reference.items())
+        moved=any(float(current[name])-value>self.change for name,value in self.reference.items())
         self.count=self.count+1 if moved else 0
         return self.count>=self.ticks

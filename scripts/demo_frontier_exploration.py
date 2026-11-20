@@ -31,6 +31,7 @@ def main():
     # replay-scoring paths (every fixture articulated, two-knob stove).
     from cross_episode_sim.evaluation.articulated_scene import load_saved_scene
     model,data,scene_report=load_saved_scene(a.source)
+    print('EVAL_SCENE',json.dumps({k:v for k,v in scene_report.items() if k!='added_joints'}),flush=True)
     # Requested all-open condition is set before evaluation, never passed to policy.
     doors=[]
     for jid in range(model.njnt):

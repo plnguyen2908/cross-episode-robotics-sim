@@ -26,6 +26,10 @@ def handle_description(target, opening):
 
 # Height (m) at which the fridge door's long vertical handle is grasped.
 FRIDGE_HANDLE_GRASP_HEIGHT=1.05
+# A handle found farther than this from the base (m) is grasped again after standing
+# CLOSER_GRASP_DISTANCE in front of it (fix162: 96 grasps unreachable from 1.0 m).
+CLOSER_GRASP_MIN_REACH=.80
+CLOSER_GRASP_DISTANCE=.65
 MICROWAVE_HANDLE_GRASP_HEIGHT=1.10
 
 
@@ -374,21 +378,26 @@ class LiveFixtureControls:
         prepose=None
         try:grasp,info=self.acquire_grasp(target,root,drawer,opening)
         except RuntimeError as exc:
-            # Closing a drawer this robot opened: no grasp is needed to push it
-            # shut. With no reachable or successful handle grasp, bring the
-            # closed hand in front of the remembered handle, in the orientation
-            # it held the handle with, and push (fix83/fix84: "No reachable
-            # handle grasp"; fix80: "Handle grasp is empty").
-            memory=self.drawers.get(target) if (drawer and not opening) else None
-            if memory is None or 'tool_rotation' not in memory or not any(text in str(exc) for text in
-                    ('No reachable handle grasp','Handle grasp is empty','Named handle not visible')):raise
-            T=np.linalg.inv(self.estimated_pose())
-            normal=T[:3,:3]@np.asarray(memory['normal'],float)
-            prepose=np.eye(4);prepose[:3,:3]=T[:3,:3]@np.asarray(memory['tool_rotation'],float)
-            prepose[:3,3]=T[:3,:3]@np.asarray(memory['open_handle'],float)+T[:3,3]+DRAWER_PUSH_STANDOFF*normal
-            info=dict(panel_normal=normal.tolist());grasp=None;self.drawer_push_only=True
-            root.mkdir(parents=True,exist_ok=True)
-            print('DRAWER_PUSH_FALLBACK',json.dumps(dict(target=target,reason=str(exc)[:80],hand_base=np.round(prepose[:3,3],3).tolist())),flush=True)
+            retried=None
+            if target=='fridge' and opening and 'No reachable handle grasp' in str(exc):
+                retried=self._grasp_from_closer(target,root,drawer,opening)
+            if retried is not None:(grasp,info),root=retried
+            else:
+                # Closing a drawer this robot opened: no grasp is needed to push it
+                # shut. With no reachable or successful handle grasp, bring the
+                # closed hand in front of the remembered handle, in the orientation
+                # it held the handle with, and push (fix83/fix84: "No reachable
+                # handle grasp"; fix80: "Handle grasp is empty").
+                memory=self.drawers.get(target) if (drawer and not opening) else None
+                if memory is None or 'tool_rotation' not in memory or not any(text in str(exc) for text in
+                        ('No reachable handle grasp','Handle grasp is empty','Named handle not visible')):raise
+                T=np.linalg.inv(self.estimated_pose())
+                normal=T[:3,:3]@np.asarray(memory['normal'],float)
+                prepose=np.eye(4);prepose[:3,:3]=T[:3,:3]@np.asarray(memory['tool_rotation'],float)
+                prepose[:3,3]=T[:3,:3]@np.asarray(memory['open_handle'],float)+T[:3,3]+DRAWER_PUSH_STANDOFF*normal
+                info=dict(panel_normal=normal.tolist());grasp=None;self.drawer_push_only=True
+                root.mkdir(parents=True,exist_ok=True)
+                print('DRAWER_PUSH_FALLBACK',json.dumps(dict(target=target,reason=str(exc)[:80],hand_base=np.round(prepose[:3,3],3).tolist())),flush=True)
         progress('observe_and_grasp','completed')
         progress('articulate_release_withdraw','running')
         if drawer:
@@ -550,6 +559,40 @@ class LiveFixtureControls:
                 if self._stand_past_free_edge(target,root/f'push_open_{attempt}_blocked_dock') is None:break
         return total
 
+    def _grasp_from_closer(self,target,root,drawer,opening):
+        """Re-dock in front of the handle the grasp step found when it was out of reach, then grasp again.
+
+        fix162 call 24: the re-dock saw only the freezer pull and stood 1.0 m
+        from the fridge; the grasp step then found the door bar 1.37 m high but
+        no grasp pose had an arm solution from there (96 tried). Its replays
+        opened the door from 0.66 m in front of the bar. Returns ((grasp, info),
+        new root) or None.
+        """
+        import json,numpy as np
+        from ..code_policy.redocking import SensorRedocking
+        from .episode import episode_sensors
+        try:bar=np.asarray(np.load(root/'input_0.npz')['target'],float)
+        except (OSError,KeyError,ValueError):return None
+        reach=float(np.linalg.norm(bar[:2]))
+        print('HANDLE_OUT_OF_REACH',json.dumps(dict(target=target,handle_base=np.round(bar,3).tolist(),reach_m=round(reach,3))),flush=True)
+        if reach<=CLOSER_GRASP_MIN_REACH:return None
+        T=self.estimated_pose();spot=T[:3,:3]@bar+T[:3,3]
+        toward=-bar.copy();toward[2]=0.;toward/=np.linalg.norm(toward);normal=T[:3,:3]@toward
+        try:
+            with episode_sensors(self.runtime.model,self.runtime.data) as sensors:
+                dock=SensorRedocking(self.runtime,sensors,self.runtime.mapper.view())
+                dock.front_view_hint=(spot,normal)
+                result=dock.front_view_dock(CLOSER_GRASP_DISTANCE,root.parent/(root.name+'_closer_dock'))
+        except RuntimeError as exc:result=dict(success=False,reason=str(exc)[:120])
+        print('HANDLE_CLOSER_DOCK',json.dumps(dict(target=target,success=bool(result and result.get('success')),
+            reason=str((result or {}).get('reason'))[:80],final_distance_m=(result or {}).get('final_distance_m'))),flush=True)
+        if not (result and result.get('success')):return None
+        again=root.parent/(root.name+'_closer')
+        try:return self.acquire_grasp(target,again,drawer,opening),again
+        except RuntimeError as exc:
+            print('HANDLE_CLOSER_GRASP_FAILED',json.dumps(dict(target=target,reason=str(exc)[:120])),flush=True)
+            return None
+
     def _stand_past_free_edge(self,target,root,skip=()):
         """Re-dock beside the free edge of the remembered part-opened leaf (see PastEdgeRedocking).
 
@@ -569,9 +612,13 @@ class LiveFixtureControls:
                 if result.get('success'):chosen=turn;return True
             return False
         try:
-            if not attempt(root):
-                self.navigation_posture(root,lambda *a:None)
-                attempt(root/'after_posture')
+            # Fold the arm before driving round the open leaf. The drive was
+            # passed with the arm still out at handle height after a refused
+            # push approach, and the hand and mast swung the microwave door
+            # from 74 to 36 deg on the way (fix156 call 16, private replay).
+            # A no-op when the arm is already stowed.
+            self.navigation_posture(root,lambda *a:None)
+            attempt(root)
         finally:self.runtime.qwen_docking=guided
         print('PUSH_OPEN_REDOCK',json.dumps(dict(target=target,success=bool(result.get('success')),turn_degrees=chosen,
             reason=str(result.get('reason'))[:80],final_distance_m=result.get('final_distance_m'))),flush=True)
@@ -700,8 +747,14 @@ class LiveFixtureControls:
                 # The free approach goes round the leaf's edge from the folded
                 # arm: a straight joint blend does not clear it, so that move
                 # may use the full motion planner; contact moves do not.
-                return calibrated_finger_planner(b.prepare_arm(),b.geometry,boxes,
+                checked=calibrated_finger_planner(b.prepare_arm(),b.geometry,boxes,
                     self.runtime.model,self.runtime.data,arm_boxes=True,allow_curobo_fallback=not contact_patch)
+                # User rule (2026-11-18): IK found is enough for the door push;
+                # this planner instance only, not the rest of the pipeline.
+                # Not when pushing open: the reach round the leaf's free edge
+                # must not swing the open door back (fix162 replays).
+                checked.ik_only=not opening
+                return checked
             motion=SensorDrawerMotion(joint_position=b.joints,
                 tcp_pose=lambda q=None:tool_pose(b.geometry,b.joints() if q is None else q),
                 fingers=b.fingers,command=b.command,planner_factory=planner,outward_normal=side)

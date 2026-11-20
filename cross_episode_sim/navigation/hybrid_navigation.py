@@ -291,6 +291,19 @@ class HybridNavigator:
                 return stop('room_viewpoint_approach_requested')
         known_viewpoint_route=(self.mode=='search_recovery' and
             isinstance(self.search_recovery,RoomWaypointFollower) and bool(self.search_recovery.path))
+        if known_viewpoint_route:self.recovery_route_follower=self.search_recovery
+        elif (self.mode=='search_recovery' and self.search_recovery is not None
+                and getattr(self,'recovery_route_follower',None) is self.search_recovery):
+            # This recovery had a route to a remembered viewpoint; a braking-arc
+            # stop clears the path after 1 s (house_exploration), which is not a
+            # missing route. fix178 call 9: the second-pot search ended
+            # 'exploration_required' 0.1 s into recovery. Let the recovery block
+            # below replan, time out, or turn toward remembered sightings.
+            known_viewpoint_route=True
+            if not getattr(self,'recovery_route_kept_logged',False):
+                self.recovery_route_kept_logged=True
+                self.events.append(dict(time=now,event='recovery_route_cleared_by_stop_kept',
+                                        detail=getattr(self.search_recovery,'stop_detail',None)))
         if (self.mode in {'room_search','search_recovery'} and
                 hasattr(self.semantic.grid,'fixed_obstacle_points') and not known_viewpoint_route):
             self.terminal='exploration_required'

@@ -77,6 +77,15 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
       float(np.ptp(points[observed_target_mask(points,target,support_height),2]))<.10)
   boxes,world_stats=build_observed_boxes(g,T,points,target,support_height=support_height,local_resolution=.01 if shallow_confined else .025)
   print('OBSERVED_WORLD',world_stats,flush=True)
+  if pick_config.get('source_receptacle'):
+   # User rule (2026-11-18): for a pick inside an appliance, a grasp the arm
+   # can reach (IK found) is executed without the observed-world collision
+   # check. The drink in the fridge was refused on every look by 0.4-1.5 cm
+   # overlaps with depth voxels of the crisper edge (fix156 call 26). IK,
+   # self collision, physics and the grip/lift verification are unchanged.
+   from cross_episode_sim.control.observed_grasp_planner import ObservedGraspPlanner
+   ObservedGraspPlanner.ik_only=True
+   print('PICK_WORLD_CHECK_OFF',json.dumps(dict(source=pick_config.get('source_receptacle'))),flush=True)
   artifacts.write_text(a.output/'observed_world.json',json.dumps([dict(name=b.name,pose=b.pose,dims=b.dims) for b in boxes],indent=2))
   # Target selection/cropping is upstream. Do not veto learned proposals
   # again with a hard contact-to-surface distance threshold before planning.

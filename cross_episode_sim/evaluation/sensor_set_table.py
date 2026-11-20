@@ -53,7 +53,7 @@ class SensorSetTablePipeline:
         self.initial_doors=initial_doors;self.single_left_leaf=single_left_leaf
         # Scenes are loaded through evaluation/articulated_scene.load_saved_scene
         # (exploration stage), which rebuilds frozen fixture joints and applies
-        # the evaluation stove, so an original saved episode folder is accepted.
+        # the two-knob stove, so an original saved episode folder is accepted.
 
     def stage(self,name,command,report,success_key='success'):
         print(f'STAGE {len(self.stages)+1}: {name}',flush=True)

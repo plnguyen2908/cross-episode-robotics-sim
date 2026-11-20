@@ -52,6 +52,57 @@ def surface_description(receptacle,region):
 
 
 class SensorHouseholdPipeline(SensorSetTablePipeline):
+    def _remember_stove(self,ctx,root):
+        """After an empty-hand stove-knob navigation: measure both red knobs and remember the stove.
+
+        The robot's own memory, from onboard RGB-D and its SLAM pose (shared
+        global frame): the two knob points, the documented burner layout from
+        them (user decision, November 19, 2026), and this square-on stand as the
+        remembered view of both front burners, so a carry to a burner returns
+        here before placing. fix173: the first burner place looked for the
+        burner from the pick spot by the sink, where the stove was not in view.
+        """
+        from ..perception.stove_control_convention import measured_knob_row,front_burner_from_row
+        from ..perception.molmo_pointing import MolmoPointer
+        from ..control.sensor_appliance_backend import pixel_point
+        try:
+            packet=self.runtime.sensors.capture(include_robot_mask=True)
+            estimate=self.runtime.mapper.view().update(packet.cameras['navigation'],packet.timestamp)
+            if not estimate.accepted:raise ValueError('localization not accepted')
+            T=np.asarray(estimate.T_map_base);pointer=MolmoPointer();knobs=None;errors=[]
+            for name in ('wrist','navigation'):
+                camera=packet.cameras[name]
+                valid=camera.valid_depth if camera.robot_mask is None else camera.valid_depth&~camera.robot_mask
+                def to_point(p,camera=camera,valid=valid):
+                    u,v=np.round(p).astype(int);found=[]
+                    for dv in range(-3,4):
+                        for du in range(-3,4):
+                            try:found.append(pixel_point(camera,valid,(u+du,v+dv)))
+                            except ValueError:pass
+                    return np.median(found,axis=0) if found else None
+                try:
+                    knobs,_=measured_knob_row(pointer,camera,to_point)
+                    burners={side:front_burner_from_row(knobs,side) for side in ('left','right')};break
+                except ValueError as exc:errors.append(f'{name}: {exc}');knobs=None
+            if knobs is None:raise ValueError('; '.join(errors))
+        except Exception as exc:
+            print('STOVE_MEMORY_UNAVAILABLE',json.dumps(dict(reason=str(exc)[:200])),flush=True);return
+        to_map=lambda p:(T[:3,:3]@np.asarray(p,float)+T[:3,3])
+        self.runtime.stove_knobs_map=[to_map(p).tolist() for p in knobs]
+        pose=np.r_[T[:2,3],np.arctan2(T[1,0],T[0,0])]
+        from ..mapping.continuity import load_memory,save_memory
+        memory=load_memory(ctx['continuation'])
+        for side,label in (('left','front left stove burner'),('right','front right stove burner')):
+            point=to_map(burners[side]).tolist()
+            self.fixture_views[label]=pose.copy()
+            memory.setdefault('furniture',[])[:]=[v for v in memory.get('furniture',[]) if v['label']!=label]
+            memory['furniture'].append(dict(label=label,position=point,observations=2,viewpoints=[T[:3,3].tolist()],
+                observed_bounds=[point,point],provenance='two stove knobs measured in onboard RGB-D + documented stove burner layout'))
+        save_memory(ctx['continuation'],memory)
+        artifacts.write_text(root/'stove_memory.json',json.dumps(dict(knobs_map=self.runtime.stove_knobs_map,
+            view_pose=pose.tolist(),burners_map={s:to_map(b).tolist() for s,b in burners.items()}),indent=2))
+        print('STOVE_REMEMBERED',json.dumps(dict(knobs_map=np.round(self.runtime.stove_knobs_map,3).tolist(),view_pose=np.round(pose,3).tolist())),flush=True)
+
     def _finish_component_place(self,ctx,outcome,placed,progress,observed_map=None):
         """Only a completed release can hand off to empty-hand navigation."""
         if not outcome['success']:
@@ -292,9 +343,30 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 description='handle on '+target if purpose=='handle' else target
                 dock=self._navigate_to_object(n,description,root,ctx['continuation'],search_at=station)
                 ctx.update(root=root,dock=dock,continuation=dock,target=target,station=station)
+                if self.config['task']=='warm_two_pots' and 'stove burner knob' in target:
+                    self._remember_stove(ctx,root)
             else:
 
                 station=destination_station(destination);carry=root/'carry'
+                # Still holding the item after a failed place, with other calls
+                # in between: the pick checkpoint is no longer the live state and
+                # the carry refused to start ('Checkpoint is not the current live
+                # state'; fix170, fix179 calls 22/26, then 'File exists' on the
+                # retried place). Hand the carry the live state plus the same
+                # pick's grasp files; nothing is restored or moved.
+                src=ctx['pick']/'physics'
+                if artifacts.exists(src/'private_checkpoint/state.npy'):
+                    saved=artifacts.load_array(src/'private_checkpoint/state.npy')
+                    if abs(float(saved[0])-float(self.runtime.data.time))>1e-7:
+                        held=root/'held_pick'/'physics'
+                        self.checkpoint(held,ctx['continuation'])
+                        for name in ('continuation.json','report.json'):
+                            artifacts.write_text(held/name,artifacts.read_text(src/name))
+                        paths=artifacts.load_array(src/'validated_paths.npz')
+                        keys=list(paths.keys()) if isinstance(paths,dict) else list(paths.files)
+                        artifacts.save_archive(held/'validated_paths.npz',**{k:paths[k] for k in keys})
+                        print('HELD_ITEM_PICK_REFRESHED',json.dumps(dict(pick=str(src),live_time=round(float(self.runtime.data.time),2))),flush=True)
+                        ctx['pick']=root/'held_pick'
                 if station==ctx['station'] and destination not in self.fixture_views:
                     # In-room manipulation starts from the current observed
                     # pickup dock. Do not carry back to a distant room-entry
@@ -474,9 +546,9 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     observed_aperture=fixtures.aperture_observation(receptacle),
                     **({'previous_contacts_aperture':previous} if previous else {})),indent=2))
                 return ['--approach-config',str(path)]
-            def place_stage(name,dock,placed):
+            def place_stage(name,dock,placed,extra=()):
                 self.stage(name,[sys.executable,placement_script,'--dock',str(dock),
-                    '--output',str(placed),'--receptacle',description,'--semantic-receptacle',receptacle]+aperture_arguments('place')+front_entry_arguments('place'),placed/'report.json','execution_success')
+                    '--output',str(placed),'--receptacle',description,'--semantic-receptacle',receptacle]+aperture_arguments('place')+front_entry_arguments('place')+list(extra),placed/'report.json','execution_success')
                 if backend=='cabinet' and fixtures is not None and artifacts.exists(placed/'report.json'):
                     chosen=json.loads(artifacts.read_text(placed/'report.json')).get('chosen_contact_aperture')
                     if chosen:
@@ -492,6 +564,16 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 self.stage(f'{n}_place_dock{suffix}',[sys.executable,docking_script,
                     '--start',str(carry),'--perception',str(perception),'--continuation-map',str(carry),
                     '--output',str(dock)]+(['--interior-view-approach'] if region=='interior' else []),dock/'report.json','docking_success')
+                docked=artifacts.exists(dock/'report.json') and bool(json.loads(artifacts.read_text(dock/'report.json')).get('docking_success'))
+                if not docked and backend=='burner' and receptacle in self.fixture_views:
+                    # Already standing at the remembered square-on stove view
+                    # (carry returned there): place from this pose. fix176 call 6:
+                    # burner found 0.82 m ahead from both knobs, but every one of
+                    # 144 facing docks was refused ('observed_3d_collision'), so
+                    # the place refused to start without a dock.
+                    print('BURNER_PLACE_FROM_STOVE_VIEW',json.dumps(dict(receptacle=receptacle)),flush=True)
+                    place_stage(f'{n}_place{suffix}',carry,placed,('--current-pose',))
+                    return
                 place_stage(f'{n}_place{suffix}',dock,placed)
             if backend=='cabinet':
                 dock=carry  # Already physically docked to the observed aperture.
@@ -633,6 +715,13 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     self.open_leaves[target_name].update(bottom=grasp_height-COUNTERTOP_DOOR_HALF_HEIGHT,
                         top=grasp_height+COUNTERTOP_DOOR_HALF_HEIGHT)
                 print('MAP_OPEN_LEAF_ADDED',json.dumps(dict(target=target_name,**self.open_leaves[target_name])),flush=True)
+                # Re-docks to an object inside this appliance refuse points on the open leaf.
+                self.runtime.open_leaves=dict(self.open_leaves)
+                if memory.get('closed_handle') is not None and memory.get('closed_normal') is not None:
+                    # Where the opening is, for standing in front of it to look inside.
+                    self.runtime.open_leaves[target_name]=dict(self.open_leaves[target_name],
+                        opening_centre=((np.asarray(memory['hinge'])+np.asarray(memory['closed_handle']))/2).tolist(),
+                        opening_normal=np.asarray(memory['closed_normal']).tolist())
             drawer=getattr(fixtures,'drawers',{}).get(target_name)
             if name=='open_drawer' and getattr(result,'success',True) and drawer is not None:
                 # The opened drawer is an obstacle too. The generic re-map left
@@ -648,6 +737,8 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             if name in ('close_door','close_drawer') and getattr(result,'success',True) and target_name in self.open_leaves:
                 self.closed_leaves.append(self.open_leaves.pop(target_name))
                 print('MAP_OPEN_LEAF_REMOVED',json.dumps(dict(target=target_name)),flush=True)
+                # Re-docks to an object inside this appliance refuse points on the open leaf.
+                self.runtime.open_leaves=dict(self.open_leaves)
             ctx['continuation']=self.checkpoint(self.output/f'fixture_handoff_{len(interface.history):03d}',ctx['continuation'])
             if name.startswith('open') and observed is not None:
                 self.fixture_views[kw['target']]=np.r_[view[:2,3],np.arctan2(view[1,0],view[0,0])]
@@ -677,7 +768,14 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     return appliances[name](**kw)
             try:result=attempt()
             except RuntimeError as exc:
-                if name!='push_button' or 'control_not_observed' not in str(exc):raise
+                # Knobs too (fix168 call 13: the counted front-right knob had
+                # 'no valid non-robot depth'; nothing was turned).
+                # A knob with no reachable grasp from this stand spot is retried
+                # from a new one too (fix177 call 19: front-right knob off,
+                # 'no_reachable_m2t2_knob_grasp', burner left on at 1.19 rad;
+                # the same knob was grasped from its own dock for the on-turn).
+                retriable='control_not_observed' in str(exc) or (name=='rotate_knob' and 'no_reachable_m2t2_knob_grasp' in str(exc))
+                if name not in ('push_button','rotate_knob') or not retriable:raise
                 # The key was not located with confidence and nothing was
                 # pressed. A press that is skipped is not harmless for Start
                 # (test 37: no heating): look again from a new stand spot,
@@ -700,7 +798,49 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     rec.record('wait')
             ctx['continuation']=self.checkpoint(self.output/f'wait_handoff_{len(interface.history):03d}',ctx['continuation'])
             progress('wait','completed');return SkillOutcome(True,'requested_wait_completed')
-        handlers=dict(explore=explore,navigate=navigate,pick=pick,place=place,wait=wait)
+        # Where this robot itself put objects down, per pickup description, in
+        # the SLAM map frame (its own release point + its own SLAM pose). A
+        # later search for the same description ignores those spots. fix168:
+        # 'cookware on kitchen counter' was found again on the burner where the
+        # first pot had just been placed (7 cm from the recorded release).
+        placed_spots={}
+        def record_placement(target):
+            try:
+                out=ctx['root']/'place'
+                point=None
+                for name,key in (('observed_burner.json','point'),('chosen.json','contact')):
+                    if artifacts.exists(out/name):
+                        point=json.loads(artifacts.read_text(out/name)).get(key)
+                        if point is not None:break
+                if point is None or not artifacts.exists(out/'slam/estimated_base_poses.npy'):return
+                pose=artifacts.load_array(out/'slam/estimated_base_poses.npy')[-1]
+                mapper=json.loads(artifacts.read_text(out/'slam/mapper.json')) if artifacts.exists(out/'slam/mapper.json') else {}
+                T=np.asarray(mapper.get('global_anchor',np.eye(4)),float)@pose
+                spot=(T@np.r_[np.asarray(point,float)[:3],1.])[:3]
+                placed_spots.setdefault(target,[]).append(spot.tolist())
+                print('PLACED_SPOT_REMEMBERED',json.dumps(dict(target=target,map_point=np.round(spot,3).tolist())),flush=True)
+            except Exception as exc:print('PLACED_SPOT_UNAVAILABLE',str(exc)[:200],flush=True)
+        def place_and_remember(**kw):
+            import os
+            target=ctx.get('target')
+            pots=self.config['task']=='warm_two_pots'
+            flags=(['HOUSEHOLD_TABLE_PLACE_IK_ONLY'] if pots and kw.get('receptacle')=='dining table' else [])+\
+                  (['HOUSEHOLD_BURNER_PLACE_IK_ONLY'] if pots and 'stove burner' in str(kw.get('receptacle','')) else [])
+            for flag in flags:os.environ[flag]='1'
+            try:outcome=place(**kw)
+            finally:
+                for flag in flags:os.environ.pop(flag,None)
+            if getattr(outcome,'success',False) and target and self.config['task']!='set_table':record_placement(target)
+            return outcome
+        def navigate_excluding_placed(**kw):
+            import os
+            spots=placed_spots.get(kw.get('target')) if kw.get('destination') is None and kw.get('purpose','pick')=='pick' else None
+            if not spots:return navigate(**kw)
+            os.environ['HOUSEHOLD_PLACED_EXCLUSIONS']=json.dumps({kw['target']:spots})
+            print('SEARCH_IGNORES_OWN_PLACEMENTS',json.dumps(dict(target=kw['target'],spots=spots)),flush=True)
+            try:return navigate(**kw)
+            finally:os.environ.pop('HOUSEHOLD_PLACED_EXCLUSIONS',None)
+        handlers=dict(explore=explore,navigate=navigate_excluding_placed,pick=pick,place=place_and_remember,wait=wait)
         handlers.update({name:(lambda _name=name,**kw:fixture(_name,**kw)) for name in ('open_door','close_door','open_drawer','close_drawer')})
         handlers.update({name:(lambda _name=name,**kw:appliance(_name,**kw)) for name in ('rotate_knob','push_button')})
         saved_failures=[]

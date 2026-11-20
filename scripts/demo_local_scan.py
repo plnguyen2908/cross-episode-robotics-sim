@@ -25,7 +25,7 @@ from cross_episode_sim.control.onboard_base import OnboardBaseActuator
 def setup(source, initial_backoff=0., preserve_initial_state=False):
     # One evaluation platform: the same loader as the agent-policy (GPT) and
     # replay-scoring paths (every fixture articulated, two-knob stove, saved
-    # visual settings).
+    # visual settings). fix171/fix172 loaded the raw saved model here instead.
     from cross_episode_sim.evaluation.articulated_scene import load_saved_scene
     import json as _json
     m,d,report=load_saved_scene(source)

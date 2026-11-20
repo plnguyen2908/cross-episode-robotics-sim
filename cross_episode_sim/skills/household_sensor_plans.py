@@ -69,6 +69,10 @@ def household_plan(task, *, counts=None, heating_seconds=30.):
         fixture('close_door','fridge')
     elif task=='warm_two_pots':
         if counts.get('pot',2)!=2:raise ValueError('This task requests exactly two cookware items')
+        # Look at the stove once with an empty hand: the runner measures its two
+        # knobs and remembers the burner view (fix173: the first burner place
+        # searched from the pick spot, where the stove was not in view).
+        call('navigate',target='front left stove burner knob',search_at='kitchen',purpose='pick')
         for side in ('left','right'):
             transfer('cookware on kitchen counter','kitchen',f'front {side} stove burner')
             fixture('rotate_knob',f'front {side} stove burner knob',state='on')

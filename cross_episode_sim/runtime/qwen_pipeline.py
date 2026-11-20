@@ -1,5 +1,6 @@
 """Qwen facade over the full recipe's existing navigation and atomic handlers."""
 import json
+import numpy as np
 from . import artifacts
 from ..code_policy.skill_interface import QwenSkillInterface
 
@@ -16,6 +17,8 @@ DEFAULT_REDOCK=('pick','open_door','close_door','open_drawer','close_drawer','ro
 FACE_APPLIANCE_FIRST=('microwave','fridge')
 FACE_APPLIANCE_DISTANCE=1.0
 # Further square-on stands tried when the handle is still not measured after facing the appliance.
+# Distance (m) in front of an opened appliance's opening from which an object inside is looked for.
+INSIDE_LOOK_DISTANCE=.75
 FRONT_VIEW_RETRIES=2
 
 class PipelineRedocking:
@@ -65,7 +68,14 @@ class PipelineRedocking:
         # keypad': fix131 stood too near after the close, pointing landed on
         # the robot's own arm, and the key was never pressed).
         face_fixture=fixture if fixture in FACE_APPLIANCE_FIRST else next(
-            (name for name in FACE_APPLIANCE_FIRST if name in target.lower() and any(w in target.lower() for w in ('key','button','knob'))),None)
+            (name for name in FACE_APPLIANCE_FIRST+('stove',) if name in target.lower() and any(w in target.lower() for w in ('key','button','knob'))),None)
+        # 'stove' only for its controls (fix168 call 13: a steep side view of
+        # the 7-knob row left the counted knob without usable depth).
+        # An object inside the appliance too: with the only pointed spot on the
+        # open door refused (fix151: the food was 1.4 m away, out of the
+        # wrist view), stand in front of the appliance and look again.
+        inside=next((name for name in FACE_APPLIANCE_FIRST if target.lower().endswith(' inside '+name)),None)
+        if face_fixture is None and purpose=='pick' and inside is not None:face_fixture=inside
         if purpose=='handle' and getattr(self,'next_skill',None)=='open_door' and 'cabinet' in fixture:
             # Keep the handle navigation chose from its whole-kitchen survey;
             # a second independent pointing from the close-up view picked the
@@ -135,7 +145,7 @@ class PipelineRedocking:
                 result=session.redock(target,local_purpose,distance)
             except RuntimeError as exc:
                 p.runtime.require_bar_handle=False
-                if not (purpose=='handle' and face_fixture is not None and 'not visible' in str(exc)):raise
+                if not (purpose in ('handle','pick') and face_fixture is not None and 'not visible' in str(exc)):raise
                 # No handle on the appliance in view (fix102: navigation stopped
                 # with the microwave half out of frame and only the cabinet
                 # handle under it visible). Stand facing the appliance itself,
@@ -152,8 +162,22 @@ class PipelineRedocking:
                 # A look that pointed on the door front without measuring its
                 # handle left a stand direction square to the door: use it.
                 squared=None
-                try:squared=session._redocking.front_view_dock(FACE_APPLIANCE_DISTANCE,root/'front_view') if session._redocking is not None else None
-                except RuntimeError as refused:print('REDOCK_FRONT_VIEW_REFUSED',str(refused)[:120],flush=True)
+                leaf=(getattr(p.runtime,'open_leaves',None) or {}).get(face_fixture) if purpose=='pick' else None
+                if leaf is not None and leaf.get('opening_centre') is not None and session._redocking is not None:
+                    # This method imports numpy locally further up on some
+                    # paths only, so `np` is a local name here: bind it (fix152
+                    # call 18: UnboundLocalError, the opening view never ran).
+                    import numpy as np
+                    # Look into the opening from in front of it, as close as the
+                    # pick stands (fix151 replay: from 1 m in front of the
+                    # appliance the food was 1.6 m away and not pointed).
+                    session._redocking.front_view_hint=(np.asarray(leaf['opening_centre'],float),np.asarray(leaf['opening_normal'],float))
+                    try:squared=session._redocking.front_view_dock(INSIDE_LOOK_DISTANCE,root/'opening_view')
+                    except RuntimeError as refused:print('REDOCK_OPENING_VIEW_REFUSED',str(refused)[:120],flush=True)
+                    print('REDOCK_OPENING_VIEW',json.dumps(dict(target=target,success=bool(squared and squared.get('success')))),flush=True)
+                if squared is None or not squared.get('success'):
+                  try:squared=session._redocking.front_view_dock(FACE_APPLIANCE_DISTANCE,root/'front_view') if session._redocking is not None else None
+                  except RuntimeError as refused:print('REDOCK_FRONT_VIEW_REFUSED',str(refused)[:120],flush=True)
                 try:faced=squared if squared is not None and squared.get('success') else session.redock(face_fixture,'approach',FACE_APPLIANCE_DISTANCE)
                 except RuntimeError as unseen:
                     if 'not visible' not in str(unseen):raise

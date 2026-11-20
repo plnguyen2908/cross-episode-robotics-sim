@@ -12,6 +12,11 @@ from ..recording.deferred import StateVideoRecorder
 from ..runtime import artifacts
 
 
+# Fresh wrist-depth distance (m) accepted for a cookware pickup, and the number of looks.
+COOKWARE_PICKUP_BAND=(.59,.67)
+COOKWARE_REFINE_LOOKS=4
+
+
 def refine_cookware_view(runtime,source,output):
     """Correct the local distance using RGB-D, not an old map target centroid."""
     output.mkdir(parents=True,exist_ok=False)
@@ -22,7 +27,10 @@ def refine_cookware_view(runtime,source,output):
     label=json.loads(artifacts.read_text(source/'report.json'))['selected_object']['label']
     start=float(runtime.data.time);events=[]
     with StateVideoRecorder(runtime.model,runtime.data,output/'state_recording') as rec:
-        for attempt in range(3):
+        # Four looks, three moves: the last move is measured too (fix184 call 21:
+        # 0.666 m, then 0.660 m after the third move was never measured, and
+        # the pick ended 'outside the pickup band').
+        for attempt in range(COOKWARE_REFINE_LOOKS):
             packet=runtime.sensors.capture()
             estimate=tracker.update(packet.cameras['navigation'],packet.timestamp)
             if not estimate.accepted:raise RuntimeError('Cookware alignment needs localization')
@@ -32,13 +40,38 @@ def refine_cookware_view(runtime,source,output):
             T=estimate.T_map_base;target=T[:3,:3]@local+T[:3,3]
             distance=float(np.linalg.norm(local[:2]));heading=float(np.arctan2(local[1],local[0]))
             events.append(dict(attempt=attempt,local_target=local.tolist(),distance=distance,heading=heading))
-            if .60<=distance<=.66 and abs(heading)<.06:break
+            if COOKWARE_PICKUP_BAND[0]<=distance<=COOKWARE_PICKUP_BAND[1] and abs(heading)<.06:break
+            if attempt==COOKWARE_REFINE_LOOKS-1:continue
             pose=np.r_[T[:2,3],math.atan2(T[1,0],T[0,0])]
             forward=target[:2]-pose[:2];forward/=np.linalg.norm(forward)
             goal=np.r_[target[:2]-.64*forward,math.atan2(forward[1],forward[0])]
             checker=docking.make_checker(pose,packet.arm.position)
             turn=(goal[2]-pose[2]+np.pi)%(2*np.pi)-np.pi
-            if abs(turn)<.08 and checker.swept(pose,goal):
+            # The pick redock stops about 0.55 m from the target, inside this
+            # band, so the base often backs off a few cm next to the counter.
+            # fix167: the base stood 7 cm from a counter corner (private), inside
+            # the padded footprint, so every plan was 'start_blocked'. Back
+            # straight out while the overlap never grows, then measure again.
+            from .observed_undock import straight_escape
+            escape=None
+            if not checker.clear(pose):
+                # Straight to the pickup pose itself when it lies straight
+                # ahead/behind (fix167 replay: three short escapes to the edge
+                # of the margin used every attempt and ended 'outside band').
+                if abs(turn)<.08 and checker.clear(goal):
+                    count=checker.contact_count(pose);steps=max(1,int(np.ceil(np.linalg.norm(goal[:2]-pose[:2])/.01)))
+                    for k in range(1,steps+1):
+                        p=np.r_[pose[:2]+(goal[:2]-pose[:2])*k/steps,pose[2]+turn*k/steps];now=checker.contact_count(p)
+                        if now>count:break
+                        count=now
+                    else:escape=goal.copy()
+                if escape is None:escape=straight_escape(checker,pose)
+            print('COOKWARE_REFINE',attempt,'distance',round(distance,3),'heading',round(heading,3),'start_clear',bool(checker.clear(pose)),flush=True)
+            if escape is not None:
+                events[-1].update(start_inside_margin=True,escape=escape.tolist())
+                print('COOKWARE_REFINE_STRAIGHT_ESCAPE',round(float(np.linalg.norm(escape[:2]-pose[:2])),3),flush=True)
+                docking.path=[escape]
+            elif abs(turn)<.08 and checker.swept(pose,goal):
                 docking.path=[goal]
             else:
                 # A counter corner may block a straight advance. Keep the same

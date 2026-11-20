@@ -21,6 +21,7 @@ class CalibratedArmPlanner(ObservedHingedPlanner):
         self.arm_box_spheres=np.concatenate(indices).astype(int)
 
     def world_clear(self,spheres,margin=.005,base_offset=None,base_yaw=0.):
+        if getattr(self,'ik_only',False):return True      # user rule: IK found is enough (2026-11-18)
         if self._checked_q is None:
             return super().world_clear(spheres,margin,base_offset,base_yaw)
         checked=np.asarray(spheres).copy()

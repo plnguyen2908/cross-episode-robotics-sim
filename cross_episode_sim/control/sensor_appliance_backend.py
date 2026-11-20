@@ -47,6 +47,14 @@ SECOND_KEY_DESCRIPTIONS={'Start key at the bottom of the microwave keypad':
     'Start key: the left one of the two wide keys at the bottom of the microwave keypad'}
 SECOND_KEY_AGREE_METRES=.02
 
+# Tilts (deg, about the indicator bar) of observed-geometry knob grasps tried when M2T2 has none.
+KNOB_GEOMETRIC_TILTS=(0.,-15.,15.,-30.,30.)
+# Straight withdrawal from a released knob: total distance (m) along its axis, in this many steps.
+KNOB_WITHDRAW_DISTANCE=.07
+KNOB_WITHDRAW_STEPS=7
+# A remembered stove knob within this distance (m) of the fitted one is the same knob.
+KNOB_MEMORY_MATCH=.06
+
 class SensorApplianceBackend:
     def __init__(self, *, capture, joints, fingers, command, geometry, arm,
                  pad_vertices, pointer, m2t2, precise_geometry=None, prepare_arm=None,
@@ -126,12 +134,39 @@ class SensorApplianceBackend:
                 try:
                     point=pixel_point(camera,valid,pixel)
                     observed=fit_control(self.points,point,kind)
+                    # Not the remembered centre: fix183 call 8 showed its height 1.8 cm off
+                    # (the fit was right there), so the knob fit itself is trimmed instead.
                     self.event('control_geometry',kind=kind,center=observed.center.tolist(),
                                normal=observed.outward.tolist(),angle=observed.angle)
                     self._accept_control(observed,point,target,kind)
                     return observed
                 except ValueError as exc:errors.append(str(exc))
         raise RuntimeError('control_not_observed: '+str(errors))
+
+    def _remembered_knob_center(self,packet,observed,target):
+        """Centre a stove knob on this robot's own empty-hand measurement.
+
+        fix182 call 14: the fit from the knob stand put the centre 2.4 cm above
+        the knob axis (extra panel points in the surface), so the pinch closed
+        on air. The knobs measured square-on at the start of the task matched
+        the axis height. Only the centre is replaced; normal, surface and the
+        indicator angle stay from the fresh fit.
+        """
+        from ..runtime.episode import current_runtime
+        runtime=current_runtime();remembered=getattr(runtime,'stove_knobs_map',None) if runtime is not None else None
+        if not remembered or 'stove' not in target or getattr(runtime,'mapper',None) is None:return observed
+        try:
+            estimate=runtime.mapper.view().update(packet.cameras['navigation'],packet.timestamp)
+            if not estimate.accepted:return observed
+            T=np.asarray(estimate.T_map_base);knobs=(np.asarray(remembered,float)-T[:3,3])@T[:3,:3]
+        except Exception as exc:
+            print('KNOB_MEMORY_UNUSED',json.dumps(dict(reason=str(exc)[:120])),flush=True);return observed
+        gaps=np.linalg.norm(knobs-observed.center,axis=1);i=int(np.argmin(gaps))
+        if gaps[i]>KNOB_MEMORY_MATCH:return observed
+        from dataclasses import replace
+        print('KNOB_CENTER_FROM_MEMORY',json.dumps(dict(target=target,fitted=np.round(observed.center,3).tolist(),
+            remembered=np.round(knobs[i],3).tolist(),gap_m=round(float(gaps[i]),3))),flush=True)
+        return replace(observed,center=knobs[i].copy())
 
     def _accept_control(self,observed,point,target,kind):
         self.observed=observed;self.control_kind=kind
@@ -165,10 +200,17 @@ class SensorApplianceBackend:
             from .convex_finger_contact import ObservedControlPlanner
             exact=self.precise_geometry()
             links=exact.planner_finger_links
-            return ObservedControlPlanner(self.arm,self.geometry,boxes,allow_curobo_fallback=not contact,fast_ik=True,
+            planner=ObservedControlPlanner(self.arm,self.geometry,boxes,allow_curobo_fallback=not contact,fast_ik=True,
                 panel_points=np.empty((0,3)),hinge_xy=[0.,0.],reference_tcp=self.tcp()[:3,3],
                 finger_geometry=exact,finger_links=links)
-        return ObservedGraspPlanner(self.arm,self.geometry,boxes,allow_curobo_fallback=not contact,fast_ik=True)
+        else:planner=ObservedGraspPlanner(self.arm,self.geometry,boxes,allow_curobo_fallback=not contact,fast_ik=True)
+        if self.control_kind=='knob':
+            # User rule (2026-11-18): a grasp with an IK solution is executed,
+            # not refused by the observed-world check. fix167 replays: with the
+            # right knob selected, every knob grasp was refused because the
+            # fingers overlapped observed panel boxes beside the knob.
+            planner.ik_only=True
+        return planner
 
     def execute(self,path,grip):
         for q in path:self.command(q,grip)
@@ -233,6 +275,20 @@ class SensorApplianceBackend:
             if rows:break
         up=np.array([0.,0.,1.]);up-=control.outward*(control.outward@up);up/=np.linalg.norm(up)
         indicator=Rotation.from_rotvec(control.angle*control.outward).as_matrix()@up
+        if not rows and self.control_kind=='knob':
+            # M2T2 proposed no grasp touching the observed knob face (fix180
+            # call 19: 0 proposals in the 8 cm crop, 387/687 wider, none on the
+            # knob; the burner stayed on). Use the observed knob geometry: approach
+            # straight into the face, fingers across the indicator bar, at the
+            # wrist rolls the ranking below prefers. Each candidate is still
+            # planned, executed and released physically like an M2T2 grasp.
+            approach=-control.outward;across=np.cross(control.outward,indicator);across/=np.linalg.norm(across)
+            for tilt in KNOB_GEOMETRIC_TILTS:
+                tilted=Rotation.from_rotvec(np.radians(tilt)*indicator).as_matrix()
+                z=tilted@approach;y=tilted@across;x=np.cross(y,z)
+                tcp=np.eye(4);tcp[:3,:3]=np.column_stack([x,y,z]);tcp[:3,3]=control.center
+                rows.append(dict(tcp=tcp.tolist(),score=0.,contact=control.center.tolist(),source='observed_knob_geometry'))
+            self.event('knob_geometric_grasps',count=len(rows))
         rows.sort(key=lambda r:(abs(np.asarray(r['tcp'])[:3,1]@control.outward)>.5,
                                 np.asarray(r['tcp'])[:3,2]@control.outward>-.5,
                                 abs(np.asarray(r['tcp'])[:3,1]@indicator),
@@ -274,14 +330,30 @@ class SensorApplianceBackend:
         for path in paths:self.execute(path,255.)
 
     def release_withdraw(self,control):
-        # Reuse the established knob release pattern: clear the bar with a
-        # partial opening, withdraw, then open fully away from the appliance.
-        self.set_gripper(180.)
-        pose=self.tcp();pose[:3,3]+=.07*control.outward
+        # Open fully, wait for the fingers, then back straight out along the
+        # knob axis in short steps. fix184 call 19: the knob was OFF (0.00)
+        # and held there for 2 s; the old partial opening (180) plus one
+        # planned 7 cm withdraw swept the half-open fingers 2.2 cm sideways and
+        # twisted them 6 deg across the bar, flicking the knob back to 1.19 rad
+        # (ON). From that saved frame a full opening with the arm still leaves
+        # the knob at 0.00 and the fingers clear. Two front knobs 43 cm apart
+        # leave room for a full opening.
+        self.set_gripper(0.)
         planner=self.planner(control,True)
         self.event('withdraw_initial_clearance',clear=planner.clear(self.joints()),detail=getattr(planner,'last_rejection',None))
-        self.execute(planner.plan(self.joints(),pose[:3,3],pose[:3,:3]),180.)
-        self.set_gripper(0.)
+        start=self.tcp();q=self.joints();paths=[]
+        for k in range(1,KNOB_WITHDRAW_STEPS+1):
+            pose=start.copy();pose[:3,3]+=KNOB_WITHDRAW_DISTANCE*k/KNOB_WITHDRAW_STEPS*control.outward
+            path=planner.plan(q,pose[:3,3],pose[:3,:3]);paths.append(path);q=path[-1]
+        for path in paths:self.execute(path,0.)
+
+    def withdraw_further(self,control,distance=.10,steps=5):
+        """Back the open gripper further out along the knob axis, for a clearer look."""
+        planner=self.planner(control,True);start=self.tcp();q=self.joints();paths=[]
+        for k in range(1,steps+1):
+            pose=start.copy();pose[:3,3]+=distance*k/steps*control.outward
+            path=planner.plan(q,pose[:3,3],pose[:3,:3]);paths.append(path);q=path[-1]
+        for path in paths:self.execute(path,0.)
 
     def press_withdraw(self,control):
         from .coordinated_contact import panel_contact_pose

@@ -206,6 +206,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   for i,(lo,hi) in enumerate(merge_voxels(vox)):
    lo=np.array(lo);hi=np.array(hi);boxes.append(Cuboid(name=f'observed_{i}',pose=[*((lo+hi+1)*.0125),1,0,0,0],dims=((hi-lo+1)*.025+.003).tolist()))
   calibration=robot_calibration(m,d,a.output/'robot');fixed_support=[[*s['center'],s['radius']] for s in calibration['collision_spheres'].get('base',[])];arm=sensor_arm_planner(kinematics=calibration,collision_cache={'cuboid':max(16,len(boxes)),'mesh':2});arm.planner.update_world(SceneCfg(cuboid=boxes));planner=ObservedGraspPlanner(arm,geo,boxes,fixed_floor_support_spheres=fixed_support);tree=cKDTree(surface)
+  if os.environ.get('HOUSEHOLD_TABLE_PLACE_IK_ONLY')=='1':
+   # User rule (2026-11-18): a reachable IK solution is executed, not refused by
+   # the observed-world check. fix175 call 23: 113 dining-table candidates had IK
+   # and were refused by 0-5 mm overlaps at 1.06-1.22 m, the height of the held
+   # pot whose own points were left in the cloud. Physics and release checks stay.
+   planner.ik_only=True;print('TABLE_PLACE_IK_ONLY',flush=True)
   if active_mode=='front_entry':
    from cross_episode_sim.control.calibrated_arm_planner import CalibratedArmPlanner
    planner=CalibratedArmPlanner(arm,geo,boxes,panel_points=np.empty((0,3)),hinge_xy=[0.,0.],reference_tcp=np.zeros(3),arm_body_ids=[m.body(f'robot_0/fr3_link{i}').id for i in range(8)],allow_curobo_fallback=False,fixed_floor_support_spheres=fixed_support)
@@ -310,7 +316,21 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    print('ALIGNMENT_COMPLETED',float(d.time-start),flush=True)
    raise SystemExit(0)
   selected_tcp=np.asarray(chosen['tcp'])
-  artifacts.write_text(a.output/'chosen.json',json.dumps(chosen,indent=2));phase='approach';execute(approach,255);phase='lower';execute(lower,255)
+  artifacts.write_text(a.output/'chosen.json',json.dumps(chosen,indent=2))
+  try:phase='approach';execute(approach,255);phase='lower';execute(lower,255)
+  except RuntimeError as blocked:
+   if str(blocked)!='Arm did not settle' or os.environ.get('HOUSEHOLD_TABLE_PLACE_IK_ONLY')!='1':raise
+   # The held pot met the table before the planned release height (fix182
+   # call 23: it hung 36-40 deg tipped, the low rim touched first and the arm
+   # pushed without settling). A blocked descent toward the measured support
+   # is that contact: release here, then the unchanged release, retreat and
+   # visual stability checks run. Tracking diagnostics do not abort it.
+   here=c.robot_view.get_move_group('arm').joint_pos.copy();path=np.concatenate([approach,lower])
+   k=int(np.argmin(np.linalg.norm(path-here,axis=1)))
+   print('PLACE_DESCENT_BLOCKED_RELEASE',json.dumps(dict(phase=phase,waypoint=k,of=len(path),
+       tracking_error_rad=round(float(np.max(abs(here-path[-1]))),3))),flush=True)
+   warnings.append('descent blocked before planned release; released at contact')
+   lower=here[None];retreat=np.concatenate([here[None],path[k::-1]])
   phase='release';last=None;stable=0
   for _ in range(100):
    command(lower[-1],0);angle=np.array([d.joint(n).qpos[0] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')]);stable=stable+1 if last is not None and np.max(abs(angle-last))<.0002 else 0;last=angle

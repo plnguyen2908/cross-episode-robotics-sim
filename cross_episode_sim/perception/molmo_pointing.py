@@ -50,6 +50,25 @@ class PointingSupervisor:
     def refine_mask(self, camera, mask):
         return mask
 
+    # A detection this close (m, horizontal) to where the robot itself put an
+    # object of this description down is that same object, not another one.
+    OWN_PLACEMENT_RADIUS=.20
+
+    def drop_own_placements(self):
+        """Forget targets at spots the runner says this robot placed this description (its own memory)."""
+        import os,json
+        import numpy as np
+        try:spots=json.loads(os.environ.get('HOUSEHOLD_PLACED_EXCLUSIONS','{}')).get(self.label)
+        except ValueError:spots=None
+        if not spots:return []
+        spots=np.asarray(spots,float)
+        keep=[];dropped=[]
+        for t in self.targets.targets:
+            near=np.min(np.linalg.norm(spots[:,:2]-np.asarray(t.position)[:2],axis=1))<self.OWN_PLACEMENT_RADIUS
+            (dropped if near else keep).append(t)
+        if dropped:self.targets.targets[:]=keep
+        return [t.position.tolist() for t in dropped]
+
     def verify_mask(self, camera, mask, tracking):
         """Optional category check of a pointed mask: None, or evidence with `accepted`."""
         return None
@@ -119,4 +138,5 @@ class PointingSupervisor:
                     yy,xx=np.where(mask)
                     detections.append(Detection(self.label,1.,(float(xx.min()),float(yy.min()),float(xx.max()+1),float(yy.max()+1)),mask=mask))
             self.targets.update(camera,detections,tracking,packet.timestamp)
-            self.events.append(dict(timestamp=packet.timestamp,camera=camera.frame_id,raw=result['raw'],wall_seconds=result['wall_seconds'],category_verification=result.get('category_verification',[])+checked,masks=len(detections),targets=[dict(id=t.track_id,position=t.position.tolist(),last_seen=t.last_seen,observations=t.observations) for t in self.targets.targets]))
+            ignored=self.drop_own_placements()
+            self.events.append(dict(timestamp=packet.timestamp,camera=camera.frame_id,raw=result['raw'],wall_seconds=result['wall_seconds'],category_verification=result.get('category_verification',[])+checked,masks=len(detections),ignored_own_placements=ignored,targets=[dict(id=t.track_id,position=t.position.tolist(),last_seen=t.last_seen,observations=t.observations) for t in self.targets.targets]))

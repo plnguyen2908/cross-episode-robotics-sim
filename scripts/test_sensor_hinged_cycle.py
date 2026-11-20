@@ -18,8 +18,12 @@ from cross_episode_sim.control.sensor_hinged import fit_panel,estimate_vertical_
 # A grasped handle's centre stands about this far in front of its door panel.
 PANEL_HANDLE_STANDOFF=.03
 # Depth of a leaf's own rim beside a push contact (m) and how far around the contact it is taken as the leaf.
-LEAF_RIM_DEPTH=.06
+# Deep enough to take in the door's own handle bar, which stands a few cm off
+# the door face: at 6 cm the fridge bar beside the hand (0.80-1.02 m high)
+# blocked the base push at 26 deg (replay of fix159's fridge opening, 63 deg).
+LEAF_RIM_DEPTH=.10
 LEAF_RIM_REACH=.12
+LEAF_RIM_HEIGHT=.70
 # A pull that loses the panel behind the hand this close to the requested opening (deg) has opened the door.
 HELD_PANEL_LOST_ACCEPT_DEGREES=15.
 from cross_episode_sim.control.observed_hinged_planner import ObservedHingedPlanner
@@ -45,6 +49,18 @@ def measure_wall(name):
  return decorate
 
 p=argparse.ArgumentParser();p.add_argument('--panel-close-reference',type=Path);p.add_argument('--calibrated-contact-boxes',action='store_true');p.add_argument('--local-panel-reach',action='store_true');p.add_argument('--pause-at-panel',action='store_true');p.add_argument('--resume-panel-push',action='store_true');p.add_argument('--push-advance-degrees',type=float,default=15.);p.add_argument('--close-observation',type=Path);p.add_argument('--handle-then-push',action='store_true');p.add_argument('--pull-push-after',type=float,default=30.);p.add_argument('--contact-motion-profile',choices=['feedback','fast'],default='feedback');p.add_argument('--auto-probe-direction',action='store_true');p.add_argument('--shared-oracle-contact',action='store_true');p.add_argument('--grasp-run',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--open-only',action='store_true');p.add_argument('--push-after',type=float,default=None);p.add_argument('--base-push',action='store_true');p.add_argument('--disable-local-contact-ik',action='store_true');p.add_argument('--contact-ik',choices=['finite','analytic'],default='finite');p.add_argument('--adaptive-push-orientation',action='store_true');p.add_argument('--base-follow-handle',action='store_true');p.add_argument('--base-yaw-follow',action='store_true');p.add_argument('--oracle-contact-poses',action='store_true');p.add_argument('--exact-closed-fingers',action='store_true');p.add_argument('--planar-push',action='store_true');p.add_argument('--lateral-base-fraction',type=float,default=.5);p.add_argument('--contact-retreat',action='store_true');p.add_argument('--probe-only',action='store_true');p.add_argument('--release-regrasp',action='store_true');p.add_argument('--debug-stack-interval',type=float,default=0.);p.add_argument('--absolute-open-angle',type=float,default=None,help='Observed angle from the initial panel, including probe motion');p.add_argument('--max-angle',type=float,default=100);p.add_argument('--angle-step',type=float,default=5.);p.add_argument('--orientation-gain',type=float,default=1.);p.add_argument('--probe-distance',type=float,default=.06);p.add_argument('--probe-direction',type=int,choices=[-1,1],default=1);a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+# User rule (2026-11-18): an arm pose with an IK solution is executed without
+# the observed-world collision checks (fix158's fridge close: every push
+# approach refused as 'Contact IK rejected' by them). Self collision, physics
+# and the door-angle checks are unchanged.
+# Push-close only. Opening keeps the checks: with them off, the reach round
+# to the fridge door's inner face after the 25 deg pull swung the door shut
+# (replays of fix162's fridge opening: 25.4 -> 0.1 deg during push_precontact).
+if a.panel_close_reference is not None:
+ ObservedGraspPlanner.ik_only=True;print('DOOR_WORLD_CHECK_OFF',flush=True)
+# Every door move: the hand's short straight contact line onto the leaf is
+# IK-only (free reaches round the leaf stay checked).
+ObservedGraspPlanner.contact_line_ik_only=True;print('DOOR_CONTACT_LINE_CHECK_OFF',flush=True)
 if a.debug_stack_interval>0:
  import faulthandler
  faulthandler.dump_traceback_later(a.debug_stack_interval,repeat=True)
@@ -154,7 +170,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     # and 2 cm beside the contact stopped the push after 4.6 deg).
     rim=abs((points-after.anchor)@after.normal)<LEAF_RIM_DEPTH
     rim &= abs((points-current[:3,3])@tangent_local)<LEAF_RIM_REACH
-    rim &= abs(points[:,2]-current[2,3])<LEAF_RIM_REACH
+    # Along the leaf's height too: the free edge is one vertical column, and
+    # its points above and below the hand's reach were merged into a 1.1 m
+    # box that still crossed the hand (replay of the fix152 fridge opening:
+    # a 1 cm column 2 cm beside the contact, 0.66-1.75 m high, stopped the
+    # base push at 26 deg).
+    rim &= abs(points[:,2]-current[2,3])<LEAF_RIM_HEIGHT
     keep &= ~rim
   panel_points=None
   if hinge_data is not None and attached:
@@ -701,7 +722,20 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     print('PANEL_MEMORY_REREGISTERED',json.dumps(dict(search_shift_m=shift,moved_along_normal_m=round(correction,3))),flush=True)
    after=before;panel_history=[before];panel_offset=0.
    remaining=float(np.arctan2(np.cross(before.normal,memory['closed_normal'])[2],before.normal@memory['closed_normal']))
-   if abs(remaining)<np.deg2rad(2):raise ValueError('Observed door already at closed reference')
+   if abs(remaining)<np.deg2rad(2):
+    # The camera puts the leaf within 2 deg of the remembered closed position,
+    # but the scorer's closed limit is 1.7 deg and the microwave was left 3.5
+    # deg open this way (fix157 call 22: first stroke 8.8 deg short, this
+    # finishing stroke refused). When the caller asks to push past closed,
+    # push that far in the remembered closing direction (from the remembered
+    # leaf to the closed reference, never from this noisy small angle).
+    past=float(memory.get('close_past_reference_degrees',0.))
+    remembered=np.asarray(memory.get('open_normal',before.normal),float)
+    turn=float(np.arctan2(np.cross(remembered,memory['closed_normal'])[2],remembered@memory['closed_normal']))
+    if past<=0. or abs(turn)<np.deg2rad(2):raise ValueError('Observed door already at closed reference')
+    print('PUSH_CLOSE_FINAL_PRESS',json.dumps(dict(observed_remaining_degrees=round(float(np.degrees(remaining)),2),
+          remembered_remaining_degrees=round(float(np.degrees(turn)),2),past_degrees=past)),flush=True)
+    remaining=float(np.sign(turn))*1e-3
    estimate=dict(center_xy=memory['hinge_xy'],radius=float(np.linalg.norm(edge[:2]-center[:2])),observed_angle=float(np.sign(remaining)*1e-6))
    start_T=tcp().copy();start_T[:3,3]=edge;fixed_handle_T=start_T.copy();attached=False
    tangent=np.array([-normal[1],normal[0],0.]);theta=0.

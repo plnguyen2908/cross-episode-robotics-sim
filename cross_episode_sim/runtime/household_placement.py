@@ -39,7 +39,7 @@ def prepare_support_view(runtime, tool_points, root, kind, aperture=None, *, cab
     print('HELD_SURFACE_REFRESH',json.dumps(detail),flush=True)
     if kind == 'burner':
         from ..control.raised_payload_posture import raise_payload_clearance
-        raise_payload_clearance(runtime, tool_points, root/'support_clearance', target_height=1.3)
+        raise_payload_clearance(runtime, tool_points, root/'support_clearance', target_height=1.3, keep_level=True)
     else:
         raise_held_view(runtime, tool_points, root/'support_clearance', target_height=1.4)
     if kind == 'cabinet':

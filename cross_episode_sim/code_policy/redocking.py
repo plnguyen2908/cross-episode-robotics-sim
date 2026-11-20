@@ -57,8 +57,43 @@ LOOK_AROUND_LABEL='look around'
 CLOSING_TIP_BEARINGS=(1.2,-1.2,1.4,-1.4,1.57,-1.57,1.75,-1.75)
 
 
+# A plain-pointed vertical bar at least this long (m) is the fridge door handle (0.9 m bar; cabinet
+# and microwave handles are under 0.4 m).
+FRIDGE_BAR_MIN_LENGTH=.55
 # Bearings (rad) around the measured door-front normal tried for the fridge handle stand spot.
 FRIDGE_HANDLE_FRONT_OFFSETS=(0.,.15,-.15,.30,-.30)
+
+
+# A point this close (m) to the remembered open leaf of the appliance a target is inside is on the leaf.
+# The remembered leaf runs from the hinge axis to the handle on the outer face; the pointed spot on
+# the inner face in fix151 lay 0.115 m from that line, the food 0.30 m.
+OPEN_LEAF_POINT_MARGIN=.15
+
+
+def on_open_leaf_of_container(runtime, target, point, camera=None):
+    """Whether `point` (map frame) lies on the open door of the appliance the target is 'inside'.
+
+    Pointing for 'food container inside microwave' marked the inner face of the
+    open door, 1.2 m high and 0.6 m from the food (fix151, call 17); navigation
+    and the pick re-dock both took it, and the pick then had nothing in reach.
+    The robot remembers every door it opened (hinge and opened handle, map
+    frame); a point within OPEN_LEAF_POINT_MARGIN of that leaf, inside its
+    height band, is refused for such targets.
+    """
+    leaves=getattr(runtime,'open_leaves',None) or {}
+    words=str(target).split(' inside ')
+    if len(words)!=2:return False
+    leaf=leaves.get(words[1].strip())
+    if leaf is None or 'hinge' not in leaf or 'open_handle' not in leaf:return False
+    a=np.asarray(leaf['hinge'],float)[:2];b=np.asarray(leaf['open_handle'],float)[:2];p=np.asarray(point,float)
+    span=b-a;length=float(np.linalg.norm(span))
+    if length<1e-6:return False
+    t=float(np.clip((p[:2]-a)@span/length**2,0.,1.15))
+    gap=float(np.linalg.norm(p[:2]-(a+t*span)))
+    low=leaf.get('bottom',-np.inf);high=leaf.get('top',np.inf)
+    hit=bool(gap<=OPEN_LEAF_POINT_MARGIN and low-.05<=p[2]<=high+.05)
+    if hit:print('REDOCK_POINT_ON_OPEN_LEAF',json.dumps(dict(target=target,camera=str(camera)[:20],gap_m=round(gap,3),height_m=round(float(p[2]),3))),flush=True)
+    return hit
 
 class SensorRedocking:
     """Retain the arm/gripper posture when its swept shape permits local travel.
@@ -156,6 +191,7 @@ class SensorRedocking:
                                 base_point=np.round(local,3).tolist())),flush=True)
                             continue
                         candidates.append(T[:3,:3] @ local + T[:3,3])
+                candidates=[p for p in candidates if not on_open_leaf_of_container(getattr(self,'runtime',None),target,p,key)]
                 if target=='handle on fridge':
                     # The door handle is the vertical bar. Plain pointing (and
                     # the appliance vote, correctly) also returns the freezer
@@ -171,6 +207,19 @@ class SensorRedocking:
                             if np.isfinite(local).all() and vertical_bar_handle(cloud,local):found.append(T[:3,:3]@local+T[:3,3])
                         return found
                     pointed=len(candidates);candidates=bars(result['points'])
+                    if not candidates:
+                        # The ownership vote can drop the door handle itself:
+                        # replayed from fix152's fridge views, plain pointing
+                        # marked the bar (1.36, 1.07 m high) while the voted
+                        # pointer kept only the freezer pull. The fridge door
+                        # handle is a vertical bar far longer than any cabinet
+                        # handle, so a plain-pointed bar that long is taken.
+                        from ..perception.handle_surface import bar_height_range
+                        plain=self.pointer.point(Image.fromarray(camera.rgb),target).get('points',[])
+                        for found in bars(plain):
+                            local=T[:3,:3].T@(found-T[:3,3]);low,high=bar_height_range(cloud,local)
+                            print('REDOCK_FRIDGE_PLAIN_BAR',json.dumps(dict(camera=str(key)[:40],length_m=round(high-low,3))),flush=True)
+                            if high-low>=FRIDGE_BAR_MIN_LENGTH:candidates.append(found)
                     self.fridge_front_normal=None
                     if candidates:
                         # Stand square to the door front at the bar, not beside
@@ -197,10 +246,18 @@ class SensorRedocking:
                         # here: remember a stand direction square to the door
                         # front for the caller's facing step.
                         from ..perception.handle_surface import front_normal_toward_robot
+                        # Face the highest pointed spot: the fridge door's bar is
+                        # far above the freezer pull. Facing the 0.6 m pull left
+                        # the robot to the side of the bar and the bar unmeasured
+                        # (fix159 call 24); facing the 1.16 m spot, its replay
+                        # measured the bar at 1.38 m and opened the door to 89 deg.
+                        spots=[]
                         for pixel in result['points']:
                             try:local=pixel_point(camera,valid,pixel)
                             except ValueError:continue
-                            if not np.isfinite(local).all():continue
+                            if np.isfinite(local).all():spots.append(local)
+                        spots.sort(key=lambda local:-float((T[:3,:3]@local+T[:3,3])[2]))
+                        for local in spots:
                             spot=T[:3,:3]@local+T[:3,3];source='door front'
                             normal=front_normal_toward_robot(cloud,local)
                             direction=None if normal is None else T[:3,:3]@normal
@@ -558,6 +615,48 @@ class SensorRedocking:
         raise RuntimeError('Target not visible after a full look around')
 
     def move(self, target, purpose, distance, output, lateral_offset=None):
+        """Stove knobs stand square to the measured stove front; everything else is unchanged.
+
+        fix168 call 13 and its replays: a knob dock taken along the line from
+        wherever the robot stood left it at a slant, the seven-knob row ran
+        diagonally across the image and the counted knob had no usable depth
+        or was missed. The oven front below the knob row is measured from the
+        same depth view (observed_front); if it is not measured, or that
+        square-on stand cannot be planned, the usual dock is used.
+        """
+        knob=(purpose=='handle' and isinstance(target,str) and 'stove burner knob' in target
+              and getattr(self,'approach_normal_map',None) is None and lateral_offset is None)
+        if not knob:return self._move(target,purpose,distance,output,lateral_offset)
+        kept=(self.approach_normal_map if hasattr(self,'approach_normal_map') else None,getattr(self,'strict_frontal',False))
+        self._stove_front_pending=True
+        try:
+            result=self._move(target,purpose,distance,output,lateral_offset)
+            if result.get('success') or not getattr(self,'_stove_front_used',False):return result
+            failure=result.get('reason')
+        except RuntimeError as exc:
+            if not getattr(self,'_stove_front_used',False):raise
+            failure=str(exc)
+        finally:
+            self._stove_front_pending=False;self.approach_normal_map=kept[0];self.strict_frontal=kept[1]
+        print('KNOB_SQUARE_DOCK_FALLBACK',json.dumps(dict(target=target,reason=str(failure)[:160])),flush=True)
+        self._stove_front_used=False
+        return self._move(target,purpose,distance,output.parent/(output.name+'_plain'),lateral_offset)
+
+    def _apply_stove_front(self,packet,tracking,point):
+        from ..perception.receptacle_front import observed_front
+        from ..control.sensor_appliance_backend import camera_points
+        T=tracking.T_map_base;local=(np.asarray(point,float)-T[:3,3])@T[:3,:3]
+        cloud=np.concatenate([camera_points(packet.cameras[k])[0] for k in ('navigation','wrist') if k in packet.cameras])
+        front=observed_front(cloud,local)
+        if front is None:
+            print('KNOB_STOVE_FRONT_UNMEASURED',flush=True);self._stove_front_used=False;return
+        self.approach_normal_map=T[:3,:3]@np.asarray(front['normal_base'],float);self.strict_frontal=True
+        self._stove_front_used=True
+        print('KNOB_SQUARE_TO_STOVE_FRONT',json.dumps(dict(points=front['points'],
+            normal_map=np.round(self.approach_normal_map[:2],3).tolist(),
+            robot_off_normal_deg=round(float(np.degrees(abs((math.atan2(-self.approach_normal_map[1],-self.approach_normal_map[0])-math.atan2(T[1,0],T[0,0])+np.pi)%(2*np.pi)-np.pi))),1))),flush=True)
+
+    def _move(self, target, purpose, distance, output, lateral_offset=None):
         if not isinstance(target, str) or not target.strip():
             raise ValueError('Provide a semantic target')
         if purpose not in ('pick', 'place', 'handle', 'approach'):
@@ -570,6 +669,7 @@ class SensorRedocking:
         output.mkdir(parents=True, exist_ok=False)
         wall = time.monotonic();start = float(self.runtime.data.time)
         packet, tracking, point, camera = self.observe(target)
+        if getattr(self,'_stove_front_pending',False):self._apply_stove_front(packet,tracking,point)
         grid = self.runtime.observed_navigation_map
         # Accumulate actual measured depth, without a scanning/tuck cycle.
         if grid.last_timestamp is None or tracking.timestamp > grid.last_timestamp:
