@@ -112,7 +112,7 @@ def main():
         while name in names.values():name += '+'
         names[s] = name;jobs.put(s)
     width = max(len(n) for n in names.values())
-    lock = threading.Lock();procs = {};results = {}
+    lock = threading.Lock();procs = {};results = {};stopping = threading.Event();last = {}
     started = time.monotonic()
 
     def say(tag, text):
@@ -120,6 +120,7 @@ def main():
 
     def worker(gpu):
         while True:
+            if stopping.is_set():return
             try:source = jobs.get_nowait()
             except queue.Empty:return
             name = names[source];folder = out / name
@@ -127,14 +128,19 @@ def main():
             if a.raw:command.append('--raw')
             proc = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, bufsize=1, start_new_session=True)
-            procs[name] = proc;t0 = time.monotonic()
+            procs[name] = proc;t0 = time.monotonic();last[name] = [t0, 'starting']
             say(name, f'started on GPU {gpu}')
+            if stopping.is_set():
+                try:os.killpg(proc.pid, signal.SIGINT)
+                except ProcessLookupError:pass
             for line in proc.stdout:
                 line = line.rstrip('\n')
                 # Drop the runner's timestamp prefix; keep the message.
                 if ' | ' in line[:40]:line = line.split(' | ', 1)[1]
+                if line.startswith(('STAGE', 'PUBLIC CALL')):last[name][1] = line.split(' — ')[0][:70]
                 say(name, line)
-            code = proc.wait();procs.pop(name, None)
+            code = proc.wait();procs.pop(name, None);last.pop(name, None)
+            if stopping.is_set():return
             try:report = json.loads((folder / 'episode/report.json').read_text())
             except Exception:report = {}
             prog = report.get('progress') or {}
@@ -151,20 +157,30 @@ def main():
                 ' | '.join(f"{k} rooms: {fmt(v)}" for k, v in stats['by_rooms'].items()))
 
     def stop(*_):
-        say('eval', 'stopping all runs')
-        running = list(procs.values())
-        for proc in running:
-            try:os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:pass
+        # No new episode starts after this; every running one is stopped (SIGINT,
+        # then SIGKILL after 20 s), including one a worker launched meanwhile.
+        if stopping.is_set():return
+        stopping.set();say('eval', 'stopping all runs (no new episodes will start)')
         deadline = time.monotonic() + 20
-        for proc in running:
-            try:proc.wait(timeout=max(.1, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                try:os.killpg(proc.pid, signal.SIGKILL)
+        while procs and time.monotonic() < deadline:
+            for proc in list(procs.values()):
+                try:os.killpg(proc.pid, signal.SIGINT)
                 except ProcessLookupError:pass
+            time.sleep(2)
+        for proc in list(procs.values()):
+            try:os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:pass
         say('eval', f'stopped; partial logs in {out}')
         os._exit(130)
-    signal.signal(signal.SIGINT, stop)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):signal.signal(sig, stop)
+
+    def heartbeat():
+        # Long stages (exploration, carries) print nothing for minutes.
+        while not stopping.is_set():
+            time.sleep(120)
+            for name, (t0, where) in list(last.items()):
+                say(name, f'... running {round((time.monotonic() - t0) / 60)} min, at {where}')
+    threading.Thread(target=heartbeat, daemon=True).start()
     say('eval', f'{len(sources)} episodes on GPUs {",".join(gpus)} -> {out}')
     threads = [threading.Thread(target=worker, args=(g,), daemon=True) for g in gpus]
     for i, t in enumerate(threads):
