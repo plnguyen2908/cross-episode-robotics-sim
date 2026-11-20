@@ -75,6 +75,31 @@ def fmt(x):
     return f"{x['successes']}/{x['runs']} ok ({x['success_rate']:.0%}), progress {x['mean_progress_rate'] if x['mean_progress_rate'] is not None else '-'}"
 
 
+def rescore(batch):
+    """Summaries of a batch from the reports on disk (reruns included, renamed failed starts excluded)."""
+    batch = batch.resolve();results = {}
+    for folder in sorted(p for p in batch.iterdir() if p.is_dir() and '_failedstart_' not in p.name):
+        try:source = Path(json.loads((folder / 'run_info.json').read_text())['source'])
+        except Exception:continue
+        try:report = json.loads((folder / 'episode/report.json').read_text())
+        except Exception:report = {}
+        prog = report.get('progress') or {};task, rooms = episode_meta(source)
+        results[folder.name] = dict(source=str(source), task=task, rooms=rooms, success=report.get('success'),
+                                    progress_done=prog.get('done'), progress_total=prog.get('total'), progress_rate=prog.get('rate'),
+                                    completed_calls=report.get('completed_calls'), planned_calls=report.get('planned_calls'),
+                                    wall_minutes=round((report.get('wall_seconds') or 0) / 60, 1), output=str(folder),
+                                    has_report=bool(report))
+    (batch / 'summary.json').write_text(json.dumps(results, indent=2))
+    stats = by_rooms(results);(batch / 'summary_by_rooms.json').write_text(json.dumps(stats, indent=2))
+    missing = [k for k, v in results.items() if not v['has_report']]
+    print(f"== {batch.name}: {len(results)} episodes, {len(missing)} without a report (counted as 0){': ' + ', '.join(missing) if missing else ''}")
+    print(f"{'group':<34} runs  success   progress")
+    for name, x in [('all', stats['overall'])] + [(f'{k} rooms', v) for k, v in stats['by_rooms'].items()] + \
+            list(stats['by_task'].items()) + list(stats['by_task_and_rooms'].items()):
+        print(f"{name:<34} {x['runs']:<5} {x['successes']}/{x['runs']} {x['success_rate']:>5.0%}   "
+              f"{x['mean_progress_rate'] if x['mean_progress_rate'] is not None else '-'}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('episodes', nargs='*', type=Path)
@@ -87,7 +112,13 @@ def main():
     p.add_argument('--output', type=Path, help='default runs/household_eval/batch_<time>')
     p.add_argument('--raw', action='store_true', help='show every line of every run')
     p.add_argument('--list', action='store_true', help='print the selected episodes and exit')
+    p.add_argument('--into', type=Path, help='rerun into this existing batch folder: an episode folder there '
+                   'without a report is renamed <name>_failedstart_<n> (kept) and replaced; one with a report is skipped')
+    p.add_argument('--rescore', type=Path, help='rebuild summary.json and summary_by_rooms.json of a batch folder '
+                   'from its episode reports (renamed *_failedstart_* folders excluded), print the tables and exit')
     a = p.parse_args()
+    if a.rescore:
+        rescore(a.rescore);return
     sources = [ROOT / s for s in SUITES[a.suite]] if a.suite else []
     if a.split:
         sys.path.insert(0, str(ROOT))
@@ -103,8 +134,26 @@ def main():
         for s in sources:print(label(s), s)
         print(len(sources), 'episodes');return
     gpus = [g.strip() for g in a.gpus.split(',') if g.strip()]
-    out = a.output or ROOT / 'runs/household_eval' / ('batch_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
-    out.mkdir(parents=True, exist_ok=False)
+    summary_name = 'summary.json'
+    if a.into:
+        out = a.into.resolve()
+        if not out.is_dir():p.error(f'--into needs an existing batch folder: {out}')
+        stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S');summary_name = f'summary_rerun_{stamp}.json'
+        kept = []
+        for s in sources:
+            old = out / label(s)
+            if (old / 'episode/report.json').exists():
+                print(f'skip {old.name}: it already has a report');continue
+            if old.exists():
+                n = 1
+                while (out / f'{old.name}_failedstart_{n}').exists():n += 1
+                old.rename(out / f'{old.name}_failedstart_{n}');print(f'kept the failed start as {old.name}_failedstart_{n}')
+            kept.append(s)
+        sources = kept
+        if not sources:print('nothing to rerun');return
+    else:
+        out = a.output or ROOT / 'runs/household_eval' / ('batch_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        out.mkdir(parents=True, exist_ok=False)
     jobs = queue.Queue()
     names = {}
     for s in sources:
@@ -149,8 +198,9 @@ def main():
                                  progress_done=prog.get('done'), progress_total=prog.get('total'), progress_rate=prog.get('rate'),
                                  completed_calls=report.get('completed_calls'), planned_calls=report.get('planned_calls'),
                                  wall_minutes=round((time.monotonic() - t0) / 60, 1), output=str(folder))
-            (out / 'summary.json').write_text(json.dumps(results, indent=2))
-            stats = by_rooms(results);(out / 'summary_by_rooms.json').write_text(json.dumps(stats, indent=2))
+            (out / summary_name).write_text(json.dumps(results, indent=2))
+            stats = by_rooms(results)
+            if not a.into:(out / 'summary_by_rooms.json').write_text(json.dumps(stats, indent=2))
             say(name, f"finished: success={report.get('success')} progress={prog.get('done')}/{prog.get('total')} "
                       f"in {results[name]['wall_minutes']} min")
             say('eval', f"so far {len(results)}/{len(sources)} done | " +
