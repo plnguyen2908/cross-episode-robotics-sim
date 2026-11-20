@@ -1,5 +1,6 @@
 """Saved-scene physics with native MolmoSpaces control, no oracle execution."""
 import json
+import time
 from pathlib import Path
 import numpy as np
 
@@ -32,6 +33,16 @@ class Environment:
         self.command={g:self.data.ctrl[ids].copy() for g,ids in self.control.groups.items()}
         self.trace=(self.output/'commands.jsonl').open('w')
         self.snapshot_video()
+        # The pose controller checks its IK model against the measured TCP frame to
+        # 1e-8 m. Build it now, at rest: a base still settling after a move misses that
+        # by micrometres, and move_ee then answered every call with a geometry error.
+        try:self.pose_controller()
+        except ValueError:pass
+
+    def pose_controller(self):
+        from cross_episode_sim.finetuning.molmospaces_eef import MolmoSpacesPoseController
+        if self.pose is None:self.pose=MolmoSpacesPoseController(self.model,self.data,configuration=self.config,native_action_noise=False)
+        return self.pose
 
     def state(self):
         q=self.control.robot_view.get_qpos_dict()
@@ -82,7 +93,7 @@ class Environment:
 
     def goals(self):return self.scorer.score(self.initial,self.data)
 
-    def act(self,name,args):
+    def act(self,name,args,deadline=None):
         if name=='observe':return {'ok':True,'executed_seconds':0}
         seconds=args['seconds']; n=max(1,round(seconds*50))
         original={k:v.copy() for k,v in self.command.items()}
@@ -96,15 +107,13 @@ class Environment:
             target['gripper']=np.array([args['gripper']*255])
             if name=='move_joints':target['arm']=np.array(args['arm'],dtype=float)
             else:
-                from cross_episode_sim.finetuning.molmospaces_eef import MolmoSpacesPoseController
                 from scipy.spatial.transform import Rotation
                 quat=np.array(args['quaternion_wxyz'])
                 if abs(np.linalg.norm(quat)-1)>.01:raise ValueError('Quaternion must be unit length')
-                if self.pose is None:self.pose=MolmoSpacesPoseController(self.model,self.data,configuration=self.config,native_action_noise=False)
                 pose=np.eye(4);pose[:3,3]=args['position'];pose[:3,:3]=Rotation.from_quat(quat[[1,2,3,0]]).as_matrix()
                 saved=self.data.ctrl.copy()
                 try:
-                    self.pose.step({'base':original['base'],'eef_pose':pose,'gripper':target['gripper']})
+                    self.pose_controller().step({'base':original['base'],'eef_pose':pose,'gripper':target['gripper']})
                     target['arm']=self.data.ctrl[self.control.groups['arm']].copy()
                 finally:self.data.ctrl[:]=saved
             limits=self.control.robot_view.get_move_group('arm').joint_pos_limits
@@ -119,8 +128,13 @@ class Environment:
             u=(i+1)/n;blend=10*u**3-15*u**4+6*u**5
             command={k:original[k]+blend*(target[k]-original[k]) for k in original}
             self.tick(command)
-            if self.stable>=2:break
+            if self.stable>=2 or (deadline is not None and time.monotonic()>=deadline):break
         return {'ok':True,'executed_seconds':(i+1)*.02,'note':'Motion executed; task success is assessed separately.'}
 
     def close(self):
+        (self.output/'final_snapshot.json').write_text(json.dumps(self.scorer.snapshot(self.data),indent=2))
+        state_type=self.mj.mjtState.mjSTATE_INTEGRATION
+        state=np.empty(self.mj.mj_stateSize(self.model,state_type))
+        self.mj.mj_getState(self.model,self.data,state,state_type)
+        np.savez_compressed(self.output/'final_state.npz',state=state,state_type=int(state_type))
         self.trace.close();self.writer.close();self.renderer.close()

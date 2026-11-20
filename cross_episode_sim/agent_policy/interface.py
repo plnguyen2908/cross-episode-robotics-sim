@@ -29,6 +29,20 @@ def schema(memory):
             'required':['name','arguments'],'additionalProperties':False})
     return {'type':'object','properties':{'decision':{'anyOf':variants}},'required':['decision'],'additionalProperties':False}
 
+def function_tools(memory):
+    """The same tools as schema(), one function definition each, for APIs with native tool calling."""
+    return [{'type':'function','name':name,'description':description,'strict':False,
+             'parameters':{'type':'object','properties':props,'required':list(props),'additionalProperties':False}}
+            for name,(description,props) in TOOLS.items() if not (name=='history_frame' and memory=='none')]
+
+def problem(decision,memory):
+    """Name the offending argument of an invalid decision; the anyOf error of schema() does not."""
+    import jsonschema
+    tools={tool['name']:tool['parameters'] for tool in function_tools(memory)}
+    if not isinstance(decision,dict) or decision.get('name') not in tools:return 'Unknown tool; available: '+', '.join(tools)
+    errors=sorted(jsonschema.Draft202012Validator(tools[decision['name']]).iter_errors(decision.get('arguments')),key=lambda e:[str(x) for x in e.path])
+    return '; '.join(('/'.join(str(x) for x in e.path) or 'arguments')+': '+e.message for e in errors) or 'Invalid decision'
+
 def validate(decision,memory):
     import jsonschema
     jsonschema.validate({'decision':decision},schema(memory))

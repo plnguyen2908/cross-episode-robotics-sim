@@ -5,11 +5,22 @@ RoboICL's original dual-arm tensor/reference sampler is deliberately replaced.
 """
 import base64
 import json
+import re
 import sys
+import time
 from pathlib import Path
 from .interface import INSTRUCTIONS, schema
+from .openai_api import ModelServiceError, RequestTimeout, WallTimeLimit
 
 ROOT=Path(__file__).resolve().parents[2]
+
+def service_failure(exc):
+    """Codex could not serve the turn (key, quota, overload); not a policy result."""
+    from gpt_policy.harness.errors import AgentOverloadedError,AgentRecoverableError,AgentUsageLimitError
+    if isinstance(exc,(AgentUsageLimitError,AgentOverloadedError,AgentRecoverableError)):return True
+    status=re.search(r"'httpStatusCode': (\d+)",str(exc))
+    return str(exc).startswith('Codex ') and ("'unauthorized'" in str(exc) or bool(status and int(status.group(1)) in (401,402,403,404,429)))
+
 
 class Backend:
     def __init__(self,framework,model,effort,memory,timeout=240,output=None):
@@ -30,21 +41,31 @@ class Backend:
             self.request=request
         else:raise ValueError('Unknown framework')
 
-    def decide(self,observation,images):
+    def decide(self,observation,images,deadline=None):
+        # deadline (episode wall limit) bounds the Codex app-server wait; the RoboICL transport only has the request timeout.
         text=json.dumps(observation,allow_nan=False)
         if self.client:
             from gpt_policy.input.manifest import ImagePart
+            from gpt_policy.harness.errors import AgentTimeoutError
             from gpt_policy.harness.waiting import monitor_health
+            limit=time.monotonic()+self.timeout;walled=deadline is not None and deadline<limit
+            if walled and deadline<=time.monotonic():raise WallTimeLimit('Wall-time limit reached before the model request')
             # Upstream decide expects name/arguments at the root, so request an
             # act wrapper around our discriminated decision schema.
             shape={'type':'object','properties':{'name':{'type':'string','enum':['act']},
                 'arguments':schema(self.memory)},'required':['name','arguments'],'additionalProperties':False}
-            import time
             from gpt_policy.harness.usage import collect_usage
             with collect_usage() as ledger:
                 ledger.attach(self.output / "usage" if self.output else Path("runs/astra_usage"))
-                with monitor_health(lambda:None,deadline=time.monotonic()+self.timeout):
-                    result=self.client.decide(text,shape,content=tuple(ImagePart(Path(p),label=Path(p).name) for p in images))
+                try:
+                    with monitor_health(lambda:None,deadline=deadline if walled else limit):
+                        result=self.client.decide(text,shape,content=tuple(ImagePart(Path(p),label=Path(p).name) for p in images))
+                except AgentTimeoutError as exc:
+                    if walled:raise WallTimeLimit('Wall-time limit reached while waiting for the model') from exc
+                    raise RequestTimeout(f'No model response within {self.timeout:g}s') from exc
+                except RuntimeError as exc:
+                    if service_failure(exc):raise ModelServiceError(str(exc)) from exc
+                    raise
                 self.last_usage=ledger.calls[-1]["usage"] if ledger.calls else None
             return result['arguments']['decision']
         content=[{'type':'input_text','text':text}]
