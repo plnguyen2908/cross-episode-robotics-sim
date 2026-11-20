@@ -165,7 +165,12 @@ def main():
     started = time.monotonic()
 
     def say(tag, text):
-        with lock:print(f'[{tag:<{width}}] {text}', flush=True)
+        try:
+            with lock:print(f'[{tag:<{width}}] {text}', flush=True)
+        except (BrokenPipeError, OSError):
+            # The terminal or pipe is gone: stop every run rather than leave
+            # them running without a launcher.
+            if not stopping.is_set():threading.Thread(target=stop, daemon=False).start()
 
     def worker(gpu):
         while True:
