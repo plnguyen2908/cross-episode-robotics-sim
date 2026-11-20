@@ -76,6 +76,28 @@ def test_front_withdrawal_exits_at_release_height_before_lifting(monkeypatch):
     assert np.allclose(path[-1],current)
 
 
+
+def test_front_withdrawal_first_lowers_the_open_hand_onto_the_support(monkeypatch):
+    """Live fix55: a bowl released 5 cm above the shelf hung on the open pad."""
+    import cross_episode_sim.control.manipulation_approach as mod
+    from types import SimpleNamespace
+    current=np.zeros(7);alignment=np.stack([current,current+.1,current+.2])
+    goal=np.eye(4);goal[:3,3]=[.8,0.,.45]
+    aligned=goal.copy();aligned[:3,3]=[.35,0.,.49]
+    calls=[]
+    def translate(planner,q,pose,blocked=(.05,)):
+        calls.append(pose.copy())
+        if any(abs(goal[2,3]-pose[2,3]-b)<1e-9 for b in blocked):raise RuntimeError('blocked')
+        return np.stack([q,q+.1])
+    monkeypatch.setattr(mod,'plan_aligned_translation',translate)
+    planner=SimpleNamespace(plan_joint_goal=lambda a,b:np.stack([a,b]))
+    path,phases=mod.plan_front_withdrawal(planner,current+.6,goal,aligned,alignment,settle_drop=.05)
+    # Full 5 cm drop blocked -> 3 cm drop, then exit at that lowered height.
+    assert np.allclose(calls[1][:3,3],[.8,0.,.42])
+    assert np.allclose(calls[2][:3,3],[.35,0.,.42])
+    assert np.allclose(path[0],current+.6) and np.allclose(path[-1],current)
+
+
 def test_front_candidates_face_opening_and_keep_supported_contacts():
     from cross_episode_sim.control.manipulation_approach import front_placement_candidates
     shelf=plane(.4);tcp=np.eye(4);tcp[:3,3]=[.2,0.,1.]
@@ -83,10 +105,18 @@ def test_front_candidates_face_opening_and_keep_supported_contacts():
     held=np.c_[x.ravel(),y.ravel(),z.ravel()]+tcp[:3,3]
     rows=front_placement_candidates(shelf,shelf,held,tcp,opening_normal=[-1.,0.,0.])
     assert rows
+    pitched=[row.get('approach_pitch_degrees',0.) for row in rows]
+    # Level entry poses come first; 20-degree downward-pitched ones only after.
+    assert pitched[0]==0. and pitched==sorted(pitched,reverse=True) and min(pitched)==-20.
     for row in rows:
         R=np.asarray(row['tcp'])[:3,:3]
         assert np.allclose(R.T@R,np.eye(3)) and np.linalg.det(R)>0.
-        assert np.allclose(R[:,2],[1.,0.,0.])
+        if row['approach_pitch_degrees']==0.:
+            assert np.allclose(R[:,2],[1.,0.,0.])
+        else:
+            # Into the opening and 20 degrees down; jaws still close horizontally.
+            assert np.allclose(R[:,2],[np.cos(np.radians(20.)),0.,-np.sin(np.radians(20.))])
+            assert abs(R[2,1])<1e-9
         assert row['contact'][2]==pytest.approx(.4)
         assert row['learned_proposal'] is False
 
@@ -280,3 +310,80 @@ def test_shallow_axis_does_not_confuse_densely_observed_wall_with_bottom():
     R=Rotation.from_euler('xy',[15,30],degrees=True).as_matrix()
     normal=observed_shallow_axis(p@R.T+[.5,.1,1.])
     assert normal@(R@np.array([0.,0.,1.]))>.995
+
+
+def test_insertion_stops_at_the_deepest_supported_point_when_full_depth_is_unreachable(monkeypatch):
+    """Oracle release rule: going deeper is a margin, not a requirement."""
+    from types import SimpleNamespace
+    import cross_episode_sim.control.local_ik as local_ik_module
+    import cross_episode_sim.control.contact_retreat as retreat_module
+    from cross_episode_sim.control.manipulation_approach import plan_aligned_translation
+    # Joint 0 encodes the tool x position; IK fails beyond x=0.55.
+    monkeypatch.setattr(retreat_module,'tool_pose',lambda geometry,q:np.vstack([np.c_[np.eye(3),[q[0],0.,.5]],[0,0,0,1]]))
+    def ik(geometry,seed,pose,iterations=None):
+        if pose[0,3]>.55:return None
+        q=np.zeros(7);q[0]=pose[0,3];return q
+    monkeypatch.setattr(local_ik_module,'local_ik',ik)
+    planner=SimpleNamespace(geometry=None,clear=lambda path,margin=.005:True)
+    target=np.eye(4);target[:3,3]=[.7,0.,.5]
+    start=np.zeros(7);start[0]=.3
+    with pytest.raises(RuntimeError,match='unreachable'):plan_aligned_translation(planner,start,target)
+    # Accept only poses at least 0.45 m ahead (object wholly over the shelf there).
+    path=plan_aligned_translation(planner,start,target,accept_partial=lambda pose:pose[0,3]>=.45)
+    assert .45<=path[-1][0]<=.55
+    # No accepted partial pose: the original failure is raised.
+    with pytest.raises(RuntimeError,match='unreachable'):
+        plan_aligned_translation(planner,start,target,accept_partial=lambda pose:pose[0,3]>=.6)
+
+
+def test_objects_already_on_the_cabinet_shelf_are_pushable_not_obstacles():
+    from cross_episode_sim.control.manipulation_approach import pushable_placed_points
+    xs,ys=np.meshgrid(np.arange(.6,1.1,.02),np.arange(-.3,.3,.02))
+    shelf=np.c_[xs.ravel(),ys.ravel(),np.full(xs.size,.375)]
+    bowl=np.array([[.8,0.,.42],[.82,.05,.45]])           # placed bowl on the shelf
+    wall=np.array([[.8,.32,.45],[.8,-.32,.45]])          # side walls
+    top=np.array([[.8,0.,.70]]);outside=np.array([[.5,0.,.42]])
+    pts=np.concatenate([bowl,wall,top,outside,shelf[:3]])
+    mask=pushable_placed_points(pts,shelf,np.array([.6,0.,.5]),np.array([-1.,0.,0.]))
+    assert mask.tolist()==[True,True,False,False,False,False,False,False,False]
+
+
+def test_door_frame_round_trip_and_same_pose_memory():
+    from cross_episode_sim.control.manipulation_approach import base_to_aperture,aperture_to_base
+    a=dict(hinge=[.6,.4,.5],closed_handle=[.5,-.2,.5],closed_normal=[-1.,0.,0.])
+    p=np.array([.9,.1,.375])
+    assert np.allclose(aperture_to_base(a,base_to_aperture(a,p)),p)
+    # The same door seen from a moved robot: shift+rotate everything.
+    from scipy.spatial.transform import Rotation
+    R=Rotation.from_euler('z',30,degrees=True).as_matrix();t=np.array([.2,-.1,0.])
+    b={k:(R@np.asarray(v)+(0 if k=='closed_normal' else t)).tolist() for k,v in a.items()}
+    assert np.allclose(aperture_to_base(b,base_to_aperture(a,p)),R@p+t)
+
+
+def test_push_insertion_is_unchecked_once_aligned(monkeypatch):
+    """User decision (Nov 16): once aligned outside the opening, just push in."""
+    from types import SimpleNamespace
+    import cross_episode_sim.control.local_ik as local_ik_module
+    import cross_episode_sim.control.contact_retreat as retreat_module
+    from cross_episode_sim.control.manipulation_approach import plan_aligned_translation
+    monkeypatch.setattr(retreat_module,'tool_pose',lambda geometry,q:np.vstack([np.c_[np.eye(3),[q[0],0.,.5]],[0,0,0,1]]))
+    monkeypatch.setattr(local_ik_module,'local_ik',lambda geometry,seed,pose,iterations=None:np.r_[pose[0,3],np.zeros(6)])
+    def clear(path,margin=.005):raise AssertionError('push must not run collision checks')
+    planner=SimpleNamespace(geometry=None,clear=clear)
+    target=np.eye(4);target[:3,3]=[.7,0.,.5];start=np.zeros(7);start[0]=.3
+    path=plan_aligned_translation(planner,start,target,accept_partial=lambda pose:pose[0,3]>=.45,push=True)
+    assert abs(path[-1][0]-.7)<1e-6
+
+
+
+def test_cabinet_frame_strip_beside_the_opening_is_not_a_placed_object():
+    import numpy as np
+    from cross_episode_sim.control.manipulation_approach import pushable_placed_points
+    g=np.mgrid[.50:.80:.01,-.74:-.36:.01].reshape(2,-1).T
+    shelf=np.column_stack([g,np.full(len(g),.375)])
+    anchor=np.array([.495,-.55,.53]);normal=np.array([-1.,0.,0.])
+    zz=np.linspace(.39,.57,60)
+    frame=np.concatenate([np.column_stack([np.full(60,x),np.full(60,-.365),zz]) for x in (.52,.53,.54)])   # strip at the side edge
+    assert pushable_placed_points(frame,shelf,anchor,normal).sum()==0
+    a=np.linspace(0,2*np.pi,300);bowl=np.column_stack([.66+.085*np.cos(a),-.55+.085*np.sin(a),np.full(300,.44)])
+    assert pushable_placed_points(bowl,shelf,anchor,normal).sum()>250

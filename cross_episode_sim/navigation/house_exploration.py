@@ -29,6 +29,7 @@ class HouseExplorationConfig:
     approach_gain: float = 1.2
     sensor_timeout: float = .25
     scan_spacing: float = 1.
+    margin_escape_radius: float = 1.
 
 
 def reachable_paths(free,start,clearance):
@@ -58,6 +59,8 @@ class HouseExplorer:
         self.turn_recovery_active=False
         self.frontier_priority=None;self.goal_leaves_covered_room=False
         self.scans=0;self.plans=0;self.traveled=0.;self.previous_xy=None;self.stop_detail=None
+        self.clearance=None;self.in_margin=False;self.escaping=False;self.escape_goal=None;self.escape_clearance=None;self.escape_started=None
+        self.failed_escapes=[];self.escape_ref=None;self.escape_best=np.inf;self.escape_strikes=0
 
     def cell(self,xy):
         col,row=self.grid.world_to_cell(xy);return int(row),int(col)
@@ -86,8 +89,82 @@ class HouseExplorer:
         distance=distance_transform_edt(np.pad(supported,1))[1:-1,1:-1]*c.resolution
         self.free=supported&(distance>self.config.center_clearance)
         frontier=floor&~self.obstacles&binary_dilation(~(floor|self.support|self.obstacles))
-        if hasattr(self.grid,'fixed_obstacle_points'):self._fixed_layers=(distance,frontier)
+        if hasattr(self.grid,'fixed_obstacle_points'):self._fixed_layers=(distance,frontier);self.in_margin=False
+        else:self._admit_departure(row,col,distance)
         return distance,frontier
+
+    def _admit_departure(self,row,col,distance):
+        """Let a robot inside the planning margin turn and move back out of it.
+
+        Routes follow the edge of that margin exactly, so tracking error or a
+        corrected pose estimate leaves the robot on supported floor short of
+        the centre clearance. Refusing every command there, turns and replans
+        included, strands it. Admit its cell and the connected nearby floor
+        that is no nearer to an obstacle. Obstacles and unknown floor have zero
+        clearance and stay blocked; the live depth guard is unchanged.
+        """
+        inside=0<=row<self.free.shape[0] and 0<=col<self.free.shape[1]
+        self.clearance=float(distance[row,col]) if inside else 0.
+        self.in_margin=inside and not self.free[row,col] and self.clearance>0
+        if not self.in_margin:return
+        r=int(np.ceil(self.config.margin_escape_radius/self.grid.config.resolution))
+        block=np.s_[max(0,row-r):row+r+1,max(0,col-r):col+r+1]
+        groups,_=label(distance[block]>=self.clearance,np.ones((3,3),bool))
+        self.free[block]|=groups==groups[row-block[0].start,col-block[1].start]
+
+    def _plan_escape(self,xy,now):
+        """Route to the nearest floor with clearance to spare, over admitted cells only."""
+        distance,_=self.layers(xy);row,col=self.cell(xy);self.last_plan=now;self.plans+=1
+        # Each stalled way out costs 15 s; a robot boxed in by live depth must still end.
+        if len(self.failed_escapes)>=4:return 'departure_blocked'
+        resolution=self.grid.config.resolution;r=int(np.ceil(self.config.margin_escape_radius/resolution))
+        offset=np.array([max(0,row-r),max(0,col-r)]);block=np.s_[offset[0]:row+r+1,offset[1]:col+r+1]
+        costs,parents=reachable_paths(self.free[block],(row-offset[0],col-offset[1]),distance[block])
+        nodes=np.argwhere(np.isfinite(costs))
+        if not len(nodes):return 'departure_blocked'
+        points=self.world(nodes+offset);clearance=distance[block][nodes[:,0],nodes[:,1]];untried=np.ones(len(nodes),bool)
+        for failed in self.failed_escapes:untried&=np.linalg.norm(points-failed,axis=1)>.2
+        # One cell beyond the margin where the map has it, so the next
+        # centimetre of tracking error does not put the robot back inside.
+        for spare in (resolution,0.):
+            choices=np.flatnonzero(untried&(clearance>self.config.center_clearance+spare))
+            if len(choices):break
+        else:return 'departure_blocked'
+        j=choices[int(np.argmin(costs[nodes[choices,0],nodes[choices,1]]))];node=tuple(nodes[j]);goal=points[j];path=[node]
+        while node in parents:node=parents[node];path.append(node)
+        remaining=list(self.world(np.asarray(path[::-1])+offset));simplified=[xy.copy()]
+        while remaining:
+            j=len(remaining)-1
+            while j>=0 and not self._line_free(simplified[-1],remaining[j]):j-=1
+            if j<0:return 'start_connector_blocked'
+            simplified.append(remaining[j]);remaining=remaining[j+1:]
+        self.path=list(simplified[1:]);self.escape_clearance=self.config.center_clearance+spare
+        # A replan toward the same floor keeps its clock; only a new one restarts it.
+        if self.escape_goal is None or np.linalg.norm(goal-self.escape_goal)>resolution:
+            self.escape_goal=goal.copy();self.escape_started=now
+            self.events.append(dict(time=now,event='margin_escape',position=xy.tolist(),clearance=self.clearance,goal=goal.tolist()))
+        return None
+
+    def _follow_escape(self,xy,now):
+        while len(self.path)>1 and np.linalg.norm(self.path[0]-xy)<self.grid.config.resolution:self.path.pop(0)
+        arrived=self.clearance>self.escape_clearance
+        if not arrived and now-self.escape_started<=15.:return None
+        status='margin_escape_complete' if arrived else 'margin_escape_stalled'
+        self.events.append(dict(time=now,event=status,position=xy.tolist(),clearance=self.clearance,goal=self.escape_goal.tolist()))
+        if arrived:self.failed_escapes=[]
+        else:self.failed_escapes.append(self.escape_goal)
+        self.path=[];self.escaping=False;self.escape_goal=None
+        if arrived and self.goal is not None:
+            # Escapes that bring the goal no nearer mean its route cannot be
+            # followed from here. Give the planner another goal instead.
+            remaining=float(np.linalg.norm(self.goal-xy))
+            if self.escape_ref is None or np.linalg.norm(self.goal-self.escape_ref)>.4:
+                self.escape_ref=self.goal.copy();self.escape_best=np.inf;self.escape_strikes=0
+            if remaining<self.escape_best-.1:self.escape_best=remaining;self.escape_strikes=0
+            else:
+                self.escape_strikes+=1
+                if self.escape_strikes>=3:self.failed_goals.append(self.goal.copy());self.escape_ref=None
+        return self._stop(status)
 
     def _depth(self,c):
         v,u=np.mgrid[0:c.depth_m.shape[0]:4,0:c.depth_m.shape[1]:4];z=c.depth_m[::4,::4]
@@ -167,6 +244,14 @@ class HouseExplorer:
     def _lookahead_reached(self,xy):
         return False
 
+    def resume(self,now):
+        """Continue after another controller moved the base."""
+        # The old route may no longer start at the current position.
+        self.path=[];self.goal=None;self.last_time=now;self.velocity=np.zeros(2);self.escaping=False;self.escape_goal=None
+        # A scan sums yaw between consecutive observations against its own
+        # clock. One interrupted elsewhere has to start over at this pose.
+        if self.phase=='scan':self.scanner=LocalScanSkill(ScanConfig(stowed_arm=self.config.arm_posture))
+
     def _stop(self,status):
         self.velocity[:]=0;return dict(status=status,forward=0.,yaw=0.,scans=self.scans,plans=self.plans)
 
@@ -193,13 +278,19 @@ class HouseExplorer:
             if self.scanner.terminal:
                 self.terminal=decision.status;return self._stop(self.terminal)
             return dict(status='scanning',forward=0.,yaw=decision.yaw_rps,scans=self.scans,plans=self.plans)
-        if self.path and self._lookahead_reached(xy):
+        if self.path and not self.escaping and self._lookahead_reached(xy):
             self.path=[];self.phase='scan';self.scanner=LocalScanSkill(ScanConfig(stowed_arm=self.config.arm_posture))
             return self._stop('arrived_frontier')
         if not self.path:
-            error=self._plan(xy,now)
+            # Inside the planning margin the next route is the one back out of it.
+            self.escaping=self.in_margin
+            if not self.escaping:self.escape_goal=None
+            error=self._plan_escape(xy,now) if self.escaping else self._plan(xy,now)
             if error:self.terminal=error;return self._stop(error)
-        while self.path and np.linalg.norm(self.path[0]-xy)<self.config.waypoint_tolerance:
+        if self.escaping:
+            result=self._follow_escape(xy,now)
+            if result:return result
+        while not self.escaping and self.path and np.linalg.norm(self.path[0]-xy)<self.config.waypoint_tolerance:
             if len(self.path)>1 and not self._line_free(xy,self.path[1]):
                 # A corner can be within the ordinary arrival radius while
                 # still needed to get around an obstacle. Finish that corner
@@ -223,11 +314,12 @@ class HouseExplorer:
             self.path.pop(0)
         if not self.path:
             self.phase='scan';self.scanner=LocalScanSkill(ScanConfig(stowed_arm=self.config.arm_posture));return self._stop('arrived_frontier')
-        if np.linalg.norm(xy-self.last_progress)>.15:self.last_progress=xy.copy();self.progress_time=now
-        if now-self.progress_time>15.:
-            self.failed_goals.append(self.goal.copy());self.path=[]
-            self.last_progress=xy.copy();self.progress_time=now
-            return self._stop('stalled_replan')
+        if not self.escaping:
+            if np.linalg.norm(xy-self.last_progress)>.15:self.last_progress=xy.copy();self.progress_time=now
+            if now-self.progress_time>15.:
+                self.failed_goals.append(self.goal.copy());self.path=[]
+                self.last_progress=xy.copy();self.progress_time=now
+                return self._stop('stalled_replan')
         target=self.path[0];angle=math.atan2(target[1]-xy[1],target[0]-xy[0])-yaw;angle=math.atan2(math.sin(angle),math.cos(angle))
         desired=np.array([self.config.speed*max(0.,math.cos(angle))**2 if abs(angle)<.5 else 0.,np.clip(1.8*angle,-self.config.yaw_speed,self.config.yaw_speed)])
         # Complete a checked turn before retrying translation. Otherwise each

@@ -10,6 +10,11 @@ from scipy.spatial.transform import Rotation
 from .local_scan import ScanConfig
 
 
+# Farthest pickup stand-off tried when the usual band collides; the arm has no
+# pregrasp solution on a counter-height target beyond about this distance.
+PICKUP_STANDOFF_LIMIT=.85
+
+
 def wrap(a):return math.atan2(math.sin(a),math.cos(a))
 def turn_rate(error, gain=2.5, cap=.6):
     # Leave room for sensor latency and braking before the requested heading.
@@ -18,6 +23,12 @@ def turn_rate(error, gain=2.5, cap=.6):
 def rotation(a):return np.array([[math.cos(a),-math.sin(a)],[math.sin(a),math.cos(a)]])
 def transform(p,q):
     T=np.eye(4);T[:3,:3]=Rotation.from_quat(np.asarray(q)[[1,2,3,0]]).as_matrix();T[:3,3]=p;return T
+
+# A dock within this distance of its goal counts as docked (final check below).
+DOCKED_TOLERANCE=.03
+# The curve follower stops driving when its look-ahead is further off its heading than this (rad).
+CURVE_END_SIDEWAYS_ANGLE=.6
+
 
 @dataclass
 class RobotBox:
@@ -153,6 +164,11 @@ class RobotGeometry:
                 if np.linalg.norm(e[:3])<.01 and np.linalg.norm(e[3:])<.03:return r.x
         return None
 
+def sweep(a,b):
+    """Poses every 0.025 m and 0.04 rad along one straight, steadily turning move."""
+    d=wrap(b[2]-a[2]);n=max(1,int(np.ceil(np.linalg.norm(np.asarray(b[:2])-a[:2])/.025)),int(np.ceil(abs(d)/.04)))
+    return (np.r_[np.asarray(a[:2])+(np.asarray(b[:2])-a[:2])*t,a[2]+d*t] for t in np.linspace(0,1,n+1))
+
 class ObservedShapeChecker:
     def __init__(self,grid,boxes,initial_pose,margin=.035,support_poses=None,additional_points=None,require_observed_support=True):
         self.require_observed_support=require_observed_support
@@ -194,6 +210,22 @@ class ObservedShapeChecker:
         col,row=self.grid.world_to_cell(self.support_local@rotation(pose[2]).T+pose[:2]).T
         valid=(row>=0)&(row<self.support_mask.shape[0])&(col>=0)&(col<self.support_mask.shape[1])
         self.support_mask[row[valid],col[valid]]=True
+    def contact_count(self,pose):
+        """Observed points inside the padded base footprint at `pose` (0 = clear of obstacles)."""
+        xy=np.asarray(pose[:2]);R=rotation(pose[2]);g=self.grid;total=0
+        pad=self.margin+np.sqrt(2*g.config.resolution**2+g.config.height_resolution**2)/2
+        for b in self.boxes:
+            center=b.center.copy();center[:2]=b.center[:2]@R.T+xy
+            ids=self.spatial_index.query_ball_point(center,np.linalg.norm(b.half+pad)+1e-12)
+            points=self.points[ids].copy()
+            points=points[np.linalg.norm(points[:,:2]-xy,axis=1)<1.2]
+            points[:,:2]=(points[:,:2]-xy)@R
+            inside=np.all(np.abs((points-b.center)@b.axes)<=b.half+pad,axis=1)
+            if inside.any() and b.hull_planes is not None:
+                ids=np.flatnonzero(inside);local=(points[ids]-b.center)@b.axes
+                inside[ids]=np.all(local@b.hull_planes[:,:3].T+b.hull_planes[:,3]<=pad+b.hull_margin,axis=1)
+            total+=int(inside.sum())
+        return total
     def clear(self,pose):
         xy=np.asarray(pose[:2]);R=rotation(pose[2]);g=self.grid
         pad=self.margin+np.sqrt(2*g.config.resolution**2+g.config.height_resolution**2)/2
@@ -227,12 +259,11 @@ class ObservedShapeChecker:
             missing=(g.floor_views[row,col]<g.config.minimum_floor_views)&~initial
             self.detail={'reason':'unobserved_base_support','points_map':samples[missing][:8].tolist()};return False
         return True
-    def swept(self,a,b):
-        d=wrap(b[2]-a[2]);n=max(1,int(np.ceil(np.linalg.norm(np.asarray(b[:2])-a[:2])/.025)),int(np.ceil(abs(d)/.04)))
-        return all(self.clear(np.r_[np.asarray(a[:2])+(np.asarray(b[:2])-a[:2])*t,a[2]+d*t]) for t in np.linspace(0,1,n+1))
+    def swept(self,a,b):return all(self.clear(p) for p in sweep(a,b))
 
 class ShapedDocking:
     """Swept-checked base paths; lightweight following on a frozen map."""
+    edge_first=True  # pickup from a support: see edge_first.py
     def __init__(self,grid,geometry,max_nodes=6000,workspace_ranker=None):
         self.grid=grid;self.geometry=geometry;self.max_nodes=max_nodes
         self.workspace_ranker=workspace_ranker
@@ -327,9 +358,14 @@ class ShapedDocking:
         self.curve_index+=int(np.argmin(np.linalg.norm(remaining_points-pose[:2],axis=1)))
         remaining=self.curve_length[-1]-self.curve_length[self.curve_index]
         gap=np.linalg.norm(self.goal[:2]-pose[:2])
-        if gap<.025:
+        sideways=abs(wrap(math.atan2(self.goal[1]-pose[1],self.goal[0]-pose[0])-pose[2]))>CURVE_END_SIDEWAYS_ANGLE
+        if gap<.025 or (gap<DOCKED_TOLERANCE and sideways):
             # Inside the existing 3 cm docking tolerance, turn to the object
             # rather than pursuing a tiny lateral residual with a large turn.
+            # Between 2.5 and 3 cm with the residual to the side, the follower
+            # below commands no speed (look-ahead more than 0.6 rad off) and
+            # almost no turn: fix125 sat 2.7 cm from its dock for 38 s until
+            # shape_dock_timeout. That residual is already a docked pose.
             final_yaw=self.goal[2]
             if not getattr(self,'approaching',False) and self.target is not None and getattr(self,'surface_outward',None) is None:
                 delta=self.target.position[:2]-pose[:2]
@@ -463,11 +499,15 @@ class ShapedDocking:
         if self.path is None and np.linalg.norm(self.target.position[:2]-pose[:2])>1.6:
             self.plan_advance(pose,packet.arm.position)
         if self.path is None:
-            from .docking_candidates import observed_surface,frontal_surface_docks
+            from .docking_candidates import observed_surface,frontal_surface_docks,standoff_surface_docks
             try:
                 lo,hi,outward=observed_surface(packet,T,self.target.position)
                 self.checker=self.make_checker(pose,packet.arm.position)
                 candidates=[];solutions={};candidate_rejections=[]
+                def reach(candidate):
+                    pregrasp=self.target.position.copy();pregrasp[2]+=.08
+                    pregrasp[:2]=rotation(candidate[2]).T@(pregrasp[:2]-candidate[:2])
+                    return self.geometry.reach(pregrasp,packet.arm.position)
                 for candidate in frontal_surface_docks(self.target.position,lo,hi,outward):
                     # Keep margin inside the unchanged .50-.72 m readiness band.
                     # Small observed surface-centroid updates must not turn a
@@ -476,11 +516,27 @@ class ShapedDocking:
                     if not .55<=gap<=.67:continue
                     if not self.checker.clear(candidate):
                         candidate_rejections.append(dict(goal=candidate.tolist(),detail=self.checker.detail));continue
-                    pregrasp=self.target.position.copy();pregrasp[2]+=.08
-                    pregrasp[:2]=rotation(candidate[2]).T@(pregrasp[:2]-candidate[:2])
-                    solution=self.geometry.reach(pregrasp,packet.arm.position)
+                    solution=reach(candidate)
                     if solution is not None:
                         candidates.append(candidate);solutions[tuple(candidate)]=solution
+                if not candidates and candidate_rejections and all(
+                        r['detail'].get('reason')=='observed_3d_collision' for r in candidate_rejections):
+                    # A target deep on the counter puts every stand-off of the
+                    # usual band inside the counter face. Step outward to the
+                    # closest clear stand-off the arm still reaches, and offer
+                    # only those within 10 cm of it.
+                    blocked=max(np.linalg.norm(np.asarray(r['goal'])[:2]-self.target.position[:2]) for r in candidate_rejections)
+                    gaps=[]
+                    for candidate in standoff_surface_docks(self.target.position,outward,np.arange(blocked+.025,PICKUP_STANDOFF_LIMIT+1e-6,.025)):
+                        gap=float(np.linalg.norm(candidate[:2]-self.target.position[:2]))
+                        if gaps and gap>gaps[0]+.10+1e-9:break
+                        if not self.checker.clear(candidate):continue
+                        solution=reach(candidate)
+                        if solution is not None:
+                            candidates.append(candidate);solutions[tuple(candidate)]=solution;gaps.append(gap)
+                    if candidates:
+                        self.events.append(dict(event='pickup_standoff_extended',blocked_to_m=float(blocked),standoffs_m=gaps,
+                            reason='every stand-off in the 0.55-0.67 m band collides with observed geometry'))
                 if self.workspace_ranker is not None and candidates:
                     candidates,ranking=self.workspace_ranker.rank(self.target.position,candidates,pose)
                     self.events.append(dict(event='workspace_dock_ranking',candidates=ranking,

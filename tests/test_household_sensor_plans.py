@@ -60,7 +60,7 @@ def test_set_table_delegates_to_existing_pipeline_instead_of_new_recipe_executor
     calls=[]
     def old_run(self,**kw):calls.append(kw);return sentinel
     monkeypatch.setattr(SensorSetTablePipeline,'_run',old_run)
-    pipeline=object.__new__(SensorHouseholdPipeline);pipeline.config={'task':'set_table'}
+    pipeline=object.__new__(SensorHouseholdPipeline);pipeline.config={'task':'set_table'};pipeline.qwen_interface=False
     assert pipeline._run(completed_transfers=0) is sentinel
     assert calls==[{'completed_transfers':0}]
 

@@ -47,6 +47,7 @@ class FrozenBaseFootprintChecker:
 
 
 class FrozenBasketDocking(ShapedDocking):
+    edge_first=False  # not a pickup among neighbouring instances
     def make_checker(self,pose,q):
         if not hasattr(self.grid,'fixed_obstacle_points'):raise ValueError('Basket docking requires frozen map')
         boxes=[b for b in self.geometry.boxes(q) if b.name.startswith('robot_0/base/')]

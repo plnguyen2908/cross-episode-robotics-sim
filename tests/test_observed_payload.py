@@ -89,3 +89,38 @@ def test_refinement_accepts_bounded_matched_slip_without_shrinking(monkeypatch):
     import pytest
     with pytest.raises(ValueError,match='disagrees'):
         module.refine_held_payload(None,None,prior)
+
+
+def turned_bowl(degrees):
+    """Rim and wall samples of a 0.2 m bowl hanging beside the tool, turned about the tool x axis."""
+    rng=np.random.default_rng(2);angle=rng.uniform(0,2*np.pi,900);height=rng.uniform(0,.07,900);radius=.06+.04*height/.07
+    bowl=np.c_[radius*np.cos(angle),radius*np.sin(angle)-.12,height]
+    c,s=np.cos(np.radians(degrees)),np.sin(np.radians(degrees))
+    return bowl@np.array([[1,0,0],[0,c,-s],[0,s,c]]).T
+
+
+def test_carried_estimate_is_widened_by_the_held_surface_seen_now(monkeypatch):
+    from cross_episode_sim.control import observed_payload as module
+    carried=turned_bowl(0);live=turned_bowl(10)
+    monkeypatch.setattr(module,'reconstruct_held_points',lambda *args:live)
+    # The carried box (2 cm + 1 cm) leaves part of the turned bowl in the scene.
+    old=ObservedPayload(Geometry(),carried)
+    outside=lambda payload:int((~np.all(np.abs(live-payload.center)<=payload.half+.01,axis=1)).sum())
+    assert outside(old)>0
+    points,detail=module.live_checked_payload(None,None,carried)
+    assert detail['refined'] and max(detail['extent_growth_m'])>.01
+    assert outside(ObservedPayload(Geometry(),points))==0
+    # Nothing of the carried estimate is dropped.
+    assert np.all(points.min(0)<=carried.min(0)+.005) and np.all(points.max(0)>=carried.max(0)-.005)
+
+
+def test_unmatched_or_missing_live_surface_leaves_the_carried_estimate_unchanged(monkeypatch):
+    from cross_episode_sim.control import observed_payload as module
+    carried=turned_bowl(0)
+    monkeypatch.setattr(module,'reconstruct_held_points',lambda *args:carried+[0,.3,0])
+    points,detail=module.live_checked_payload(None,None,carried)
+    assert not detail['refined'] and 'disagrees' in detail['reason'] and np.array_equal(points,carried)
+    def nothing(*args):raise ValueError('Insufficient observed held-object surface')
+    monkeypatch.setattr(module,'reconstruct_held_points',nothing)
+    points,detail=module.live_checked_payload(None,None,carried)
+    assert not detail['refined'] and np.array_equal(points,carried)

@@ -23,16 +23,21 @@ class Backend:
     def grasp(self,observed):self.events.append('grasp')
     def tcp(self):p=np.eye(4);p[:3,3]=[.48,0.,.9];return p
     def follow_contact(self,poses,observed):self.events.append(('rotate',len(poses)))
-    def release_withdraw(self,observed):self.events.append('release_withdraw')
+    def release_withdraw(self,observed):
+        self.events.append('release_withdraw')
+        # The knob ends where it was turned (read by the closed-loop check).
+        if getattr(self,'finals',None):self.angle=self.finals.pop(0)
+        elif getattr(self,'final',None) is not None:self.angle=self.final
     def press_withdraw(self,observed):self.events.append('press_withdraw')
 
 
 @pytest.mark.parametrize('state,initial',[('on',0.),('off',np.pi/3)])
 def test_public_knob_uses_observation_grasp_rotate_release(state,initial):
-    b=Backend(initial);api=M2T2SkillInterface(SensorApplianceControls(b).handlers())
+    b=Backend(initial);b.final=np.pi/3 if state=='on' else 0.;api=M2T2SkillInterface(SensorApplianceControls(b).handlers())
     result=api.execute_skill('rotate_knob',dict(target='stove knob',state=state))
     assert result['success']
-    assert b.events==[('observe','knob','stove knob'),'grasp',('rotate',10),'release_withdraw']
+    # One closed-loop look after the release; the knob reads its target, so no re-turn.
+    assert b.events==[('observe','knob','stove knob'),'grasp',('rotate',10),'release_withdraw',('observe','knob','stove knob')]
 
 
 def test_missing_indicator_does_not_guess_off_or_move():
@@ -102,3 +107,27 @@ def test_tracked_knob_requires_fresh_indicator_not_only_rim():
     front=c.center+np.c_[np.full(300,-.02),np.zeros(300),np.linspace(-.025,.025,300)]
     previous=ObservedControl(c.center,c.outward,np.r_[rim,front],0.)
     with pytest.raises(ValueError,match='occluded'):refit_tracked_knob(rim,previous)
+
+
+def test_knob_slip_is_turned_again_toward_the_target():
+    b=Backend(0.);b.final=.2;api=M2T2SkillInterface(SensorApplianceControls(b).handlers())
+    result=api.execute_skill('rotate_knob',dict(target='stove knob',state='on'))
+    assert result['success']
+    from cross_episode_sim.control.appliance_controls import KNOB_VERIFY_RETRIES
+    # The fake knob keeps slipping to 0.2 rad: each allowed re-turn is used, then it stops.
+    assert b.events.count('grasp')==1+KNOB_VERIFY_RETRIES
+
+
+def test_knob_reading_past_the_start_does_not_turn_back():
+    b=Backend(0.);b.final=-.9;api=M2T2SkillInterface(SensorApplianceControls(b).handlers())
+    result=api.execute_skill('rotate_knob',dict(target='stove knob',state='on'))
+    assert result['success']
+    assert b.events.count('grasp')==1  # inconsistent reading: no wrong-way turn
+
+
+def test_knob_off_flicked_past_start_is_turned_off_again():
+    # A slip flicked the knob from ON further ON (fix185 call 17); OFF re-turns it.
+    b=Backend(np.pi/3);b.finals=[2.4,0.];api=M2T2SkillInterface(SensorApplianceControls(b).handlers())
+    result=api.execute_skill('rotate_knob',dict(target='stove knob',state='off'))
+    assert result['success']
+    assert b.events.count('grasp')==2

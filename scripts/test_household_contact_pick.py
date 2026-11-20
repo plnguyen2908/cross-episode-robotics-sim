@@ -109,12 +109,14 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    # before expensive IK; retain every candidate and the existing swept checks.
    from cross_episode_sim.control.grasp_linkage_ranking import GraspLinkageRanker
    link_ranker=GraspLinkageRanker(contact_geometry,measured(),points[contact_mask])
-   rows=link_ranker.iter_ranked(variants)
    # The linkage checks exclude the pads and one view hides the far faces.
    # Reject open pads inside the target completed down to its support: such
    # corner grasps wedge a box out and close empty.
    from cross_episode_sim.control.grasp_pad_enclosure import MAX_FACE_SKEW_DEG,PadEnclosure
    pad_enclosure=PadEnclosure(contact_geometry,measured(),points[contact_mask],world_stats['support_z'])
+   # An endpoint off the target's middle along the closing line sweeps a
+   # finger linkage through the target; try it centred first.
+   rows=link_ranker.iter_ranked(pad_enclosure.centred_variants(variants))
   if ('cookware' in requested_category or requested_category.startswith('food container')):
    from cross_episode_sim.control.grasp_linkage_ranking import GraspLinkageRanker
    from cross_episode_sim.control.rim_contact_refinement import outward_rim_contacts

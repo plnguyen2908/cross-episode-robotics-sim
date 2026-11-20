@@ -39,6 +39,32 @@ class ScanDecision:
     nearest_obstacle_m: float | None = None
 
 
+def turn_envelope(c, config):
+    """Depth guard for a turn in place: (blocking reason or None, nearest radius, nearest base-frame point).
+
+    Needs no pose estimate, so it also serves before the tracker has a map.
+    """
+    z=c.depth_m
+    valid=c.valid_depth & np.isfinite(z) & (z>0)
+    if c.robot_mask is not None:valid &= ~c.robot_mask
+    if valid.mean()<config.min_valid_fraction: return 'insufficient_depth',None,None
+    # Dense near-field guard; no floor, scene labels or object coordinates.
+    v,u=np.where(valid); depth=z[v,u]
+    p=np.column_stack(((u-c.K[0,2])*depth/c.K[0,0],(v-c.K[1,2])*depth/c.K[1,1],depth))
+    T=c.T_base_optical; p=p@T[:3,:3].T+T[:3,3]
+    p=p[(p[:,2]>.05)&(p[:,2]<config.height)]
+    if c.robot_mask is None and getattr(c,'robot_bounds_base',()):
+        from cross_episode_sim.sensors.onboard import without_robot_points
+        # Only points capable of triggering this guard need self-filtering.
+        near=np.linalg.norm(p[:,:2],axis=1)<config.radius+config.margin
+        p=np.concatenate([p[~near],without_robot_points(p[near],c)])
+    radial=np.linalg.norm(p[:,:2],axis=1)
+    nearest=float(radial.min()) if len(radial) else None
+    point=p[int(radial.argmin())].tolist() if len(radial) else None
+    blocked=len(radial) and (radial < config.radius+config.margin).any()
+    return ('obstacle_near_scan_envelope' if blocked else None),nearest,point
+
+
 class LocalScanSkill:
     """Scan once, stop on stale/lost sensing, and report angular coverage.
 
@@ -58,24 +84,10 @@ class LocalScanSkill:
         return ScanDecision(status,self.velocity,complete,len(self.seen),self.swept,self.nearest)
 
     def _observe(self,packet,tracking):
-        c=packet.cameras['navigation']; z=c.depth_m
-        valid=c.valid_depth & np.isfinite(z) & (z>0)
-        if c.robot_mask is not None:valid &= ~c.robot_mask
-        if valid.mean()<self.config.min_valid_fraction: return 'insufficient_depth'
-        # Dense near-field guard; no floor, scene labels or object coordinates.
-        v,u=np.where(valid); depth=z[v,u]
-        p=np.column_stack(((u-c.K[0,2])*depth/c.K[0,0],(v-c.K[1,2])*depth/c.K[1,1],depth))
-        T=c.T_base_optical; p=p@T[:3,:3].T+T[:3,3]
-        p=p[(p[:,2]>.05)&(p[:,2]<self.config.height)]
-        if c.robot_mask is None and getattr(c,'robot_bounds_base',()):
-            from cross_episode_sim.sensors.onboard import without_robot_points
-            # Only points capable of triggering this guard need self-filtering.
-            near=np.linalg.norm(p[:,:2],axis=1)<self.config.radius+self.config.margin
-            p=np.concatenate([p[~near],without_robot_points(p[near],c)])
-        radial=np.linalg.norm(p[:,:2],axis=1)
-        self.nearest=float(radial.min()) if len(radial) else None
-        self.nearest_point=p[int(radial.argmin())].tolist() if len(radial) else None
-        if len(radial) and (radial < self.config.radius+self.config.margin).any(): return 'obstacle_near_scan_envelope'
+        reason,nearest,point=turn_envelope(packet.cameras['navigation'],self.config)
+        if reason=='insufficient_depth': return reason
+        self.nearest=nearest; self.nearest_point=point
+        if reason: return reason
         pose=np.asarray(tracking.T_map_base)
         if pose.shape!=(4,4) or not np.isfinite(pose).all():return 'invalid_pose'
         yaw=math.atan2(pose[1,0],pose[0,0])

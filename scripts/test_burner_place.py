@@ -14,6 +14,10 @@ from cross_episode_sim.control.observed_arm import robot_calibration
 from cross_episode_sim.control.observed_payload import ObservedPayload,reconstruct_held_points
 from cross_episode_sim.control.planner_cache import sensor_arm_planner
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
+# Sideways shift (m, base frame) that uncovers the burner before the fresh look.
+BURNER_UNCOVER_OFFSET=.30
+# Radius (m) of the burner disc used to choose the grate support height.
+BURNER_LEVEL_RADIUS=.12
 p=argparse.ArgumentParser();p.add_argument('--upright-cookware',action='store_true');p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--max-candidates',type=int,default=0,help='Optional bounded candidate batch; zero preserves the existing exhaustive policy');p.add_argument('--current-pose',action='store_true',help='Attempt sensor-planned placement from the live pose without claiming a completed base dock');p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 r=json.loads(artifacts.read_text(a.dock/'report.json'))
 if not (a.current_pose and r.get('initialization_valid')) and not r.get('docking_success',False) and not (a.isolated_initial_state and r.get('isolated_placement_reset')) and not (a.observe_only and (r.get('transit_success') is True or r.get('initialization_valid') or r.get('approach_complete') or r.get('status') in ('needs_floor_observation','budget_exhausted'))):raise ValueError('Require sensor docking or explicit isolated reset')
@@ -53,6 +57,27 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    if steady>=5:return
   raise RuntimeError('Arm did not settle')
  frame()
+ if (os.environ.get('HOUSEHOLD_BURNER_PLACE_IK_ONLY')=='1' and tool_points is not None and not a.observe_only
+     and a.semantic_receptacle and 'stove burner' in a.semantic_receptacle):
+  # Not in the pre-dock look (--observe-only): the dock starts from that
+  # stage's saved state, and moving the arm there broke it (fix181 call 6,
+  # 'Checkpoint is not the current live state'). The dock aims at the
+  # measured burner when the held pot hides it.
+  # The level-held pot and the arm hide the burner disc from both cameras
+  # (fix180 replay: 10 of 36 burner points behind arm links, wrist view
+  # filled by the pot), so no candidate had observed support all round.
+  # Slide the held pot sideways at the same height, still level, before the
+  # fresh look; outward first so it never hangs over the other burner's pot.
+  from types import SimpleNamespace
+  from cross_episode_sim.control.raised_payload_posture import raise_payload_clearance
+  z=float(geo.tcp_pose(q)[2,3]);outward=1. if 'left' in a.semantic_receptacle else -1.;uncovered=None
+  for k,offset in enumerate((outward*BURNER_UNCOVER_OFFSET,-outward*BURNER_UNCOVER_OFFSET)):
+   try:
+    uncovered=raise_payload_clearance(SimpleNamespace(model=m,data=d,sensors=sensors),tool_points,a.output/f'uncover_{k}',
+                                      target_height=z,lateral_offset=offset,keep_level=True);break
+   except RuntimeError as exc:print('BURNER_UNCOVER_REJECTED',json.dumps(dict(offset=offset,reason=str(exc)[:120])),flush=True)
+  print('BURNER_UNCOVER',json.dumps(None if uncovered is None else dict(strategy=uncovered.get('strategy'),tcp=uncovered.get('actual_tcp'))),flush=True)
+  q=c.robot_view.get_move_group('arm').joint_pos.copy();hold['arm']=q.copy()
  try:
   raw=sensors.capture();tracking=slam.update(raw.cameras['navigation'],raw.timestamp)
   grid.update(raw.cameras['navigation'],tracking)
@@ -145,22 +170,79 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     artifacts.write_text(a.output/'observed_burner.json',json.dumps(dict(point=anchor.tolist(),source='same-episode named burner, reanchored by SLAM; fresh depth support')))
    else:
     from cross_episode_sim.control.sensor_appliance_backend import pixel_point
+    # Documented stove layout (user decision, November 19, 2026): a named
+    # front burner is placed from the seven-knob row measured in depth, not
+    # from the pointing model's burner spot (2, 12 and 30 cm off in
+    # fix167-fix169). The pointed spot below stays the fallback.
+    from cross_episode_sim.perception.stove_control_convention import front_burner_side,front_burner_from_row,measured_knob_row
+    from cross_episode_sim.perception.molmo_pointing import MolmoPointer
+    layout=None;side=front_burner_side(a.semantic_receptacle)
+    if side is not None:
+     row_pointer=MolmoPointer()
+     # Knobs remembered from the empty-hand stove look come first: they were
+     # measured square-on with nothing in hand (fix177: 0.425 m apart, real
+     # 0.438) while the place-time view with the pot held measured 0.474 m.
+     from cross_episode_sim.runtime.episode import current_runtime
+     remembered=getattr(current_runtime(),'stove_knobs_map',None) if current_runtime() is not None else None
+     if remembered is not None and tracking.accepted:
+      T=np.asarray(tracking.T_map_base);knobs=(np.asarray(remembered,float)-T[:3,3])@T[:3,:3]
+      try:
+       layout=front_burner_from_row(knobs,side)
+       print('BURNER_FROM_REMEMBERED_KNOBS',json.dumps(dict(side=side,burner_base=np.round(layout,3).tolist())),flush=True)
+      except ValueError as exc:print('BURNER_REMEMBERED_KNOBS_UNUSABLE',json.dumps(dict(reason=str(exc)[:120])),flush=True)
+     for name in (() if layout is not None else ('navigation','wrist')):
+      camera=packet.cameras[name];valid=camera.valid_depth if camera.robot_mask is None else camera.valid_depth&~camera.robot_mask
+      def to_point(p,camera=camera,valid=valid):
+       u,v=np.round(p).astype(int);found=[]
+       for dv in range(-3,4):
+        for du in range(-3,4):
+         try:found.append(pixel_point(camera,valid,(u+du,v+dv)))
+         except ValueError:pass
+       return np.median(found,axis=0) if found else None
+      try:
+       knobs,row=measured_knob_row(row_pointer,camera,to_point)
+       layout=front_burner_from_row(knobs,side)
+       print('BURNER_FROM_KNOB_ROW',json.dumps(dict(camera=name,side=side,burner_base=np.round(layout,3).tolist(),
+             knob_spacing_m=round(float(np.linalg.norm(knobs[-1,:2]-knobs[0,:2])),3))),flush=True)
+       break
+      except ValueError as exc:print('BURNER_KNOB_ROW_UNUSABLE',json.dumps(dict(camera=name,reason=str(exc)[:120])),flush=True)
+     if layout is None:
+      # The knobs this robot measured earlier with an empty hand (runner
+      # stove memory, shared SLAM map frame); the held pot often hides them now.
+      from cross_episode_sim.runtime.episode import current_runtime
+      remembered=getattr(current_runtime(),'stove_knobs_map',None) if current_runtime() is not None else None
+      if remembered is not None and tracking.accepted:
+       T=np.asarray(tracking.T_map_base);knobs=(np.asarray(remembered,float)-T[:3,3])@T[:3,:3]
+       try:
+        layout=front_burner_from_row(knobs,side)
+        print('BURNER_FROM_REMEMBERED_KNOBS',json.dumps(dict(side=side,burner_base=np.round(layout,3).tolist())),flush=True)
+       except ValueError as exc:print('BURNER_REMEMBERED_KNOBS_UNUSABLE',json.dumps(dict(reason=str(exc)[:120])),flush=True)
     anchors=[]
-    for name,ds in detections.items():
+    for name,ds in ({} if layout is not None else detections).items():
      for detection in ds:
       if detection.point is not None:
        camera=packet.cameras[name]
        anchors.append(pixel_point(camera,camera.valid_depth,detection.point))
     anchors=[p for p in anchors if p is not None]
-    if not anchors:raise RuntimeError('No freshly pointed burner with valid metric depth')
-    print('BURNER_ANCHORS',np.asarray(anchors).tolist(),flush=True)
-    anchor=np.median(anchors,axis=0)
-    preferred_contacts=[]
-    artifacts.write_text(a.output/'observed_burner.json',json.dumps(dict(point=anchor.tolist(),source='fresh confirmed appliance crop and depth')))
+    if layout is not None:
+     anchor=np.asarray(layout,float);preferred_contacts=[]
+     artifacts.write_text(a.output/'observed_burner.json',json.dumps(dict(point=anchor.tolist(),source='documented seven-knob stove burner layout from the knob row measured in depth')))
+    else:
+     if not anchors:raise RuntimeError('No freshly pointed burner with valid metric depth')
+     print('BURNER_ANCHORS',np.asarray(anchors).tolist(),flush=True)
+     anchor=np.median(anchors,axis=0)
+     preferred_contacts=[]
+     artifacts.write_text(a.output/'observed_burner.json',json.dumps(dict(point=anchor.tolist(),source='fresh confirmed appliance crop and depth')))
    cloud=np.concatenate(points)
    local=cloud[(np.linalg.norm(cloud[:,:2]-anchor[:2],axis=1)<.26)&(abs(cloud[:,2]-anchor[2])<.055)]
    if len(local)<30:raise RuntimeError('No fresh depth near remembered burner point')
-   bins=np.floor(local[:,2]/.008).astype(int);levels,counts=np.unique(bins,return_counts=True)
+   # Pick the support height from the burner disc itself: within 26 cm the
+   # counter/stove rim (~1 cm above the grate) is the highest populated level
+   # and won, so the grate was dropped (fix180 replays: 0 support points
+   # within 17 cm of the burner; disc-only level 0.908 gives ~370).
+   inner=local[np.linalg.norm(local[:,:2]-anchor[:2],axis=1)<BURNER_LEVEL_RADIUS]
+   level_points=inner if len(inner)>=30 else local
+   bins=np.floor(level_points[:,2]/.008).astype(int);levels,counts=np.unique(bins,return_counts=True)
    candidates=levels[counts>=max(20,.1*counts.max())]
    z=(candidates.max()+.5)*.008
    support=local[abs(local[:,2]-z)<.008]
@@ -201,6 +283,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   for i,(lo,hi) in enumerate(merge_voxels(vox)):
    lo=np.array(lo);hi=np.array(hi);boxes.append(Cuboid(name=f'observed_{i}',pose=[*((lo+hi+1)*.0125),1,0,0,0],dims=((hi-lo+1)*.025+.003).tolist()))
   calibration=robot_calibration(m,d,a.output/'robot');fixed_support=[[*s['center'],s['radius']] for s in calibration['collision_spheres'].get('base',[])];arm=sensor_arm_planner(kinematics=calibration,collision_cache={'cuboid':max(16,len(boxes)),'mesh':2});arm.planner.update_world(SceneCfg(cuboid=boxes));planner=ObservedGraspPlanner(arm,geo,boxes,fixed_floor_support_spheres=fixed_support);tree=cKDTree(surface)
+  if os.environ.get('HOUSEHOLD_BURNER_PLACE_IK_ONLY')=='1':
+   # User rule (2026-11-18): a reachable IK solution is executed, not refused by
+   # the observed-world check. fix179 call 12 (front-right burner): 95 candidates
+   # with IK refused by ~5 mm overlaps at cooktop height (0.74-1.01 m) while
+   # lowering the pot onto the grate. Physics and release checks stay.
+   planner.ik_only=True;print('BURNER_PLACE_IK_ONLY',flush=True)
   rows=json.loads(artifacts.read_text(a.output/'predictions.json'))['candidates'];rows=[x for x in rows if tree.query(x['contact'])[0]<.035];rows.sort(key=lambda x:np.linalg.norm(np.array(x['tcp'])[:3,3]-tcp[:3,3])-.1*x['confidence']);chosen=None
   if r.get('placement_target_base') is not None:
    preferred=np.asarray(r['placement_target_base'])

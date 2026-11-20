@@ -27,8 +27,11 @@ def main():
     p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     p.add_argument('--seconds',type=float,default=10.)
     a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False);cv2.setNumThreads(4)
-    model=mujoco.MjModel.from_binary_path(str(a.source/'action_recording/model.mjb'));data=mujoco.MjData(model)
-    with np.load(a.source/'action_recording/initial_state.npz') as x:mujoco.mj_setState(model,data,x['state'],int(x['state_type']))
+    # One evaluation platform: the same loader as the agent-policy (GPT) and
+    # replay-scoring paths (every fixture articulated, two-knob stove).
+    from cross_episode_sim.evaluation.articulated_scene import load_saved_scene
+    model,data,scene_report=load_saved_scene(a.source)
+    print('EVAL_SCENE',json.dumps({k:v for k,v in scene_report.items() if k!='added_joints'}),flush=True)
     # Requested all-open condition is set before evaluation, never passed to policy.
     doors=[]
     for jid in range(model.njnt):

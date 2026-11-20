@@ -40,7 +40,12 @@ def plan_contact_line(planner,joints,target,spacing=.005):
             raise RuntimeError('Contact-line IK unreachable')
         path=smooth_joint_path(q,fit.x)
         dense=np.linspace(q,fit.x,max(2,int(np.ceil(np.abs(fit.x-q).sum()/.001))+1))
-        if not planner.clear(path) or not planner.clear(dense):
+        # The short straight move of the hand onto the surface it is meant to
+        # touch: with `contact_line_ik_only` (user rule, IK found is enough)
+        # it is not refused by observed-world checks. The fridge push-open was
+        # stopped on every replay by its own door edge beside the hand
+        # (fix162 state, -fixes); free reaches keep their checks.
+        if not getattr(planner,'contact_line_ik_only',False) and (not planner.clear(path) or not planner.clear(dense)):
             raise RuntimeError('Contact-line sweep blocked: '+str(getattr(planner,'last_rejection',None)))
         segments.append(path if not segments else path[1:]);q=fit.x
     return np.concatenate(segments)

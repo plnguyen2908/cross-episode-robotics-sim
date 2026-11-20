@@ -57,6 +57,7 @@ def frontal_reach(geometry,target,normal,q):
 
 
 class FixtureDocking(ShapedDocking):
+    edge_first=False  # not a pickup among neighbouring instances
     def step(self,packet,tracking,now):
         # Reuse the established follower and motion guards after proposing a
         # fixture-specific dock. Never enter its countertop fitting branch.

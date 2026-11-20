@@ -29,18 +29,27 @@ def main():
     p.add_argument('--output',type=Path,required=True);p.add_argument('--checkpoint',default='unused')
     a=p.parse_args();x=artifacts.load_array(a.input)
     crop,surface=focused_cloud(x['points'],x['target'])
-    policy=M2T2Policy(a.checkpoint,'external/M2T2');rows=[]
-    # Each sample sees measured support around the whole object, including the
-    # near rim/side. A large neighboring object cannot dominate point sampling.
-    for sample in range(3):
-        torch.manual_seed(sample)
-        out=policy.predict(x['points'][crop],x['rgb'][crop])
-        for poses,scores,contacts in zip(out['grasps'],out['grasp_confidence'],out['grasp_contacts']):
-            rows.extend(dict(tcp=grasp_to_tcp(g).tolist(),confidence=float(s),
-                             contact=c.tolist(),sampling_pass=sample)
-                        for g,s,c in zip(poses,scores,contacts))
+    from cross_episode_sim.perception.rpc import configured_client
+    graspgenx=configured_client('graspgenx');rows=[]
+    if graspgenx is not None:
+        # Same opt-in pick backend as the vessel pick: GraspGen-X on the
+        # segmented target surface. Without the endpoint M2T2 proposes as before.
+        from cross_episode_sim.control.graspgenx_policy import endpoint_proposals
+        rows=endpoint_proposals(graspgenx,surface)
+    else:
+        policy=M2T2Policy(a.checkpoint,'external/M2T2')
+        # Each sample sees measured support around the whole object, including the
+        # near rim/side. A large neighboring object cannot dominate point sampling.
+        for sample in range(3):
+            torch.manual_seed(sample)
+            out=policy.predict(x['points'][crop],x['rgb'][crop])
+            for poses,scores,contacts in zip(out['grasps'],out['grasp_confidence'],out['grasp_contacts']):
+                rows.extend(dict(tcp=grasp_to_tcp(g).tolist(),confidence=float(s),
+                                 contact=c.tolist(),sampling_pass=sample)
+                            for g,s,c in zip(poses,scores,contacts))
     rows.sort(key=lambda row:-row['confidence'])
     result=dict(candidates=rows,focused_points=int(crop.sum()),target_points=len(surface),
+                proposal_model='graspgenx' if graspgenx is not None else 'm2t2',
                 scope='observed-object crop; full collision scene retained by executor')
     artifacts.write_text(a.output,json.dumps(result));print(json.dumps({**result,'candidates':len(rows)}),flush=True)
 

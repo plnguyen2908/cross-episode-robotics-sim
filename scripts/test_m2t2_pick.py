@@ -37,7 +37,8 @@ rows=parallel_gripper_symmetries(valid_rows)
 alignment_completed=False
 active_mode=None;approach_options=None;approach_aperture=None
 shoulder=geo.fk(measured())[m.body('robot_0/fr3_link1').id][:3,3]
-rows.sort(key=lambda row:np.linalg.norm(np.array(row['tcp'])[:3,3]-shoulder)-.10*row['confidence'])
+# GraspGen-X fallback rows (lower-scored samples) follow the confident tier.
+rows.sort(key=lambda row:(bool(row.get('fallback')),np.linalg.norm(np.array(row['tcp'])[:3,3]-shoulder)-.10*row['confidence']))
 diagnostic_grid=ObservedNavigationMap(g.config);restore_observed_map(diagnostic_grid,a.source)
 diagnostic_slam=create_mapper();selected_tcp=None;last_video_timestamp=None
 with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'state_recording') as recording:
@@ -76,6 +77,15 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
       float(np.ptp(points[observed_target_mask(points,target,support_height),2]))<.10)
   boxes,world_stats=build_observed_boxes(g,T,points,target,support_height=support_height,local_resolution=.01 if shallow_confined else .025)
   print('OBSERVED_WORLD',world_stats,flush=True)
+  if pick_config.get('source_receptacle'):
+   # User rule (2026-11-18): for a pick inside an appliance, a grasp the arm
+   # can reach (IK found) is executed without the observed-world collision
+   # check. The drink in the fridge was refused on every look by 0.4-1.5 cm
+   # overlaps with depth voxels of the crisper edge (fix156 call 26). IK,
+   # self collision, physics and the grip/lift verification are unchanged.
+   from cross_episode_sim.control.observed_grasp_planner import ObservedGraspPlanner
+   ObservedGraspPlanner.ik_only=True
+   print('PICK_WORLD_CHECK_OFF',json.dumps(dict(source=pick_config.get('source_receptacle'))),flush=True)
   artifacts.write_text(a.output/'observed_world.json',json.dumps([dict(name=b.name,pose=b.pose,dims=b.dims) for b in boxes],indent=2))
   # Target selection/cropping is upstream. Do not veto learned proposals
   # again with a hard contact-to-surface distance threshold before planning.
@@ -166,6 +176,21 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     (a.output/'horizontal_candidates.json').write_text(json.dumps(rows[:24],indent=2))
    else:rows=sorted(rows,key=lambda r:float(np.asarray(r['tcp'])[2,2]))
    print('MANIPULATION_APPROACH',active_mode,approach_options.as_dict(),flush=True)
+  if active_mode is None and isinstance(rows,list) and any(row.get('fallback') for row in rows):
+   # A fallback tier is present. Try the wrist poses the observed world leaves room
+   # for first (confident before fallback), then the remaining confident rows as
+   # before. Fallback rows that fail this screen are not worth an IK attempt each.
+   from cross_episode_sim.control.graspgenx_policy import split_plausible
+   from cross_episode_sim.control.manipulation_approach import gripper_points_tool
+   envelope=gripper_points_tool(geo,measured(),geo.tcp_pose(measured()))
+   plausible,blocked=split_plausible(rows,envelope,planner.centers,planner.half,planner.rotations,shoulder)
+   confident=[row for row in plausible if not row.get('fallback')];fallback=[row for row in plausible if row.get('fallback')]
+   # About one second of planning per rejected row: bound a pick that has no solution.
+   rows=confident+fallback[:300]+[row for row in blocked if not row.get('fallback')]
+   fallback_order=dict(plausible_confident=len(confident),plausible_fallback=len(fallback),plausible_fallback_tried=min(len(fallback),300),
+       blocked_confident=len(rows)-len(confident)-min(len(fallback),300),blocked_fallback_dropped=sum(bool(row.get('fallback')) for row in blocked))
+   print('FALLBACK_ORDER',fallback_order,flush=True)
+   artifacts.write_text(a.output/'fallback_order.json',json.dumps(fallback_order,indent=2))
   plan=planner.plan
   seen=[];chosen=None
   for index,row in enumerate(rows):

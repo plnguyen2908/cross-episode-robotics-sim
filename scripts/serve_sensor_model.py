@@ -36,6 +36,10 @@ def build(kind,args):
             else:model.torch.manual_seed(r.get('seed',0))
             return model.predict(r['points'],r['rgb'],held_points=r.get('held_points'),ee_pose=r.get('ee_pose'))
         return infer
+    if kind=='graspgenx':
+        from cross_episode_sim.control.graspgenx_policy import GraspGenXPolicy
+        model=GraspGenXPolicy()
+        return lambda r:model.predict(r['object_points'],seed=r.get('seed',0))
     if kind=='onering':
         from cross_episode_sim.navigation.onering import OneRingProcess
         from types import SimpleNamespace as NS
@@ -55,7 +59,7 @@ def build(kind,args):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--kind',required=True,choices=['molmo','qwen','fastsam','m2t2','onering'])
+    p.add_argument('--kind',required=True,choices=['molmo','qwen','fastsam','m2t2','graspgenx','onering'])
     p.add_argument('--port',required=True,type=int);p.add_argument('--device',default='cuda:0')
     p.add_argument('--checkpoint');p.add_argument('--output',default='runs/onering_service')
     a=p.parse_args();handler=build(a.kind,a)

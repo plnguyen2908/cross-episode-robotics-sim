@@ -10,16 +10,18 @@ import numpy as np
 from cross_episode_sim.robot.embodiment import embodiment_for
 
 
-def make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m'):
+def make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m', spec_edit=None):
     """Retry transient asset reads during setup, before any episode executes.
 
     Rebuild the spec each time: a failed compile may leave native resources in a
     partial state. Do not retry invalid models, motion failures, or entire episodes.
     Persistent missing files still fail after three attempts with the original path.
+    ``spec_edit(spec)`` (evaluation only) edits the loaded scene spec before its
+    first compile, e.g. evaluation/stove_knobs.remove_extra_stove_knobs.
     """
     for attempt in range(3):
         try:
-            return _make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw, robot)
+            return _make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw, robot, spec_edit)
         except ValueError as exc:
             if 'Error opening file' not in str(exc) or attempt == 2:
                 raise
@@ -28,8 +30,10 @@ def make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m'
             time.sleep(.5 * (attempt + 1))
 
 
-def _make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m'):
+def _make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m', spec_edit=None):
     spec = mujoco.MjSpec.from_file(str(scene_xml))
+    if spec_edit is not None:
+        spec_edit(spec)
     from cross_episode_sim.tasks.room_doors import install_room_doors
     config = Path(scene_xml).with_name('room_doors.json')
     options_path = Path(scene_xml).with_name('room_door_options.json')
@@ -59,12 +63,20 @@ def _make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m
                 descendants.add(child)
                 keep.add(original.body(child).name)
     frozen = 0
+    articulated = 0
     for body in spec.bodies:
         if body.name in keep or body.name.startswith('room_door_'):
             continue
         for joint in list(body.joints):
-            # Freezing articulated joints at their authored reference preserves
-            # their initial physical transform, including native doorway doors.
+            # User decision, November 16, 2026: every fixture articulation
+            # (cabinet doors, drawers, appliance doors, knobs) stays as authored
+            # in RoboCasa, not only the task-bound one. A task may use any
+            # eligible cabinet or drawer, and a robot cannot tell a frozen
+            # door from a working one by looking. Non-task loose objects
+            # (free joints) are still fixed at their authored poses.
+            if joint.type != mujoco.mjtJoint.mjJNT_FREE:
+                articulated += 1
+                continue
             spec.delete(joint)
             frozen += 1
     from cross_episode_sim.tasks.history_views import install_room_cameras
@@ -85,7 +97,8 @@ def _make_house(scene_xml, dynamic_objects, robot_xy, robot_yaw=0., robot='rby1m
     return model, data, {'scene_xml': str(Path(scene_xml).resolve()), 'whole_house': True,
                          'original_bodies': original.nbody, 'original_geoms': original.ngeom,
                          'bodies_with_robot': model.nbody, 'geoms_with_robot': model.ngeom,
-                         'frozen_joints': frozen, 'native_poses_preserved': True,
+                         'frozen_joints': frozen, 'articulated_fixture_joints': articulated,
+                         'native_poses_preserved': True,
                          'room_doors': room_doors,
                          'cabinet_clearance': cabinet_clearance,
                          'floor_geometry': 'native, unchanged',

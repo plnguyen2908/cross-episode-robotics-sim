@@ -35,3 +35,26 @@ class DockFollower:
 
     @property
     def complete(self):return not self.route
+
+
+def route_seconds(route, pose, dt=.02, limit=600., **follower):
+    """Time a DockFollower needs for a route from pose with an ideal base.
+
+    Following the route in a kinematic model counts what a formula misses: the
+    follower slows into the tolerance of every waypoint, and lattice routes
+    have one each 0.1 m.
+    """
+    track=DockFollower(route,recover_turn_drift=True,**follower);pose=np.asarray(pose,float).copy();steps=0
+    while not track.complete and steps*dt<limit:
+        speed,yaw=track.command(pose)
+        pose+=np.r_[speed*np.cos(pose[2]),speed*np.sin(pose[2]),yaw]*dt;steps+=1
+    return steps*dt
+
+def tick_budget(route, pose, tick, budget, rate=50, ceiling=300.):
+    """Ticks a dock may run once this route is planned at the given tick.
+
+    A fixed limit ends a long detour mid-route. Allow 1.5 times the ideal
+    route time plus 10 s to settle, never less than the limit already granted
+    and never more than the ceiling, so repeated replanning still ends.
+    """
+    return max(budget,min(int(ceiling*rate),tick+int(rate*(1.5*route_seconds(route,pose)+10.))))

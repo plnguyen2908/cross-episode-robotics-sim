@@ -40,6 +40,7 @@ class ObservedHingedPlanner(ObservedGraspPlanner):
 
     def world_clear(self, spheres, margin=.005, base_offset=None, base_yaw=0.):
         """Use calibrated base OBBs for static as well as moving obstacles."""
+        if getattr(self,'ik_only',False):return True      # user rule: IK found is enough (2026-11-18)
         from dataclasses import replace
         checked=np.asarray(spheres).copy()
         checked[:,self.base_sphere_ids.cpu().numpy(),3]=-1

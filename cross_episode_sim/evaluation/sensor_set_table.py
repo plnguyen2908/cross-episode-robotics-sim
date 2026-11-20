@@ -37,10 +37,12 @@ def run_stage_command(command, log):
 
 
 class SensorSetTablePipeline:
-    def __init__(self, source, output, *, navigation_seconds=180, pointing_device=None, furniture_device=None,persistent_runtime=True,initial_doors='saved',single_left_leaf=False,expected_task='set_table'):
+    def __init__(self, source, output, *, navigation_seconds=180, exploration_seconds=None, pointing_device=None, furniture_device=None,persistent_runtime=True,initial_doors='saved',single_left_leaf=False,expected_task='set_table'):
         from cross_episode_sim.runtime.episode import EpisodeRuntime
         self.runtime=EpisodeRuntime(artifact_root=output) if persistent_runtime else None
         self.source=Path(source).resolve();self.output=Path(output).resolve()
+        # Exploration ends when its stations are found; a larger house only needs a later limit.
+        self.exploration_seconds=navigation_seconds if exploration_seconds is None else exploration_seconds
         self.navigation_seconds=navigation_seconds;self.pointing_device=pointing_device;self.furniture_device=furniture_device;self.stages=[]
         config=json.loads(artifacts.read_text(self.source/'config.json'))
         if config['task']!=expected_task:raise ValueError('Unexpected task for pipeline')
@@ -49,6 +51,9 @@ class SensorSetTablePipeline:
         # Reset selection is harness-only. Execution always uses the same
         # onboard exploration policy, including observation-based door discovery.
         self.initial_doors=initial_doors;self.single_left_leaf=single_left_leaf
+        # Scenes are loaded through evaluation/articulated_scene.load_saved_scene
+        # (exploration stage), which rebuilds frozen fixture joints and applies
+        # the two-knob stove, so an original saved episode folder is accepted.
 
     def stage(self,name,command,report,success_key='success'):
         print(f'STAGE {len(self.stages)+1}: {name}',flush=True)
@@ -69,6 +74,12 @@ class SensorSetTablePipeline:
         self.stages.append(dict(name=name,command=list(command),success_key=success_key,exit_code=completed.returncode,success=ok,report=str(report),wall_seconds=time.monotonic()-started,started_unix=started_unix))
         artifacts.write_text(self.output/'stages.json',json.dumps(self.stages,indent=2))
         print(f'STAGE {len(self.stages)}: {name} — {"passed" if ok else "failed"} ({time.monotonic()-started:.1f}s)',flush=True)
+        if not ok and 'place' in name and self.runtime is not None:
+            # Keep this failed placement's in-memory inputs on disk for an
+            # exact isolated replay (diagnostic only; nothing reads them back).
+            roots=[Path(report).parent]+[Path(command[i+1]) for i,arg in enumerate(command[:-1]) if arg in ('--dock','--start','--perception')]
+            count=artifacts.persist_under(self.runtime,roots,getattr(self.runtime,'model',None),getattr(self.runtime,'data',None))
+            print('PLACE_FAILURE_INPUTS_SAVED',json.dumps(dict(stage=name,files=count,roots=[str(r) for r in roots])),flush=True)
         if not ok:raise RuntimeError(f'{name} failed; see {report} and {name}.log')
         return result
 
@@ -83,7 +94,7 @@ class SensorSetTablePipeline:
             '--target','dining table','--preferred-distance','1.1',
             '--station-exploration','--navigation-mode','semantic','--object-map','visual','--perception','daaam',
             '--explorer','frontier','--map-resolution','.05','--goal-room','',
-            '--vlm-device','cuda:1','--seconds',str(self.navigation_seconds),
+            '--vlm-device','cuda:1','--seconds',str(self.exploration_seconds),
             '--record-furniture-device',self.furniture_device or self.pointing_device or 'cuda:2'
         ],destination/'report.json','sensor_navigation_success')
         self.require_destination_memory(destination)
@@ -121,10 +132,11 @@ class SensorSetTablePipeline:
         if self.runtime is None:
             return self._run(continuation=continuation,completed_transfers=completed_transfers,exploration_only=exploration_only)
         endpoints=json.loads(os.environ.get('SENSOR_MODEL_ENDPOINTS','{}'))
-        missing={'molmo','qwen','fastsam','m2t2','onering'}-endpoints.keys()
+        missing={'molmo','qwen','fastsam','m2t2'}-endpoints.keys()  # fix 34: One-Ring is optional
         if missing:raise ValueError(f'Persistent runtime requires model services: {sorted(missing)}')
         from cross_episode_sim.perception.rpc import ModelClient
         for kind,address in endpoints.items():
+            if kind=='onering' and address in ('','scan'):continue  # no local-policy service to check
             client=ModelClient(address,timeout=10)
             try:
                 if not client.call(operation='health').get('ready'):raise RuntimeError(f'{kind} worker not ready')

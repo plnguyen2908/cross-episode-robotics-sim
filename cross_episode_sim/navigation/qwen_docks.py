@@ -130,4 +130,27 @@ def plan_ranked_docks(dock,pose,q,candidates):
     if dock.plan_candidates(pose,q,[goal],source='qwen_selected_astar'):return True
     from .placement_docks import plan_to_any_dock
     dock.events.append(dict(event='qwen_selected_route_unavailable_fallback'))
-    return plan_to_any_dock(dock,pose,q,candidates[1:])
+    return plan_to_any_dock(dock,pose,q,candidates[1:]) or plan_straight_in(dock,pose,q,candidates[:3])
+
+
+def plan_straight_in(dock,pose,q,candidates,backoffs=(.1,.15,.2,.3,.4,.5)):
+    """Line up behind a dock and drive straight in when the base cannot turn at it.
+
+    Every other route ends with a turn at the dock or within 0.15 m of it. A
+    base that only just fits against a counter is clear at the dock pose and
+    along its facing axis, yet has no room for that turn. Plan to a staging
+    pose backed off along the dock's own heading, turn there, then drive in
+    without turning. The same swept check covers every segment.
+    """
+    for goal in candidates:
+        goal=np.asarray(goal,float);checker=dock.make_checker(pose,q)
+        if not checker.clear(goal):continue
+        axis=np.r_[np.cos(goal[2]),np.sin(goal[2]),0.]
+        for back in backoffs:
+            staging=goal-back*axis
+            # A longer run-in contains this one, so it is blocked as well.
+            if not checker.swept(staging,goal):break
+            if not dock.plan_candidates(pose,q,[staging],source='straight_in_staging'):continue
+            dock.path=list(dock.path)+[goal];dock.goal=goal;dock.curve=None
+            dock.events.append(dict(event='straight_in_approach',goal=goal.tolist(),run_in_m=back));return True
+    return False

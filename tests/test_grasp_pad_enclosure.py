@@ -79,3 +79,28 @@ def test_pad_free_gripper_is_rejected_instead_of_passing_vacuously():
     except ValueError:
         return
     raise AssertionError('missing pads must not pass')
+
+
+def test_off_middle_endpoint_is_moved_onto_the_target_middle():
+    # Closing along world y across the 54 mm side of the box seen from its 76 mm side.
+    surface = visible_box_faces(half=(.0378, .027, .0432))
+    enclosure = PadEnclosure(Gripper(), (), surface, 0.)
+    tcp = top_down(0., .08)
+    tcp[1, 3] = .010
+    moved = enclosure.centred(tcp)
+    assert moved is not None and abs(moved[1, 3]) < .003 and np.allclose(moved[[0, 2], 3], tcp[[0, 2], 3])
+    assert np.allclose(moved[:3, :3], tcp[:3, :3])
+    rows = list(enclosure.centred_variants([dict(tcp=tcp.tolist(), contact=[0, .010, .08], confidence=.8)]))
+    assert len(rows) == 2 and 'closing_centre_shift_m' in rows[0] and rows[1]['tcp'] == tcp.tolist()
+    assert abs(rows[0]['contact'][1]) < .003
+
+
+def test_middle_endpoint_and_wall_grasp_are_left_alone():
+    surface = visible_box_faces(half=(.0378, .027, .0432))
+    enclosure = PadEnclosure(Gripper(), (), surface, 0.)
+    assert enclosure.centred(top_down(0., .08)) is None
+    # Closing across the 200 mm side: more target lies beyond both pads.
+    wide = PadEnclosure(Gripper(), (), visible_box_faces(half=(.0378, .10, .0432)), 0.)
+    tcp = top_down(0., .08)
+    tcp[1, 3] = .010
+    assert wide.centred(tcp) is None

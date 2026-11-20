@@ -11,6 +11,9 @@ from scipy.sparse.csgraph import connected_components
 from .surfaces import compact_surface
 
 
+MIN_SHARE_OF_LARGEST=.3
+
+
 def aperture_support_points(points, aperture):
     points=np.asarray(points,float).reshape(-1,3)
     handle=np.asarray(aperture['closed_handle'],float)
@@ -45,5 +48,10 @@ def aperture_support_points(points, aperture):
     if not candidates:return np.empty((0,3))
     # Prefer a reachable upper shelf to the cabinet's bottom/floor. This selects
     # among actual observed planes; no dimensions or interior states are read.
+    # ...but only among substantial planes: a 110-point strip along the
+    # cabinet's top front edge (z 0.64) beat the real shelf (z 0.375, 1279
+    # points) and left the second bowl no placement spot (fix74).
+    largest=max(row[1] for row in candidates)
+    candidates=[row for row in candidates if row[1]>=MIN_SHARE_OF_LARGEST*largest]
     top=max(row[0] for row in candidates)
     return max((row for row in candidates if row[0]>top-.025),key=lambda row:row[1])[2]

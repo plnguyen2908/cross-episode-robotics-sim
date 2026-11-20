@@ -56,6 +56,17 @@ def test_new_view_can_find_more_instances_and_old_view_remains_cached():
     assert len(m.pointer.calls)==4
 
 
+def test_turn_in_place_queries_each_new_view_of_the_turn():
+    m,p,t=fixture_mapper(set())
+    # One scan turn at .5 rad/s; a station seen in only part of it must still be asked about.
+    for p.timestamp in np.arange(0,12.6,.1):
+        yaw=.5*p.timestamp;t.T_map_base[:2,:2]=[[np.cos(yaw),-np.sin(yaw)],[np.sin(yaw),np.cos(yaw)]];m.observe(p,t)
+    assert m.pointer.calls.count('kitchen counter')==7
+    for p.timestamp in np.arange(12.6,25.2,.1):
+        yaw=.5*p.timestamp;t.T_map_base[:2,:2]=[[np.cos(yaw),-np.sin(yaw)],[np.sin(yaw),np.cos(yaw)]];m.observe(p,t)
+    assert m.pointer.calls.count('kitchen counter')==7
+
+
 def test_multiple_surface_fragments_create_one_destination():
     m=FurnitureMap(None,None);pts=np.random.default_rng(2).normal([1,0,.8],.05,(100,3))
     m.add('dining table',pts,np.eye(4),0.)
@@ -71,3 +82,12 @@ def test_confirmed_station_stops_queries_even_after_motion():
     p.timestamp=10.;t.T_map_base[0,3]=3.;m.observe(p,t)
     assert m.pointer.calls.count('kitchen counter')==2
     assert len([x for x in m.landmarks if x['label']=='kitchen'])==1
+
+
+def test_reached_station_keeps_its_standoff_as_the_only_viewpoint():
+    m=FurnitureMap(None,None);points=np.random.default_rng(2).normal([1,0,.8],.05,(100,3))
+    m.add('kitchen',points,np.eye(4),0.);m.add('kitchen',points,np.eye(4),1.)
+    m.landmarks[0].update(viewpoints=[[2.,3.,0.]],reached=True)
+    far=np.eye(4);far[0,3]=-6.
+    m.add('kitchen',points,far,2.)
+    assert m.landmarks[0]['observations']==3 and m.landmarks[0]['viewpoints']==[[2.,3.,0.]]

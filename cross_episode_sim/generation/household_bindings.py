@@ -184,3 +184,43 @@ def physical_floor(model, data, binding):
     # Scene allocation keeps the object near its front edge for retrieval.
     reference = binding.get('shelf_height', 1.08) if 'fridge' in binding['support'] else .95
     return min(slabs, key=lambda s: abs(s[2][2]-reference))
+
+
+def storage_units(model):
+    """Every articulated kitchen cabinet shelf and drawer, for semantic scoring.
+
+    Same naming rules as `fixture_bindings` (RoboCasa single/double hinged
+    doors with level shelves, and drawers with an inner box), without the
+    datagen preferences (height, width, sink). Keys are
+    'cabinet:<fixture>:<level>' and 'drawer:<fixture>'. Each value names the
+    support body, its floor geom, the joints that must be shut, and the
+    category used by the composite goals. Units with a missing floor geom or
+    joint are skipped.
+    """
+    names={model.body(i).name for i in range(model.nbody)}
+    geoms={model.geom(g).name for g in range(model.ngeom)}
+    def joints_of(body):
+        if body not in names:return None
+        b=model.body(body)
+        return [model.joint(int(model.body_jntadr[b.id])).name] if int(model.body_jntnum[b.id])==1 else None
+    units={}
+    for name in sorted(names):
+        if not name:continue
+        doors=None
+        if name.endswith('_hingedoor'):
+            prefix=name.removesuffix('_hingedoor');doors=joints_of(name)
+        elif name.endswith('_hingeleftdoor'):
+            prefix=name.removesuffix('_hingeleftdoor')
+            left,right=joints_of(name),joints_of(prefix+'_hingerightdoor')
+            doors=left+right if left and right else None
+        elif name.endswith('_inner_box'):
+            prefix=name.removesuffix('_inner_box');joints=joints_of(name)
+            if joints and prefix+'_inner_bottom' in geoms:
+                units['drawer:'+prefix]=dict(category='drawer',support=name,floor_geom=prefix+'_inner_bottom',joints=joints)
+            continue
+        if not doors:continue
+        for level in (1,2,3):
+            support=prefix+f'_level{level}_main';floor=prefix+f'_level{level}_shelf'
+            if support in names and floor in geoms:
+                units[f'cabinet:{prefix}:{level}']=dict(category='cabinet',support=support,floor_geom=floor,joints=doors)
+    return units

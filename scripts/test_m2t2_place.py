@@ -11,10 +11,10 @@ from cross_episode_sim.perception.visual_targets import table_points
 from cross_episode_sim.perception.point_masks import PointMaskDetector
 from cross_episode_sim.control.observed_grasp_planner import ObservedGraspPlanner,merge_voxels
 from cross_episode_sim.control.observed_arm import robot_calibration
-from cross_episode_sim.control.observed_payload import ObservedPayload,reconstruct_held_points
+from cross_episode_sim.control.observed_payload import ObservedPayload,reconstruct_held_points,live_checked_payload
 from cross_episode_sim.control.planner_cache import sensor_arm_planner
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
-p=argparse.ArgumentParser();p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--max-candidates',type=int,default=0,help='Optional bounded candidate batch; zero preserves the existing exhaustive policy');p.add_argument('--approach-config',type=Path);p.add_argument('--align-only',action='store_true');p.add_argument('--current-pose',action='store_true',help='Attempt sensor-planned placement from the live pose without claiming a completed base dock');p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+p=argparse.ArgumentParser();p.add_argument('--receptacle',default='dining table');p.add_argument('--semantic-receptacle',default=None);p.add_argument('--observed-aperture',type=Path);p.add_argument('--observed-drawer',type=Path,help='Opened-drawer memory in the current base frame');p.add_argument('--dock',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--max-candidates',type=int,default=0,help='Optional bounded candidate batch; zero preserves the existing exhaustive policy');p.add_argument('--approach-config',type=Path);p.add_argument('--align-only',action='store_true');p.add_argument('--current-pose',action='store_true',help='Attempt sensor-planned placement from the live pose without claiming a completed base dock');p.add_argument('--isolated-initial-state',action='store_true');p.add_argument('--observe-only',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 r=json.loads(artifacts.read_text(a.dock/'report.json'))
 if not (a.current_pose and r.get('initialization_valid')) and not r.get('docking_success',False) and not (a.isolated_initial_state and r.get('isolated_placement_reset')) and not (a.observe_only and (r.get('transit_success') is True or r.get('initialization_valid') or r.get('approach_complete') or r.get('status') in ('needs_floor_observation','budget_exhausted'))):raise ValueError('Require sensor docking or explicit isolated reset')
 m,d=load_checkpoint(a.dock)
@@ -62,6 +62,11 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   landmark=support_landmark(destination_memory,a.semantic_receptacle or a.receptacle) if a.receptacle=='dining table' else None
   if payload is None:
    tool_points=reconstruct_held_points(raw,geo);payload=ObservedPayload(geo,tool_points)
+  else:
+   # The carried estimate predates the lift; widen it by the held surface seen
+   # now so no part of the object is left in the scene as an obstacle.
+   tool_points,held_surface=live_checked_payload(raw,geo,tool_points);payload=ObservedPayload(geo,tool_points)
+   artifacts.write_text(a.output/'held_surface.json',json.dumps(held_surface,indent=2));print('HELD_SURFACE',json.dumps(held_surface),flush=True)
   packet=payload.filter_packet(raw)
   detector=None if landmark is not None else PointMaskDetector(categories=(a.receptacle,),free_support=True)
   surfaces=[];points=[];colors=[];preferred_contacts=[]
@@ -80,7 +85,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    (a.output/'support_identity').mkdir(exist_ok=True)
    artifacts.write_text(a.output/'support_identity/report.json',json.dumps(detail,indent=2))
    print('MAPPED_SUPPORT',json.dumps({k:v for k,v in detail.items() if k!='landmark'}),flush=True)
-  elif a.observed_aperture:
+  elif a.observed_aperture or a.observed_drawer:
    detections={k:[] for k in raw.cameras}
   elif a.semantic_receptacle and ('interior' in a.receptacle or 'inside' in a.receptacle):
    from cross_episode_sim.perception.container_interior import container_interior_detections
@@ -147,6 +152,18 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    surface=aperture_support_points(np.concatenate(points),aperture)
    if len(surface):surfaces.append(surface)
    artifacts.write_text(a.output/'aperture_evidence.json',json.dumps(dict(aperture=aperture,measured_support_points=len(surface)),indent=2))
+  if a.observed_drawer:
+   # The robot opened this drawer itself and remembers where its handle ended;
+   # the bottom is measured from depth inside that box. From the remembered
+   # far view the arm holding the cup hid the drawer and pointing found
+   # nothing (fix67, fix79).
+   from cross_episode_sim.perception.drawer_support import drawer_support_points
+   drawer=json.loads(artifacts.read_text(a.observed_drawer))
+   surface=drawer_support_points(np.concatenate(points),drawer)
+   if len(surface):surfaces.append(surface)
+   artifacts.write_text(a.output/'drawer_evidence.json',json.dumps(dict(drawer=drawer,measured_support_points=len(surface),
+       support_height=None if not len(surface) else float(np.median(surface[:,2]))),indent=2))
+   print('DRAWER_SUPPORT',json.dumps(dict(points=len(surface),height=None if not len(surface) else round(float(np.median(surface[:,2])),3))),flush=True)
   if not surfaces:raise RuntimeError('No freshly observed support surface for '+a.receptacle)
   surface=np.concatenate(surfaces);points=np.concatenate(points);colors=np.concatenate(colors);del detector
   memory=a.dock/'observed_table_surface_base.npy'
@@ -189,6 +206,12 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   for i,(lo,hi) in enumerate(merge_voxels(vox)):
    lo=np.array(lo);hi=np.array(hi);boxes.append(Cuboid(name=f'observed_{i}',pose=[*((lo+hi+1)*.0125),1,0,0,0],dims=((hi-lo+1)*.025+.003).tolist()))
   calibration=robot_calibration(m,d,a.output/'robot');fixed_support=[[*s['center'],s['radius']] for s in calibration['collision_spheres'].get('base',[])];arm=sensor_arm_planner(kinematics=calibration,collision_cache={'cuboid':max(16,len(boxes)),'mesh':2});arm.planner.update_world(SceneCfg(cuboid=boxes));planner=ObservedGraspPlanner(arm,geo,boxes,fixed_floor_support_spheres=fixed_support);tree=cKDTree(surface)
+  if os.environ.get('HOUSEHOLD_TABLE_PLACE_IK_ONLY')=='1':
+   # User rule (2026-11-18): a reachable IK solution is executed, not refused by
+   # the observed-world check. fix175 call 23: 113 dining-table candidates had IK
+   # and were refused by 0-5 mm overlaps at 1.06-1.22 m, the height of the held
+   # pot whose own points were left in the cloud. Physics and release checks stay.
+   planner.ik_only=True;print('TABLE_PLACE_IK_ONLY',flush=True)
   if active_mode=='front_entry':
    from cross_episode_sim.control.calibrated_arm_planner import CalibratedArmPlanner
    planner=CalibratedArmPlanner(arm,geo,boxes,panel_points=np.empty((0,3)),hinge_xy=[0.,0.],reference_tcp=np.zeros(3),arm_body_ids=[m.body(f'robot_0/fr3_link{i}').id for i in range(8)],allow_curobo_fallback=False,fixed_floor_support_spheres=fixed_support)
@@ -199,19 +222,34 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   from cross_episode_sim.control.observed_placement import supported_interior,unoccupied_contacts
   # Use the observed vessel's horizontal radius plus a 3 cm edge margin.
   held_xy=held[:,:2];center=(held_xy.min(0)+held_xy.max(0))/2
-  support_radius=float(np.linalg.norm(held_xy-center,axis=1).max()+.03)
+  # The 3 cm edge margin keeps objects off table edges. Inside a drawer the
+  # walls contain the object and the exposed bottom is only ~23 cm deep: with
+  # 3 cm no spot was left for a cup (fix80), so a remembered drawer uses 1 cm.
+  # ...and since fix86 no extra margin at all: with a first cup in the drawer,
+  # 1 cm more left the second cup no spot (0 of 2027; 35 without it). The
+  # arm/payload collision checks on every path remain the real guard.
+  edge_margin=0. if a.observed_drawer else .03
+  support_radius=float(np.linalg.norm(held_xy-center,axis=1).max()+edge_margin)
   contacts=np.array([row['contact'] for row in rows]).reshape(-1,3)
   supported=supported_interior(surface,contacts,support_radius)
   supported &= unoccupied_contacts(contacts,points,support_radius,float(np.ptp(held[:,2])+.05))
   rows=[row for row,ok in zip(rows,supported) if ok]
   if not rows and a.semantic_receptacle and ('interior' in a.receptacle or 'inside' in a.receptacle):
    from cross_episode_sim.control.container_placement import interior_placement_candidates
-   rows=interior_placement_candidates(surface,points,held,tcp,support_radius)
+   rows=interior_placement_candidates(surface,points,held,tcp,support_radius,edge_margin=edge_margin)
    print('OBSERVED_CONTAINER_FALLBACK',len(rows),'not learned M2T2 predictions',flush=True)
   if active_mode=='front_entry':
    rows=front_placement_candidates(surface,points,held,tcp,approach_options.wrist_yaw_degrees,opening_normal=(opening_frame(surface,approach_aperture)[1] if approach_options.front_wrist=='horizontal' else None),opening_anchor=opening_frame(surface,approach_aperture)[0])
    print('ALIGNED_FRONT_CANDIDATES',len(rows),flush=True)
-  artifacts.write_text(a.output/'support_filter.json',json.dumps(dict(radius_m=support_radius,edge_margin_m=.03,retained=len(rows)),indent=2))
+  if a.observed_drawer and rows:
+   # Toward a side wall first, not the middle: the first cup went to the centre
+   # of the exposed bottom and left no room beside it for the second (fix86).
+   from cross_episode_sim.perception.drawer_support import drawer_frame
+   _h,_n,_t=drawer_frame(json.loads(artifacts.read_text(a.observed_drawer)))
+   _mid=float(np.median((surface-_h)@_t))
+   rows.sort(key=lambda row:-round(abs(float((np.asarray(row['contact'])-_h)@_t)-_mid),2))
+   print('DRAWER_SIDE_FIRST',json.dumps(dict(candidates=len(rows),first_offset_from_middle_m=round(abs(float((np.asarray(rows[0]['contact'])-_h)@_t)-_mid),3))),flush=True)
+  artifacts.write_text(a.output/'support_filter.json',json.dumps(dict(radius_m=support_radius,edge_margin_m=edge_margin,retained=len(rows)),indent=2))
   print('INTERIOR_PLACE_CANDIDATES',len(rows),'support radius',support_radius,flush=True)
   seen=set();diverse=[]
   for row in rows:
@@ -278,7 +316,21 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    print('ALIGNMENT_COMPLETED',float(d.time-start),flush=True)
    raise SystemExit(0)
   selected_tcp=np.asarray(chosen['tcp'])
-  artifacts.write_text(a.output/'chosen.json',json.dumps(chosen,indent=2));phase='approach';execute(approach,255);phase='lower';execute(lower,255)
+  artifacts.write_text(a.output/'chosen.json',json.dumps(chosen,indent=2))
+  try:phase='approach';execute(approach,255);phase='lower';execute(lower,255)
+  except RuntimeError as blocked:
+   if str(blocked)!='Arm did not settle' or os.environ.get('HOUSEHOLD_TABLE_PLACE_IK_ONLY')!='1':raise
+   # The held pot met the table before the planned release height (fix182
+   # call 23: it hung 36-40 deg tipped, the low rim touched first and the arm
+   # pushed without settling). A blocked descent toward the measured support
+   # is that contact: release here, then the unchanged release, retreat and
+   # visual stability checks run. Tracking diagnostics do not abort it.
+   here=c.robot_view.get_move_group('arm').joint_pos.copy();path=np.concatenate([approach,lower])
+   k=int(np.argmin(np.linalg.norm(path-here,axis=1)))
+   print('PLACE_DESCENT_BLOCKED_RELEASE',json.dumps(dict(phase=phase,waypoint=k,of=len(path),
+       tracking_error_rad=round(float(np.max(abs(here-path[-1]))),3))),flush=True)
+   warnings.append('descent blocked before planned release; released at contact')
+   lower=here[None];retreat=np.concatenate([here[None],path[k::-1]])
   phase='release';last=None;stable=0
   for _ in range(100):
    command(lower[-1],0);angle=np.array([d.joint(n).qpos[0] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')]);stable=stable+1 if last is not None and np.max(abs(angle-last))<.0002 else 0;last=angle

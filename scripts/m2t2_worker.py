@@ -9,7 +9,24 @@ if a.samples<1:raise ValueError('samples must be positive')
 import torch
 import os
 if not __import__('json').loads(os.environ.get('SENSOR_MODEL_ENDPOINTS','{}')).get('m2t2'):torch.cuda.set_per_process_memory_fraction(.18)
-x=artifacts.load_array(a.input);start=time.monotonic();policy=M2T2Policy(a.checkpoint,a.repository)
+x=artifacts.load_array(a.input);start=time.monotonic()
+from cross_episode_sim.perception.rpc import configured_client
+graspgenx=configured_client('graspgenx') if a.task=='pick' else None
+if graspgenx is not None:
+ # Opt-in pick backend for every caller of this worker (cups, confined picks):
+ # GraspGen-X on the segmented target surface. Placement stays with M2T2.
+ from scripts.target_pick_proposals import target_context
+ from cross_episode_sim.control.graspgenx_policy import endpoint_proposals
+ crop,mask,support=target_context(x['points'],x['target'])
+ # Confident grasps first, plus GraspGen-X's lower-scored samples from more seeds
+ # as a marked fallback tier (the pick executor orders both tiers).
+ rows=endpoint_proposals(graspgenx,x['points'][mask],fallback_passes=6)
+ result=dict(candidates=rows,fallback_candidates=sum(row['fallback'] for row in rows),target_points=int(mask.sum()),full_collision_points=len(x['points']),support_z=support,proposal_model='graspgenx',seconds=time.monotonic()-start)
+ a.output.parent.mkdir(parents=True,exist_ok=True)
+ artifacts.write_text(a.output,json.dumps(result,indent=2))
+ print(json.dumps({**result,'candidates':len(rows)}),flush=True)
+ raise SystemExit(0)
+policy=M2T2Policy(a.checkpoint,a.repository)
 rows=[]
 if a.task=='place':
  out=policy.predict(x['points'],x['rgb'],held_points=x['held_points'],ee_pose=x['ee_pose'])

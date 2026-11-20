@@ -82,6 +82,13 @@ def build_appliance_backend(runtime, *, output, command_observer=None, progress=
         motion_epoch=lambda:getattr(runtime,'appliance_motion_epoch',0),
         m2t2=M2T2Policy('/nobackup2/le/.cache/hub/models--wentao-yuan--m2t2/snapshots/a20325dcd19cd1b838274974d0ebe35bfe383796/m2t2.pth',
                        'external/M2T2'),progress=progress or (lambda event,detail:None))
+    # Burner knobs use the documented seven-knob stove manual (user decision,
+    # November 10; docs/appliance_control_conventions.md): count the observed
+    # row and take the burner's ordinal. Other controls keep plain pointing.
+    # fix167: plain pointing at 'front left stove burner knob' grasped the
+    # oven temperature knob (first in the row), so no burner was switched on.
+    from ..perception.stove_control_convention import DocumentedStovePointer
+    backend.pointer=DocumentedStovePointer(backend.pointer)
     return backend
 
 

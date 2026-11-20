@@ -17,12 +17,10 @@ from ..finetuning.molmospaces_execution import MolmoSpacesController
 from ..recording.deferred import StateVideoRecorder
 
 
-def raise_held_view(runtime,tool_points,output,target_height=1.25):
-    output.mkdir(parents=True,exist_ok=False)
+def observed_arm_world(runtime,tool_points,output):
+    """Arm planner over the current onboard RGB-D (held object removed), plus the measured arm joints."""
     m,d=runtime.model,runtime.data;geometry=RobotGeometry(m);payload=ObservedPayload(geometry,tool_points)
     raw=runtime.sensors.capture();packet=payload.filter_packet(raw);q=packet.arm.position.copy()
-    tcp=geometry.tcp_pose(q);start=float(d.time)
-    if tcp[2,3]>=target_height-.02:return dict(success=True,simulated_seconds=0.,reason='already_clear')
     points=np.concatenate([camera_points(camera)[0] for camera in packet.cameras.values()])
     points=points[(points[:,2]>.08)&(np.linalg.norm(points,axis=1)<1.8)]
     for box in geometry.boxes(q):points=points[~np.all(np.abs((points-box.center)@box.axes)<=box.half+.01,axis=1)]
@@ -30,7 +28,32 @@ def raise_held_view(runtime,tool_points,output,target_height=1.25):
     boxes=[Cuboid(name=f'view_{i}',pose=((lo+hi+1)*.0075).tolist()+[1.,0.,0.,0.],dims=((hi-lo+1)*.015+.003).tolist()) for i,(lo,hi) in enumerate(merge_voxels(vox))]
     arm=sensor_arm_planner(robot_calibration(m,d,output/'robot'),collision_cache={'cuboid':max(16,len(boxes)),'mesh':2})
     arm.planner.update_world(SceneCfg(cuboid=boxes))
-    planner=ObservedGraspPlanner(arm,geometry,boxes,allow_curobo_fallback=True)
+    return ObservedGraspPlanner(arm,geometry,boxes,allow_curobo_fallback=True),geometry,q
+
+
+def arm_start_clear(runtime,tool_points,output):
+    """Whether the arm planner accepts the current arm pose as a start in the observed world.
+
+    The base dock checks swept robot boxes with its own margin; the arm planner
+    uses collision spheres and its own margin. A dock can pass the first and
+    leave the arm unable to start any motion (an open microwave door 2 cm from
+    the elbow). Nothing moves here.
+    """
+    output.mkdir(parents=True,exist_ok=False)
+    planner,_,q=observed_arm_world(runtime,tool_points,output)
+    clear=bool(planner.clear(q));rejection=getattr(planner,'last_rejection',None)
+    (output/'report.json').write_text(json.dumps(dict(clear=clear,rejection=rejection),indent=2,default=str))
+    print('ARM_START_CHECK',json.dumps(dict(clear=clear,rejection=rejection),default=str),flush=True)
+    return clear
+
+
+def raise_held_view(runtime,tool_points,output,target_height=1.25):
+    output.mkdir(parents=True,exist_ok=False)
+    m,d=runtime.model,runtime.data;geometry=RobotGeometry(m)
+    q=ObservedPayload(geometry,tool_points).filter_packet(runtime.sensors.capture()).arm.position.copy()
+    tcp=geometry.tcp_pose(q);start=float(d.time)
+    if tcp[2,3]>=target_height-.02:return dict(success=True,simulated_seconds=0.,reason='already_clear')
+    planner,geometry,q=observed_arm_world(runtime,tool_points,output)
     target=tcp[:3,3].copy();target[2]=target_height
     strategy='vertical_clearance'
     try:

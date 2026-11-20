@@ -9,6 +9,16 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
+# Extra rotation (rad) past this robot's own ON turn when switching a knob off.
+KNOB_OFF_OVERTURN=.6   # fix177 replay: +0.4 left the front-right knob at 0.311 rad, just under the 0.35 ON threshold
+# Documented knob positions (rad): OFF vertical, ON 60 deg; fits within the tolerance snap to them.
+KNOB_DOCUMENTED_POSITIONS=(0.,np.pi/3)
+KNOB_SNAP_TOLERANCE=np.radians(25)   # 40 deg let a bad 1.47 rad fit of a knob at OFF pass as already ON
+# Closed-loop knob check: re-turns allowed and the indicator tolerance (rad) that ends them.
+KNOB_VERIFY_RETRIES=2
+KNOB_VERIFY_TOLERANCE=np.radians(15)
+
+
 @dataclass(frozen=True)
 class ObservedControl:
     center: np.ndarray
@@ -76,13 +86,49 @@ class SensorApplianceControls:
         progress('observe_knob','running')
         observed=self.backend.acquire(target,'knob')
         progress('observe_knob','completed')
-        if observed.angle is None:return SkillOutcome(False,'knob_indicator_unobserved')
-        # A vertical OFF marker and 60-degree ON position are this backend's
-        # supported control convention, not a universal appliance assumption.
-        desired=np.pi/3 if state=='on' else 0.
-        delta=desired-observed.angle
-        if abs(delta)<np.radians(4):return SkillOutcome(True,'observed_indicator_at_requested_state')
-        if abs(delta)>np.pi/2:return SkillOutcome(False,'knob_indicator_ambiguous')
+        # This robot's own record of turning this knob on in this episode.
+        # Switching it off undoes exactly that turn (about the same observed
+        # outward axis) instead of trusting a fresh indicator angle: fix168
+        # call 16 read the 0.95 rad indicator with the wrong sign and turned
+        # the knob on to its 3.14 rad stop (private), so the burner stayed on.
+        import json
+        turns=self.__dict__.setdefault('own_knob_turns',{})
+        undo=turns.get(target) if state=='off' else None
+        if undo is not None:
+            # Turn a little past the undo: the knob's OFF end is a hard stop, so
+            # the extra only presses into it, while grip slip no longer leaves
+            # the burner just above its ON threshold (fix175 replay: undo
+            # exactly 1.051 rad -> knob 1.062 -> 0.375 rad, still ON above 0.35).
+            delta=-min(float(undo)+KNOB_OFF_OVERTURN,np.pi/2)
+            # The indicator is where this robot left it (its ON target), not the
+            # fresh fit: fix175 call 17 read -1.505 rad for a knob at +1.06, so
+            # the grasp was ranked across the indicator bar, slipped, and the
+            # burner stayed on. Grasp ranking uses this remembered angle.
+            remembered=self.__dict__.setdefault('own_knob_indicator',{}).get(target)
+            print('KNOB_OFF_UNDOES_OWN_TURN',json.dumps(dict(target=target,turn_rad=round(-delta,3),
+                observed_indicator_rad=None if observed.angle is None else round(observed.angle,3),
+                remembered_indicator_rad=None if remembered is None else round(remembered,3))),flush=True)
+            if remembered is not None:
+                from dataclasses import replace
+                observed=replace(observed,angle=float(remembered))
+        else:
+            if observed.angle is None:return SkillOutcome(False,'knob_indicator_unobserved')
+            # The documented two-position stove knobs rest at OFF (vertical) or
+            # ON (60 deg). Snap a nearby fit to that position: fix182 call 14 read
+            # a knob at OFF as -0.52 rad from a square stand, so the turn was
+            # 'ambiguous' and the pinch point missed the bar (replay: empty grasp).
+            snapped=min(KNOB_DOCUMENTED_POSITIONS,key=lambda a:abs(observed.angle-a))
+            if abs(observed.angle-snapped)<=KNOB_SNAP_TOLERANCE and abs(observed.angle-snapped)>1e-6:
+                print('KNOB_INDICATOR_SNAPPED',json.dumps(dict(target=target,observed_rad=round(observed.angle,3),
+                    documented_rad=round(snapped,3))),flush=True)
+                from dataclasses import replace
+                observed=replace(observed,angle=float(snapped))
+            # A vertical OFF marker and 60-degree ON position are this backend's
+            # supported control convention, not a universal appliance assumption.
+            desired=np.pi/3 if state=='on' else 0.
+            delta=desired-observed.angle
+            if abs(delta)<np.radians(4):return SkillOutcome(True,'observed_indicator_at_requested_state')
+            if abs(delta)>np.pi/2:return SkillOutcome(False,'knob_indicator_ambiguous')
         progress('m2t2_grasp','running')
         self.backend.grasp(observed)
         progress('m2t2_grasp','completed')
@@ -93,6 +139,57 @@ class SensorApplianceControls:
         progress('release_withdraw','running')
         self.backend.release_withdraw(observed)
         progress('release_withdraw','completed')
+        # Measured result, not command completion: look at the knob again and
+        # turn the rest when the grip slipped (fix183 replay: commanded 1.13 rad
+        # on, knob reached 0.18, still below ON). Bounded; never claims success
+        # from this check, the private scorer still decides.
+        final=np.pi/3 if state=='on' else 0.;start_angle=observed.angle;self._verify_backed_off=False
+        for attempt in range(KNOB_VERIFY_RETRIES):
+            # A fresh look (pointing + knob fit), not the cached track: the
+            # tracked refit read the just-released knob as horizontal (-1.4/-1.5
+            # rad for 0.18) in fix183 replays.
+            tracks=getattr(self.backend,'knob_tracks',None)
+            if isinstance(tracks,dict):
+                for key in [k for k in tracks if k[0]==target]:tracks.pop(key,None)
+            try:check=self.backend.acquire(target,'knob')
+            except RuntimeError as exc:
+                # The pointed knob pixel can land on the just-withdrawn arm
+                # ('no valid non-robot depth', fix185 call 17). Back further out
+                # once and look again before giving up.
+                print('KNOB_VERIFY_UNOBSERVED',json.dumps(dict(target=target,reason=str(exc)[:120])),flush=True)
+                further=getattr(self.backend,'withdraw_further',None)
+                if further is None or getattr(self,'_verify_backed_off',False):break
+                self._verify_backed_off=True
+                try:further(observed);check=self.backend.acquire(target,'knob')
+                except RuntimeError as again:print('KNOB_VERIFY_UNOBSERVED',json.dumps(dict(target=target,reason='after backing off: '+str(again)[:100])),flush=True);break
+            if check.angle is None:print('KNOB_VERIFY_UNOBSERVED',json.dumps(dict(target=target,reason='indicator not fitted')),flush=True);break
+            remaining=final-check.angle
+            print('KNOB_VERIFY',json.dumps(dict(target=target,attempt=attempt+1,observed_rad=round(check.angle,3),remaining_rad=round(remaining,3))),flush=True)
+            if abs(remaining)<KNOB_VERIFY_TOLERANCE:break
+            if state=='on' and abs(remaining)>np.pi/2:break
+            # Re-turn only for a reading between the start and the target: a
+            # re-look after the release once read 1.51 rad for a knob at 0.18
+            # and turned it the wrong way (fix183 replay). Other readings stop.
+            planned=final-start_angle if start_angle is not None else remaining
+            # OFF: any ON reading gets another turn toward the stop (fix185 call
+            # 17: a slip flicked the knob from 0.64 to 2.5 rad, past where the
+            # turn started). Turning further toward OFF only presses on the stop,
+            # so a misread there is harmless. ON keeps the between-start-and-
+            # target rule (a misread once turned an ON knob the wrong way).
+            if state=='off':
+                if remaining>0:break
+            elif np.sign(remaining)!=np.sign(planned) or abs(remaining)>abs(planned)+.1:
+                print('KNOB_VERIFY_INCONSISTENT',json.dumps(dict(target=target,observed_rad=round(check.angle,3),planned_rad=round(float(planned),3))),flush=True);break
+            step=remaining if state=='on' else -min(abs(remaining)+KNOB_OFF_OVERTURN,np.pi/2)
+            self.backend.grasp(check)
+            self.backend.follow_contact(list(knob_rotation_poses(self.backend.tcp(),check,step)),check)
+            self.backend.release_withdraw(check)
+            delta=float(delta)+float(step)
+        indicators=self.__dict__.setdefault('own_knob_indicator',{})
+        if state=='on':
+            turns[target]=turns.get(target,0.)+float(delta)
+            if observed.angle is not None:indicators[target]=float(observed.angle)+float(delta)
+        else:turns.pop(target,None);indicators.pop(target,None)
         return SkillOutcome(True,'rotation_commands_completed_appliance_state_not_scored')
 
     def push_button(self, *, target, progress):

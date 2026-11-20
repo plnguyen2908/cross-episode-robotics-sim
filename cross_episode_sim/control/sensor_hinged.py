@@ -159,6 +159,10 @@ def parallel_leaf_layers(points, anchor, normal, center_xy, radius):
 
 
 
+# Heights (m, relative to the hand) at which the panel behind a held handle is looked for, in order.
+HELD_PANEL_LIFTS=(0.,.25,-.25,.45)
+
+
 def fit_held_panel(points, tcp_position, tangent, reference, reference_tcp,
                    previous_normal, preferred_offset=0., *, min_gap=.012):
     """Select the visible panel maintaining the held handle's stand-off.
@@ -169,15 +173,23 @@ def fit_held_panel(points, tcp_position, tangent, reference, reference_tcp,
     """
     expected=float((np.asarray(reference_tcp)-reference.anchor)@reference.normal)
     candidates=[]
-    for offset in dict.fromkeys((preferred_offset,0.,-.12,.12)):
-        try:
-            fitted=fit_panel(points,np.asarray(tcp_position)+offset*np.asarray(tangent),
-                             previous_normal,radius=.3,min_gap=min_gap)
-        except ValueError:continue
-        gap=float((np.asarray(tcp_position)-fitted.anchor)@fitted.normal)
-        error=abs(gap-expected)
-        candidates.append((error+.01*abs(offset-preferred_offset)+fitted.residual,
-                           offset,fitted))
+    # At the hand's own height first. A tall leaf (the fridge door, held at
+    # 1.05 m on a 0.9 m handle) can be hidden there by the arm and wrist
+    # from both cameras while the same panel is in plain view above or below
+    # (fix112: lost 3 deg into the pull). The stand-off is measured along the
+    # panel normal, so a patch higher or lower on the same leaf gives the
+    # same association.
+    for lift in HELD_PANEL_LIFTS:
+        for offset in dict.fromkeys((preferred_offset,0.,-.12,.12)):
+            try:
+                fitted=fit_panel(points,np.asarray(tcp_position)+offset*np.asarray(tangent)+np.array([0.,0.,lift]),
+                                 previous_normal,radius=.3,min_gap=min_gap)
+            except ValueError:continue
+            gap=float((np.asarray(tcp_position)-fitted.anchor)@fitted.normal)
+            error=abs(gap-expected)
+            candidates.append((error+.01*abs(offset-preferred_offset)+fitted.residual,
+                               offset,fitted))
+        if candidates:break
     if not candidates:raise ValueError('No observed panel associated with held handle')
     _,offset,panel=min(candidates,key=lambda item:item[0])
     return offset,panel

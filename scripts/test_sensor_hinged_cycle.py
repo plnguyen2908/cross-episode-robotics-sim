@@ -15,6 +15,17 @@ from cross_episode_sim.control.planner_cache import sensor_arm_planner
 from cross_episode_sim.control.observed_grasp_planner import ObservedGraspPlanner,merge_voxels
 from cross_episode_sim.control.sensor_drawer_geometry import merge_occupied,unique_voxels
 from cross_episode_sim.control.sensor_hinged import fit_panel,estimate_vertical_hinge,arc_pose,refine_vertical_hinge,moving_leaf_points,PanelObservation
+# A grasped handle's centre stands about this far in front of its door panel.
+PANEL_HANDLE_STANDOFF=.03
+# Depth of a leaf's own rim beside a push contact (m) and how far around the contact it is taken as the leaf.
+# Deep enough to take in the door's own handle bar, which stands a few cm off
+# the door face: at 6 cm the fridge bar beside the hand (0.80-1.02 m high)
+# blocked the base push at 26 deg (replay of fix159's fridge opening, 63 deg).
+LEAF_RIM_DEPTH=.10
+LEAF_RIM_REACH=.12
+LEAF_RIM_HEIGHT=.70
+# A pull that loses the panel behind the hand this close to the requested opening (deg) has opened the door.
+HELD_PANEL_LOST_ACCEPT_DEGREES=15.
 from cross_episode_sim.control.observed_hinged_planner import ObservedHingedPlanner
 from cross_episode_sim.control.observed_panel_push import ObservedPanelPush
 from cross_episode_sim.finetuning.molmospaces_execution import MolmoSpacesController
@@ -38,6 +49,18 @@ def measure_wall(name):
  return decorate
 
 p=argparse.ArgumentParser();p.add_argument('--panel-close-reference',type=Path);p.add_argument('--calibrated-contact-boxes',action='store_true');p.add_argument('--local-panel-reach',action='store_true');p.add_argument('--pause-at-panel',action='store_true');p.add_argument('--resume-panel-push',action='store_true');p.add_argument('--push-advance-degrees',type=float,default=15.);p.add_argument('--close-observation',type=Path);p.add_argument('--handle-then-push',action='store_true');p.add_argument('--pull-push-after',type=float,default=30.);p.add_argument('--contact-motion-profile',choices=['feedback','fast'],default='feedback');p.add_argument('--auto-probe-direction',action='store_true');p.add_argument('--shared-oracle-contact',action='store_true');p.add_argument('--grasp-run',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--open-only',action='store_true');p.add_argument('--push-after',type=float,default=None);p.add_argument('--base-push',action='store_true');p.add_argument('--disable-local-contact-ik',action='store_true');p.add_argument('--contact-ik',choices=['finite','analytic'],default='finite');p.add_argument('--adaptive-push-orientation',action='store_true');p.add_argument('--base-follow-handle',action='store_true');p.add_argument('--base-yaw-follow',action='store_true');p.add_argument('--oracle-contact-poses',action='store_true');p.add_argument('--exact-closed-fingers',action='store_true');p.add_argument('--planar-push',action='store_true');p.add_argument('--lateral-base-fraction',type=float,default=.5);p.add_argument('--contact-retreat',action='store_true');p.add_argument('--probe-only',action='store_true');p.add_argument('--release-regrasp',action='store_true');p.add_argument('--debug-stack-interval',type=float,default=0.);p.add_argument('--absolute-open-angle',type=float,default=None,help='Observed angle from the initial panel, including probe motion');p.add_argument('--max-angle',type=float,default=100);p.add_argument('--angle-step',type=float,default=5.);p.add_argument('--orientation-gain',type=float,default=1.);p.add_argument('--probe-distance',type=float,default=.06);p.add_argument('--probe-direction',type=int,choices=[-1,1],default=1);a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+# User rule (2026-11-18): an arm pose with an IK solution is executed without
+# the observed-world collision checks (fix158's fridge close: every push
+# approach refused as 'Contact IK rejected' by them). Self collision, physics
+# and the door-angle checks are unchanged.
+# Push-close only. Opening keeps the checks: with them off, the reach round
+# to the fridge door's inner face after the 25 deg pull swung the door shut
+# (replays of fix162's fridge opening: 25.4 -> 0.1 deg during push_precontact).
+if a.panel_close_reference is not None:
+ ObservedGraspPlanner.ik_only=True;print('DOOR_WORLD_CHECK_OFF',flush=True)
+# Every door move: the hand's short straight contact line onto the leaf is
+# IK-only (free reaches round the leaf stay checked).
+ObservedGraspPlanner.contact_line_ik_only=True;print('DOOR_CONTACT_LINE_CHECK_OFF',flush=True)
 if a.debug_stack_interval>0:
  import faulthandler
  faulthandler.dump_traceback_later(a.debug_stack_interval,repeat=True)
@@ -136,6 +159,24 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    face &= abs((points-current[:3,3])@tangent_local)<.05
    face &= abs(points[:,2]-current[2,3])<.05
    keep &= ~face
+   if push_active and not attached and (a.handle_then_push or a.panel_close_reference is not None):
+    # Pushing an opened leaf from its inner side next to the free edge: the
+    # leaf's own raised rim there (the fridge door's seal frame, 4 cm deep)
+    # moves with the leaf. Kept as a fixed obstacle it blocked the hand's
+    # contact line beside it (fix110: 'Contact-line sweep blocked', door
+    # left at 25 deg). Within the leaf's depth and a hand's reach of the
+    # contact, observed points are the leaf. The same holds for a push-close
+    # (fix125, second microwave close: a 1 cm point 3.6 cm inside the leaf
+    # and 2 cm beside the contact stopped the push after 4.6 deg).
+    rim=abs((points-after.anchor)@after.normal)<LEAF_RIM_DEPTH
+    rim &= abs((points-current[:3,3])@tangent_local)<LEAF_RIM_REACH
+    # Along the leaf's height too: the free edge is one vertical column, and
+    # its points above and below the hand's reach were merged into a 1.1 m
+    # box that still crossed the hand (replay of the fix152 fridge opening:
+    # a 1 cm column 2 cm beside the contact, 0.66-1.75 m high, stopped the
+    # base push at 26 deg).
+    rim &= abs(points[:,2]-current[2,3])<LEAF_RIM_HEIGHT
+    keep &= ~rim
   panel_points=None
   if hinge_data is not None and attached:
    center=np.r_[hinge_data['center_xy'],0.]
@@ -177,8 +218,15 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   # the leaf's back/edge surfaces when closing starts.
   if attached:
    previous_cloud=points.copy();previous_normal=after.normal.copy();previous_anchor=after.anchor.copy()
-  vox=unique_voxels(np.floor(points[keep]/.01).astype(int))
-  boxes=[Cuboid(name=f'observed_{i}',pose=((lo+hi+1)*.005).tolist()+[1.,0.,0.,0.],dims=((hi-lo+1)*.01).tolist()) for i,(lo,hi) in enumerate(merge_occupied(vox))]
+  # 1 cm boxes within 1.2 m of the base (everything the arm, hand and
+  # moving leaf can reach in one step), 2 cm boxes beyond. Far obstacles are
+  # kept, only covered more coarsely. The all-1 cm world reached the
+  # 12,000-box cap mid-swing (fix59 first try, fix64: door left at 30 deg).
+  kept=points[keep];near=np.linalg.norm(kept[:,:2],axis=1)<1.2;boxes=[]
+  for voxel,subset in ((.01,kept[near]),(.02,kept[~near])):
+   if not len(subset):continue
+   for lo,hi in merge_occupied(unique_voxels(np.floor(subset/voxel).astype(int))):
+    boxes.append(Cuboid(name=f'observed_{len(boxes)}',pose=((lo+hi+1)*voxel/2).tolist()+[1.,0.,0.,0.],dims=((hi-lo+1)*voxel).tolist()))
   if len(boxes)>12000:raise RuntimeError('Observed collision capacity exceeded')
   print('COLLISION_WORLD',dict(phase=phase,boxes=len(boxes),moving_panel_points=0 if panel_points is None else len(panel_points),build_seconds=time.monotonic()-planning_started),flush=True)
   # Observed planners check these boxes directly. Upload lazily only if
@@ -493,6 +541,13 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    yaw_target=float(np.arctan2(turn[1,0],turn[0,0]))
   distances=[.04,.02] if a.probe_direction>0 else [-.025,-.05,-.10,-.15]
   push_offset=None
+  if push_goal is not None and push_active and abs(push_goal[2,3]-tcp()[2,3])>.005:
+   # A panel push is planar: the pad slides on a flat door and the base only
+   # moves in the floor plane. Near the end of closing the refitted panel
+   # shifted the goal height by more than 1 cm and the push stopped at about
+   # 20 degrees with 'Base cannot absorb vertical tool motion' (fix77).
+   print('PUSH_GOAL_HEIGHT_KEPT',json.dumps(dict(goal_z=float(push_goal[2,3]),tool_z=float(tcp()[2,3]))),flush=True)
+   push_goal=push_goal.copy();push_goal[2,3]=tcp()[2,3]
   if push_goal is not None:
    distance=-float(np.clip(push_goal[0,3]-tcp()[0,3],-.05,.05))
    if a.planar_push:
@@ -646,14 +701,50 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    points=observe();normal=np.asarray(memory['open_normal'])
    edge=np.asarray(memory['open_handle']);center=np.r_[memory['hinge_xy'],edge[2]]
    toward=center-edge;toward/=np.linalg.norm(toward)
-   before=fit_panel(points,edge+.12*toward+.05*normal,normal,radius=.3,min_gap=-.025)
+   try:before=fit_panel(points,edge+.12*toward+.05*normal,normal,radius=.3,min_gap=-.025)
+   except ValueError:
+    # The door memory is stored at the end of the opening, while the base is
+    # still being pulled back with the moving door filling the camera; the
+    # pose estimate lags there, so the remembered leaf can sit 10-15 cm off
+    # along its own normal (fix98: 14 cm behind the real leaf, no panel
+    # found; fix93 passed 1 mm inside the window). Look for the leaf at
+    # shifted distances along that normal and move the remembered handle and
+    # hinge by what is measured. Only the observed panel decides the shift.
+    before=None
+    for shift in (.05,.10,.15,.20,-.05,-.10):
+     try:before=fit_panel(points,edge+.12*toward+(.05+shift)*normal,normal,radius=.3,min_gap=-.025)
+     except ValueError:continue
+     break
+    if before is None:raise
+    correction=float((before.anchor-edge)@normal)+PANEL_HANDLE_STANDOFF
+    edge=edge+correction*normal;center=center+correction*normal
+    memory['open_handle']=edge.tolist();memory['hinge_xy']=center[:2].tolist()
+    print('PANEL_MEMORY_REREGISTERED',json.dumps(dict(search_shift_m=shift,moved_along_normal_m=round(correction,3))),flush=True)
    after=before;panel_history=[before];panel_offset=0.
    remaining=float(np.arctan2(np.cross(before.normal,memory['closed_normal'])[2],before.normal@memory['closed_normal']))
-   if abs(remaining)<np.deg2rad(2):raise ValueError('Observed door already at closed reference')
+   if abs(remaining)<np.deg2rad(2):
+    # The camera puts the leaf within 2 deg of the remembered closed position,
+    # but the scorer's closed limit is 1.7 deg and the microwave was left 3.5
+    # deg open this way (fix157 call 22: first stroke 8.8 deg short, this
+    # finishing stroke refused). When the caller asks to push past closed,
+    # push that far in the remembered closing direction (from the remembered
+    # leaf to the closed reference, never from this noisy small angle).
+    past=float(memory.get('close_past_reference_degrees',0.))
+    remembered=np.asarray(memory.get('open_normal',before.normal),float)
+    turn=float(np.arctan2(np.cross(remembered,memory['closed_normal'])[2],remembered@memory['closed_normal']))
+    if past<=0. or abs(turn)<np.deg2rad(2):raise ValueError('Observed door already at closed reference')
+    print('PUSH_CLOSE_FINAL_PRESS',json.dumps(dict(observed_remaining_degrees=round(float(np.degrees(remaining)),2),
+          remembered_remaining_degrees=round(float(np.degrees(turn)),2),past_degrees=past)),flush=True)
+    remaining=float(np.sign(turn))*1e-3
    estimate=dict(center_xy=memory['hinge_xy'],radius=float(np.linalg.norm(edge[:2]-center[:2])),observed_angle=float(np.sign(remaining)*1e-6))
    start_T=tcp().copy();start_T[:3,3]=edge;fixed_handle_T=start_T.copy();attached=False
    tangent=np.array([-normal[1],normal[0],0.]);theta=0.
-   a.absolute_open_angle=abs(float(np.degrees(remaining)))
+   # The caller may ask to aim a little past the remembered closed position
+   # so the leaf is pushed against its frame (microwave: aiming exactly at it
+   # left the door 2.0-2.6 deg ajar in four replays). The leaf stops at the
+   # frame inside the 3 deg 'stalled near target' window, which ends the push
+   # after fresh frames confirm it.
+   a.absolute_open_angle=abs(float(np.degrees(remaining)))+float(memory.get('close_past_reference_degrees',0.))
    a.push_after=.001
   elif a.resume_panel_push:
    memory=runtime.door_push_memory.observed
@@ -796,8 +887,18 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
       # A rotating appliance edge can occlude the previous patch. Reacquire
       # an observed neighboring patch using the held handle's measured
       # stand-off, as during the probe; do not synthesize a panel or angle.
-      panel_offset,after=fit_held_panel(points,tcp()[:3,3],expected_tangent,before,
-          start_T[:3,3],expected_normal,panel_offset,min_gap=-.025 if a.probe_direction<0 else .012)
+      try:
+       panel_offset,after=fit_held_panel(points,tcp()[:3,3],expected_tangent,before,
+           start_T[:3,3],expected_normal,panel_offset,min_gap=-.025 if a.probe_direction<0 else .012)
+      except ValueError:
+       # No panel at the hand any more: the handle slid out of the fingers at
+       # the end of the pull (microwave, fix109: tracked to 78.5 deg of 90,
+       # then nothing behind the hand). Within the accepted opening band the
+       # door is open: stop pulling, keep the last tracked panel, release.
+       if a.absolute_open_angle is None or previous_open<np.deg2rad(a.absolute_open_angle-HELD_PANEL_LOST_ACCEPT_DEGREES):raise
+       events.append(dict(phase='held_panel_lost_near_target',angle_degrees=float(np.degrees(previous_open))))
+       print('HELD_PANEL_LOST_NEAR_TARGET',json.dumps(dict(observed_open_degrees=round(float(np.degrees(previous_open)),1),requested_degrees=a.absolute_open_angle)),flush=True)
+       break
       events.append(dict(phase='reacquire_held_panel',offset=panel_offset))
     panel_history.append(after)
     if a.absolute_open_angle is not None:
@@ -835,8 +936,18 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
      stable=stable+1 if last is not None and np.max(abs(fingers-last))<.0002 else 0;last=fingers
      if stable>=10:break
     if not push_active:
-     phase='open_withdraw';goal=tcp().copy();goal[:3,3]+=.06*after.normal
-     move(goal,observe(),0.)
+     # The hand is open and holds nothing. Back out along the panel normal
+     # first; at 90 deg the stretched arm cannot reach 6 cm further out
+     # (fix71: contact-line IK unreachable), so then back off along the
+     # gripper's own axis, then shorter versions of both.
+     phase='open_withdraw';withdraw_from=tcp().copy();tried=[]
+     for distance,axis in ((.06,'panel_normal'),(.06,'gripper_axis'),(.03,'panel_normal'),(.03,'gripper_axis')):
+      goal=withdraw_from.copy();goal[:3,3]+=distance*(after.normal if axis=='panel_normal' else -withdraw_from[:3,2])
+      try:
+       move(goal,observe(),0.)
+       print('OPEN_WITHDRAW',json.dumps(dict(distance=distance,axis=axis,failed_before=tried)),flush=True);break
+      except RuntimeError as failure:tried.append(dict(distance=distance,axis=axis,error=str(failure)[:120]))
+     else:raise RuntimeError('Open withdraw unreachable: '+json.dumps(tried))
     phase='verify_open_released'
     for _ in range(25):execute(q(),0.);open_states.append(snapshot())
    else:
@@ -891,6 +1002,13 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
  except PanelContactReady:
   phase='panel_contact_ready';print('PANEL_CONTACT_READY: returning live control to the caller',flush=True)
  except Exception as exc:error=f'{type(exc).__name__}: {exc}';print(error,flush=True)
+ if error is not None and a.open_only and a.panel_close_reference is None and not push_active and not a.resume_panel_push:
+  # A pull that stops part-way must not leave the hand closed on the handle:
+  # the next skill drives the base away (fix115: opening stopped at 47 deg).
+  try:
+   for _ in range(60):execute(q(),0.)
+   events.append(dict(phase='released_after_error'));print('RELEASED_AFTER_ERROR',flush=True)
+  except Exception as release_error:print('RELEASE_AFTER_ERROR_FAILED',release_error,flush=True)
  if runtime is not None and push_active and 'push_vertices' in globals():
   from cross_episode_sim.control.door_push_memory import DoorPushMemory
   reached=(any(e.get('phase')=='push_contact_selected' for e in events) or a.resume_panel_push)
@@ -918,13 +1036,21 @@ def score(state):
  mujoco.mj_setState(m,private,state,mujoco.mjtState.mjSTATE_INTEGRATION);mujoco.mj_forward(m,private)
  return {m.joint(j).name:dict(position=float(private.qpos[m.jnt_qposadr[j]]),initial=float(private_initial_qpos[m.jnt_qposadr[j]]),limits=m.jnt_range[j].tolist()) for j in hinges}
 result=dict(contact_policy='shared_oracle_endpoint_sweep' if a.shared_oracle_contact else 'dense_sensor_contact',wall_timings=wall_timings,push_after_degrees=a.push_after,push_contact_executed=push_active,success=False,scope='pregrasped hinged interaction experiment',error=error,events=events,simulated_seconds=float(d.time-start),private_final=score(final_state),private_open=score(open_states[-1]) if open_states else {},private_closed=score(closed_states[-1]) if closed_states else {})
-result['observed_current_panel_anchor_base']=after.anchor.tolist()
-result['observed_current_panel_normal_base']=after.normal.tolist()
+# `after` is unset when the very first panel fit failed (isolated replays of
+# fix125's second microwave close): still write the report with its error,
+# so the caller sees the real reason instead of a missing report.
+_panel=globals().get('after')
+result['observed_current_panel_anchor_base']=None if _panel is None else _panel.anchor.tolist()
+result['observed_current_panel_normal_base']=None if _panel is None else _panel.normal.tolist()
 result['contact_control_returned']=phase=='panel_contact_ready'
 result['commands_completed']=error is None
 # Diagnostic contact forces are evaluated only after execution has ended.
 result['observed_open_angle_degrees']=float(abs(np.degrees(np.arctan2(np.cross(before.normal,after.normal)[2],before.normal@after.normal)))) if 'before' in globals() and 'after' in globals() else None
-if error is None and a.open_only and hinge_data is not None:
+if a.open_only and hinge_data is not None and a.panel_close_reference is None and 'before' in globals() and 'after' in globals():
+ # Also after an opening that stopped part-way (pull or inside push): what was
+ # measured of the door is still what the robot knows of it. It decides whether
+ # the door counts as open, is pushed further, and how it is closed later.
+ result['partial_opening']=error is not None
  theta=float(np.arctan2(np.cross(before.normal,after.normal)[2],before.normal@after.normal))
  result['observed_open_handle_base']=arc_pose(start_T,hinge_data['center_xy'],theta)[:3,3].tolist()
  result['observed_hinge_base']=[*hinge_data['center_xy'],float(start_T[2,3])]

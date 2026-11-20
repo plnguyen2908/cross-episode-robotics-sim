@@ -151,7 +151,7 @@ def test_incremental_guard_observes_forward_corridor_without_full_surroundings()
     world=grid.origin+(np.stack((xx,yy),-1)+.5)*grid.config.resolution
     grid.floor_views[(world[:,:,0]>0)&(np.abs(world[:,:,1])<.8)]=2
     guard.layers(np.zeros(2))
-    assert not guard.free[guard.cell(np.zeros(2))]  # Old full-disk erosion fails.
+    assert guard.in_margin  # Full-disk erosion alone leaves this cell outside the free floor.
     assert guard._command_clear(np.zeros(2),0.,np.array([.2,0.]))
     assert not guard._command_clear(np.zeros(2),0.,np.array([-.2,0.]))
 
@@ -425,6 +425,64 @@ def test_frozen_dock_reuses_target_without_semantic_inference():
     assert not nav._reuse_docking_target()
 
 
+def edge_look_navigator(monkeypatch,depths):
+    from cross_episode_sim.navigation.fixed_map import freeze_map
+    from cross_episode_sim.navigation import hybrid_navigation,edge_first
+    monkeypatch.setattr(hybrid_navigation,'edge_first',lambda current,candidates,packet,T:edge_first.edge_first(
+        current,candidates,packet,T,depth=lambda packet,T,position:depths.get(round(float(position[0]),2))))
+    nav=room_entry_navigator();freeze_map(nav.semantic.grid)
+    rear=NS(position=np.array([1.5,0,1]),label='cup',observations=2,last_seen=0.,track_id=0)
+    front=NS(position=np.array([1.25,.15,1]),label='cup',observations=0,last_seen=0.,track_id=0,history=[])
+    stale=NS(position=np.array([1.3,-.2,1]),label='cup',observations=3,last_seen=-5.,track_id=1,history=[{'timestamp':-6.},{'timestamp':-5.}])
+    steps=[]
+    def step(packet,tracking,now):steps.append(now);return dict(status='shape_docking',forward=.1,yaw=0)
+    docking=NS(edge_first=True,target=rear,path=None,terminal=None,velocity=np.zeros(2),started=0.,step=step)
+    docking.reset=lambda target:(setattr(docking,'target',target),setattr(docking,'started',None))
+    pointing=NS(targets=NS(targets=[front,stale]),events=[],last=-1.)
+    def observe(packet,tracking):
+        if packet.timestamp-pointing.last<.8:return
+        pointing.last=packet.timestamp;front.observations+=1;front.last_seen=packet.timestamp
+        front.history.append({'timestamp':packet.timestamp});pointing.events.append(dict(timestamp=packet.timestamp))
+    pointing.observe=observe
+    nav.goal_room='';nav.mode='redock';nav.found_target=rear;nav.docking=docking;nav.pointing=pointing
+    return nav,rear,front,steps
+
+
+def test_edge_instance_is_chosen_before_the_pickup_dock_is_planned(monkeypatch):
+    nav,rear,front,steps=edge_look_navigator(monkeypatch,{1.5:.32,1.25:.05,1.3:.01})
+    times=np.round(np.arange(10.,12.5,.1),2);statuses=[nav.step(packet(t),tracking(),t)['status'] for t in times]
+    # Three pointing rounds from a standstill; the dock planner has not run.
+    look=[s for s in statuses if s.startswith('edge_look')]
+    assert statuses[:len(look)]==look and look[-1]=='edge_look_complete' and len(look) in (18,19)
+    assert steps and steps[0]>=11.7 and nav.docking.target is front and nav.found_target is front
+    events=[e['event'] for e in nav.events]
+    assert events==['edge_look_started','edge_look','prefer_edge_instance']
+    # The remembered instance that was not seen again during the look is not a candidate.
+    assert nav.events[1]['seen']==1 and len(nav.events[1]['instances'])==2
+    # One look per choice: docking then proceeds without further inference.
+    nav.pointing.observe=lambda *args:(_ for _ in ()).throw(AssertionError('Inference while docking'))
+    assert nav.step(packet(12.5),tracking(),12.5)['status']=='shape_docking'
+
+
+def test_edge_look_keeps_the_current_instance_and_its_docking_time(monkeypatch):
+    nav,rear,front,steps=edge_look_navigator(monkeypatch,{1.5:.05,1.25:.07})
+    for t in np.round(np.arange(10.,12.,.1),2):nav.step(packet(t),tracking(),t)
+    assert nav.docking.target is rear and nav.found_target is rear
+    assert 1.7-1e-6<=nav.docking.started<=1.8+1e-6 and [e['event'] for e in nav.events]==['edge_look_started','edge_look']
+
+
+def test_edge_look_is_bounded_and_skipped_outside_the_close_range(monkeypatch):
+    nav,rear,front,steps=edge_look_navigator(monkeypatch,{})
+    nav.pointing.observe=lambda *args:None
+    statuses=[nav.step(packet(t),tracking(),t)['status'] for t in np.round(np.arange(10.,14.3,.1),2)]
+    assert statuses.count('edge_look_complete')==1 and statuses[-1]=='shape_docking' and nav.docking.target is rear
+    assert statuses.index('edge_look_complete')==40
+    for change in (dict(path=[np.zeros(3)]),dict(edge_first=False),dict(target=NS(position=np.array([2.5,0,1]),label='cup',observations=2,last_seen=0.))):
+        nav,rear,front,steps=edge_look_navigator(monkeypatch,{})
+        for key,value in change.items():setattr(nav.docking,key,value)
+        assert nav.step(packet(10.),tracking(),10.)['status']=='shape_docking'
+
+
 def test_room_label_approaches_deeper_observed_viewpoint_before_ring():
     nav=room_entry_navigator()
     result=nav.step(packet(),tracking(),0.)
@@ -509,3 +567,25 @@ def test_shape_cache_reuses_same_observation_but_rechecks_each_motion():
     assert len(calls)==1 and len(sweeps)>3
     nav._shape_command_clear(packet(.1),np.zeros(2),0.,np.array([.1,0.]))
     assert len(calls)==2
+
+
+def test_confirmed_nearby_handle_is_handed_to_the_fixture_redock():
+    from cross_episode_sim.navigation.hybrid_navigation import HybridNavigator
+    from cross_episode_sim.navigation.house_exploration import HouseExplorer,HouseExplorationConfig
+    def navigator(position):
+        grid=ObservedNavigationMap(MapConfig(extent_m=6));grid.floor_views[:]=2
+        target=NS(position=np.array(position),last_seen=0.,observations=2,label='handle on kitchen storage cabinet')
+        semantic=NS(grid=grid,explorer=HouseExplorer(grid,HouseExplorationConfig()),follower=HouseExplorer(grid),targets=NS(targets=[target]),
+                    target_label=target.label,last_mapping={},detection_rounds=3,observe=lambda *args:None)
+        local=NS(guard=semantic.follower,reset_motion=lambda:None,policy=NS(reset=lambda:None),step=lambda *args:dict(status='local_done',forward=0.,yaw=0.))
+        nav=HybridNavigator(semantic,local,NS(current_label='kitchen',update=lambda *args:None),ManipulationReadiness())
+        nav.fixture_handle=True
+        assert nav.step(packet(),tracking(),0.)['status']=='confirm_found_object'
+        target.history=[{'timestamp':.2},{'timestamp':.3}];target.last_seen=.3
+        return nav,nav.step(packet(.3),tracking(),.3)['status']
+    nav,status=navigator([1.4,0.,1.6])
+    assert status=='fixture_handle_found' and nav.terminal=='fixture_handle_found' and nav.object_search_success
+    assert nav.found_target.label=='handle on kitchen storage cabinet'
+    # Farther than the hand-off distance: navigation still approaches first.
+    nav,status=navigator([2.6,0.,.7])
+    assert status=='redock_requested' and nav.terminal is None

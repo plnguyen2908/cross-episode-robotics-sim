@@ -56,8 +56,12 @@ def plan_loaded_stow(planner,joints,posture,held_clear):
     raise RuntimeError(rejected[0]['reason'])
 
 
+# A level held pot at least this high (TCP, m) is kept rather than tipped.
+LEVEL_HOLD_MIN_HEIGHT=1.1
+
+
 def raise_payload_clearance(runtime,tool_points,output,target_height=1.25,lateral_offset=None,
-                            joint_posture=None):
+                            joint_posture=None,keep_level=False):
     output.mkdir(parents=True,exist_ok=False)
     m,d=runtime.model,runtime.data;geometry=RobotGeometry(m);payload=ObservedPayload(geometry,tool_points)
     raw=runtime.sensors.capture();packet=payload.filter_packet(raw);q=packet.arm.position.copy()
@@ -85,18 +89,46 @@ def raise_payload_clearance(runtime,tool_points,output,target_height=1.25,latera
             return True
         path,stow_route=plan_loaded_stow(planner,q,joint_posture,held_clear)
         strategy='loaded_tuck_before_fresh_placement_plan'
-    for pitch in (() if joint_posture is not None else (0.,-30.,30.,-60.,60.,-90.,90.,180.)):
-        rotation=Rotation.from_euler('y',pitch,degrees=True).as_matrix()@tcp[:3,:3]
+    # (pitch, yaw) about world axes. A held pot is an open container: tilting
+    # it with a pitch candidate tipped it 16 -> 83 deg and it slid 24 deg in the
+    # grip (fix179 call 12, pitch -60; it then fell onto the other pot). With
+    # keep_level, turns about the vertical, which leave the pot's tilt unchanged,
+    # are tried before any pitch.
+    pitches=(0.,-30.,30.,-60.,60.,-90.,90.,180.)
+    candidates=[(pitch,0.,float(target[2])) for pitch in pitches]
+    if keep_level:
+        # Level first, then lower lifts that still clear the support (no IK at
+        # 1.3 m for a level downward grip in fix179), then the old pitches.
+        lifts=[float(target[2])]+[h for h in (1.2,1.1) if h<float(target[2])-.05 and h>tcp[2,3]+.05]
+        candidates=[(0.,yaw,h) for h in lifts for yaw in (0.,30.,-30.,60.,-60.,90.,-90.,180.)]
+        if tcp[2,3]>=LEVEL_HOLD_MIN_HEIGHT and lateral_offset is None:
+            # Already well above the cooktop and level: keep this pose instead of
+            # tipping the pot (fix179 pot 2 at 1.18 m: no level IK to 1.3 m;
+            # pitch -60 tipped it to 83 deg and it fell onto the other pot).
+            candidates.append(('hold',0.,float(tcp[2,3])))
+        candidates+=[c for c in [(pitch,0.,float(target[2])) for pitch in pitches[1:]] if abs(c[0])<=30.]
+    rejected=[]
+    for pitch,yaw,height in (() if joint_posture is not None else candidates):
+        if pitch=='hold':
+            print('LEVEL_CLEARANCE_HOLD',json.dumps(dict(tcp_z=round(float(tcp[2,3]),3),rejected=len(rejected))),flush=True)
+            result=dict(success=True,simulated_seconds=0.,reason='level held pose already above support',
+                        strategy='level_current_pose',requested_height=target_height,actual_tcp=tcp[:3,3].tolist())
+            (output/'report.json').write_text(json.dumps(result,indent=2));return result
+        rotation=Rotation.from_euler('z',yaw,degrees=True).as_matrix()@Rotation.from_euler('y',pitch,degrees=True).as_matrix()@tcp[:3,:3]
         for forward in (float(target[0]),.20,.35):
-            goal=target.copy();goal[0]=forward
+            goal=target.copy();goal[0]=forward;goal[2]=height
             try:
                 candidate=planner.plan(q,goal,rotation)
                 for joints in candidate:
                     T=geometry.tcp_pose(joints);xyz=tool_points[::max(1,len(tool_points)//200)]@T[:3,:3].T+T[:3,3]
                     if not planner.world_clear(np.c_[xyz,np.full(len(xyz),.006)][None],margin=.002):raise RuntimeError('Held surface blocks candidate')
-                path=candidate;strategy='observed_clearance_pose';print('CLEARANCE_POSE',goal.tolist(),pitch,flush=True);break
-            except RuntimeError:continue
+                path=candidate;strategy='observed_clearance_pose';print('CLEARANCE_POSE',goal.tolist(),pitch,*((yaw,height) if keep_level else ()),flush=True);break
+            except RuntimeError as exc:rejected.append((pitch,yaw,height,round(forward,2),str(exc)[:40]));continue
         if path is not None:break
+    if keep_level and rejected:
+        summary={}
+        for pitch,yaw,height,_,reason in rejected:summary.setdefault(f'pitch {pitch} lift {height:g}',{}).setdefault(reason,0);summary[f'pitch {pitch} lift {height:g}'][reason]+=1
+        print('LEVEL_CLEARANCE_REJECTED',json.dumps(dict(start_tcp_z=round(float(tcp[2,3]),3),rejected=summary)),flush=True)
     if path is None:raise RuntimeError('No observed clear raised carry pose')
     for joints in path:
         T=geometry.tcp_pose(joints);xyz=tool_points[::max(1,len(tool_points)//200)]@T[:3,:3].T+T[:3,3]

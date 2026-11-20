@@ -18,6 +18,10 @@ from ..runtime import artifacts
 from ..skills.m2t2_interface import M2T2SkillInterface, SkillOutcome
 
 
+# Sideways shifts (m, away from the opened leaf) tried for the loaded approach to the
+# microwave when no centred stand spot has a route.
+MICROWAVE_APPROACH_SHIFTS=(.06,.10,.14)
+
 class HouseholdSession(PickSession):
     def __init__(self, *args, held=None, stove_convention=False, max_place_candidates=0, interactive_doors=True, **kwargs):
         super().__init__(*args, **kwargs)
@@ -201,7 +205,7 @@ class HouseholdSession(PickSession):
             dock_options={} if lateral_offset is None else dict(lateral_offset=lateral_offset)
             semantic = 'handle on '+target if purpose == 'handle' and 'knob' not in target else target
             result=super().move(semantic, purpose, distance, name,**dock_options)
-            part=result.get('collision_detail',{}).get('part','')
+            part=(result.get('collision_detail') or {}).get('part','')
             if (not result.get('success') and result.get('reason')=='no_observed_collision_clear_local_route'
                     and part.startswith('robot_0/fr3_link')):
                 from ..control.fixture_posture import stow_after_fixture
@@ -226,8 +230,24 @@ class HouseholdSession(PickSession):
                 # the nearest lateral alternative can leave the support 30 cm
                 # sideways even though the base route itself is collision-free.
                 options={'offsets':(0.,)} if target=='microwave' else {}
-                result=dock_to_aperture(self.runtime,aperture,self.held_points(),root/'motion',
-                                       distances=(.65,.60,.70,.55),multi_goal=True,**options)
+                try:
+                    result=dock_to_aperture(self.runtime,aperture,self.held_points(),root/'motion',
+                                           distances=(.65,.60,.70,.55),multi_goal=True,**options)
+                except RuntimeError as exc:
+                    if target!='microwave' or 'No loaded aperture-facing dock' not in str(exc):raise
+                    # No route to any centred stand spot: with the food held
+                    # the raised upper arm is 20 cm beside the base, where the
+                    # opened door leaf stands (fix128, fix134: door at about
+                    # 85 deg, every centred spot refused). Stand a little to
+                    # the side away from the leaf instead; the placement
+                    # itself re-docks by the measured centre afterwards.
+                    from ..runtime.household_components import away_from_open_leaf
+                    side=away_from_open_leaf(aperture)
+                    print('MICROWAVE_APPROACH_SHIFTED',__import__('json').dumps(dict(after=str(exc)[:80],
+                        offsets_m=[side*k for k in MICROWAVE_APPROACH_SHIFTS])),flush=True)
+                    result=dock_to_aperture(self.runtime,aperture,self.held_points(),root/'motion_shifted',
+                                           distances=(.65,.60,.70,.55),multi_goal=True,
+                                           offsets=tuple(side*k for k in MICROWAVE_APPROACH_SHIFTS))
             else:
                 result = approach_receptacle(self.runtime, target, root/'motion', self.held_points())
         elif purpose == 'place':

@@ -57,3 +57,23 @@ def test_room_transit_turn_does_not_chase_small_localization_jitter():
         speed,_=f.command(np.array([0.,-.06,yaw]))
         if len(f.route)==2:assert speed==0.
     assert len(f.route)==1
+
+
+def test_route_time_counts_the_slow_down_at_every_waypoint():
+    from cross_episode_sim.navigation.dock_follower import route_seconds
+    start=np.zeros(3)
+    direct=[np.array([1.,0.,0.])];stepped=[np.array([x,0.,0.]) for x in np.arange(.1,1.01,.1)]
+    assert 1./.08<route_seconds(direct,start)<20.
+    assert route_seconds(stepped,start)>1.5*route_seconds(direct,start)
+    assert route_seconds([],start)==0.
+
+
+def test_dock_budget_follows_the_route_and_stays_bounded():
+    from cross_episode_sim.navigation.dock_follower import route_seconds,tick_budget
+    start=np.zeros(3);short=[np.array([.3,0.,0.])]
+    detour=[np.array([x,0.,0.]) for x in np.arange(.1,3.01,.1)]+[np.array([3.,0.,np.pi/2])]
+    assert tick_budget(short,start,0,3000)==3000  # A short dock keeps the 60 s it always had.
+    granted=tick_budget(detour,start,25,3000)
+    assert granted==25+int(50*(1.5*route_seconds(detour,start)+10.))>3000
+    assert tick_budget(short,start,4000,granted)==granted  # A replan never shortens it.
+    assert tick_budget(detour,start,14000,granted)==15000  # Repeated replans end at the ceiling.

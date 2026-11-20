@@ -8,6 +8,15 @@ from .local_scan import ScanConfig
 class OneRingProcess:
     def __init__(self,checkpoint,output,device='cuda:0',seed=0,max_steps=600,root=None):
         from cross_episode_sim.perception.rpc import configured_client
+        # Fix 34 (user decision, November 13, 2026): the learned One-Ring policy
+        # is out of the default pipeline. In-room search is a fixed in-place
+        # turn; the motion guard, stall recovery to another viewpoint and the
+        # pointing hand-off are unchanged. The learned policy runs only when an
+        # `onering` service address is configured explicitly.
+        if json.loads(os.environ.get('SENSOR_MODEL_ENDPOINTS','{}')).get('onering') in (None,'','scan'):
+            self.remote=None;self.scan=True
+            self.output=Path(output).resolve();self.output.mkdir(parents=True,exist_ok=False)
+            self.count=0;self.metadata={'transport':'scan'};return
         self.remote=configured_client('onering')
         if self.remote is not None:
             self.output=Path(output).resolve();self.output.mkdir(parents=True,exist_ok=False)
@@ -31,11 +40,16 @@ class OneRingProcess:
     def _request(self,value):
         self.process.stdin.write(json.dumps(value)+'\n');self.process.stdin.flush();return self._read()
     def reset(self):
+        if getattr(self,'scan',False):return None
         if self.remote is not None:return self.remote.call(operation='reset')
         return self._request(dict(reset=True))
     def predict(self,packet,goal):
         from cross_episode_sim.perception.target_language import visual_target_text
         goal=visual_target_text(goal)
+        if getattr(self,'scan',False):
+            self.count+=1
+            with open(self.output/'predictions.jsonl','a') as f:f.write(json.dumps(dict(timestamp=packet.timestamp,goal=goal,action='r',transport='scan'))+'\n')
+            return 'r'
         if self.remote is not None:
             action=self.remote.call(timestamp=packet.timestamp,goal=goal,navigation=packet.cameras['navigation'].rgb,wrist=packet.cameras['wrist'].rgb)
             self.count+=1

@@ -21,7 +21,8 @@ def test_confined_pick_returns_actual_backend_output_and_preserves_memory(tmp_pa
     save_memory(previous,memory)
     calls=[]
     session=SimpleNamespace(last_pick_output=physics,
-        execute_skill=lambda name,args:calls.append((name,args)) or dict(success=success))
+        execute_skill=lambda name,args:calls.append((name,args)) or dict(success=success),
+        redock=lambda *a:dict(success=True))       # a failed look steps closer before the next one
     monkeypatch.setattr(components,'live_session',lambda *a,**k:session)
     runtime=SimpleNamespace(qwen_docking=False)
     outcome,output=components.pick_confined(runtime,tmp_path/'component',previous,None,
@@ -34,7 +35,8 @@ def test_confined_pick_returns_actual_backend_output_and_preserves_memory(tmp_pa
 
 
 def test_preparation_failure_does_not_fabricate_pick_handoff(tmp_path,monkeypatch):
-    session=SimpleNamespace(execute_skill=lambda *a:dict(success=False,reason='no_grasp_proposals'))
+    session=SimpleNamespace(execute_skill=lambda *a:dict(success=False,reason='no_grasp_proposals'),
+                            redock=lambda *a:dict(success=True))
     monkeypatch.setattr(components,'live_session',lambda *a,**k:session)
     outcome,output=components.pick_confined(SimpleNamespace(),tmp_path,tmp_path,None,
                                             'food container inside microwave')
@@ -132,3 +134,17 @@ def test_appliance_panel_never_extruded_to_floor():
     # A room door does retain its actually seen low obstacle samples.
     room=np.array([[.2,0.,.06],[.2,0.,1.2]])
     np.testing.assert_allclose(observed_open_panel_points(room,aperture),room)
+
+
+def test_microwave_oracle_standoff_from_the_observed_cavity_floor():
+    import numpy as np
+    from cross_episode_sim.runtime.household_components import floor_front_distance,oracle_redock_distance
+    x,y=np.meshgrid(np.linspace(.72,1.02,20),np.linspace(-.15,.15,20))
+    floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,.95)]
+    front=floor_front_distance(floor)
+    assert abs(front-.735)<.01
+    # Floor front 0.735 m ahead from a 0.60 m dock: stand 0.235 m closer to reach 0.50 m, floored at 0.35 m.
+    assert oracle_redock_distance(front)==.365 or abs(oracle_redock_distance(front)-.365)<.01
+    assert oracle_redock_distance(.95)==.35
+    assert oracle_redock_distance(.52) is None and oracle_redock_distance(None) is None
+    assert floor_front_distance(floor[:10]) is None

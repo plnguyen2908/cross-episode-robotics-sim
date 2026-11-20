@@ -41,14 +41,15 @@ def main(*, docking_factory=None, pointing_factory=None):
     p.add_argument('--pointing-device',default=None,help='Enable experimental Molmo2 supervised handoff on this device')
     p.add_argument('--ring-device',default='cuda:0')
     p.add_argument('--station-exploration',action='store_true',help='Explore using only cached kitchen and dining-table landmarks')
+    p.add_argument('--no-cabinet-survey',action='store_true',help='Skip the whole-kitchen cabinet survey (door already opened by this robot)')
     p.add_argument('--route-station',default=None,help='Semantic station for a successful local approach in the episode route graph')
     p.add_argument('--record-furniture-device',default=None,help='Label observed furniture during exploration using Molmo2 on this device')
     p.add_argument('--record-room-memory',action='store_true',help='Record visually confirmed room labels during empty-hand exploration')
     p.add_argument('--goal-room',default='kitchen',help='Visual room category; empty string skips room search for local tests')
     p.add_argument("--map-resolution",type=float,default=.10,help="Observed collision-map voxel size in metres")
     a=p.parse_args()
-    if a.navigation_mode=='hybrid' and (a.perception!='daaam' or a.vlm_url or not a.ring_checkpoint):
-        p.error('Hybrid navigation requires DAAAM, local Qwen and --ring-checkpoint')
+    if a.navigation_mode=='hybrid' and (a.perception!='daaam' or a.vlm_url):
+        p.error('Hybrid navigation requires DAAAM and local Qwen')
     if a.object_map=='hydra' and (a.target not in ('cup','bowl') or a.perception!='daaam'):
         p.error('Hydra object navigation requires DAAAM masks and a cup/bowl target; use --object-map visual for the ablation.')
     if a.preserve_initial_state and (a.initial_backoff or a.initial_yaw_offset):
@@ -123,10 +124,15 @@ def main(*, docking_factory=None, pointing_factory=None):
         # margin does not establish actual object approach feasibility.
         readiness=ManipulationReadiness(distance_band=(.50,.72))
         motion_policy=HybridNavigator(policy,local,ObservedRoomMemory(vlm,remembered=memory['rooms']),readiness,a.goal_room,docking=docking)
+        motion_policy.fixture_handle=a.target.startswith('handle on ')
+        motion_policy.confined_target=a.target.endswith((' inside fridge',' inside microwave'))
     if a.pointing_device:
         if a.navigation_mode!='hybrid':raise ValueError('Pointing supervisor requires hybrid navigation')
         from cross_episode_sim.perception.molmo_pointing import MolmoPointer,PointingSupervisor
-        motion_policy.pointing=(pointing_factory or PointingSupervisor)(MolmoPointer(device=a.pointing_device),detector.segmenter,a.target)
+        from cross_episode_sim.perception.vessel_verification import VESSELS,VerifiedVesselSupervisor
+        # Molmo2 confuses bowls with cups standing next to them; confirm each pointed vessel.
+        default_supervisor=VerifiedVesselSupervisor if a.target in VESSELS else PointingSupervisor
+        motion_policy.pointing=(pointing_factory or default_supervisor)(MolmoPointer(device=a.pointing_device),detector.segmenter,a.target)
     survey_rooms=None
     if a.record_room_memory:
         if a.perception!='daaam':raise ValueError('Room memory requires the local VLM')
@@ -143,6 +149,12 @@ def main(*, docking_factory=None, pointing_factory=None):
         policy=StationExplorer(grid,furniture,explorer,config,a.preferred_distance)
         motion_policy=policy
     start=float(data.time);wall=time.monotonic();truth=[];last_status=None;last_saved_detection=None
+    # A fresh tracker has no map and needs a first view; a continuation resumes
+    # one and only looks back for a stored view after losing tracking.
+    from cross_episode_sim.navigation.startup_look import StartupLook
+    startup_look=StartupLook(tracked=bool(a.continuation))
+    from cross_episode_sim.navigation.cabinet_survey import CabinetSurvey
+    survey=CabinetSurvey(a.target) if (CabinetSurvey.applies(a.target) and getattr(motion_policy,'pointing',None) is not None and not a.no_cabinet_survey) else None
     (a.output/'detections').mkdir()
     # Navigation needs an occupancy map, not diagnostic 3D scene exports.
     hydra_frames=None
@@ -157,7 +169,13 @@ def main(*, docking_factory=None, pointing_factory=None):
                     grid.update(packet.cameras['navigation'],tracking);grid.update_support(packet.cameras['wrist'],tracking)
                 if survey_rooms is not None:survey_rooms.update(packet,tracking,[])
                 if furniture is not None:furniture.observe(packet,tracking)
-            command=motion_policy.step(packet,tracking,float(data.time))
+            if survey is not None and not survey.done and tick%5==0:
+                command=survey.step(dict(status='cabinet_survey',forward=0.,yaw=0.),packet,tracking,float(data.time),motion_policy.pointing,motion_policy)
+            elif survey is not None and not survey.done:
+                command=dict(command,forward=0.,yaw=survey.velocity)
+            else:
+                command=motion_policy.step(packet,tracking,float(data.time))
+            command=startup_look.step(command,packet,tracking,float(data.time))
             if tick%5==0:
                 row=dict(time=float(data.time-start),mode=motion_policy.mode,object_search_success=getattr(motion_policy,'object_search_success',False),**command,estimated_position=tracking.T_map_base[:2,3].tolist() if tracking.accepted else None,targets=[dict(id=t.track_id,label=t.label,position=t.position.tolist(),observations=t.observations) for t in policy.targets.targets])
                 log.write(json.dumps(row)+'\n');truth.append(data.xpos[model.body('robot_0/base').id].copy())
@@ -184,8 +202,8 @@ def main(*, docking_factory=None, pointing_factory=None):
     artifacts.save_array(a.output/'diagnostic_positions.npy',truth)
     selected=getattr(motion_policy,'found_target',None) or policy.follower.target
     handoff=None if selected is None else dict(native_id=selected.native_id,label=selected.label,position=selected.position.tolist(),frame='estimated_slam_map',last_observed=selected.last_seen,grasp_ready=False)
-    report=dict(pointing_events=getattr(getattr(motion_policy,'pointing',None),'events',[]),fixed_map_unchanged=map_digest(grid)==frozen_digest if a.fixed_map else None,exploration_request=command.get('exploration_request'),selected_object=handoff,status=motion_policy.terminal,target=a.target,object_map=a.object_map,simulated_seconds=float(data.time-start),wall_seconds=time.monotonic()-wall,
-        sensor_navigation_success=(motion_policy.terminal in {'target_reached','manipulation_ready','stations_explored'} or getattr(motion_policy,'docking_success',False)) and not audit.events,
+    report=dict(cabinet_survey=None if survey is None else survey.summary,startup_look=startup_look.summary(),pointing_events=getattr(getattr(motion_policy,'pointing',None),'events',[]),fixed_map_unchanged=map_digest(grid)==frozen_digest if a.fixed_map else None,exploration_request=command.get('exploration_request'),selected_object=handoff,status=motion_policy.terminal,target=a.target,object_map=a.object_map,simulated_seconds=float(data.time-start),wall_seconds=time.monotonic()-wall,
+        sensor_navigation_success=(motion_policy.terminal in {'target_reached','manipulation_ready','stations_explored','fixture_handle_found','confined_target_found'} or getattr(motion_policy,'docking_success',False)) and not audit.events,
         detection_wall_seconds=policy.detection_wall_seconds,detection_calls=policy.detection_calls,map_guided_proposals=getattr(detector,'guided_proposal_count',0),
         external_contact_events=list(audit.events.values()),routes=policy.follower.events,
         targets=[{**asdict(t),'position':t.position.tolist()} for t in policy.targets.targets],

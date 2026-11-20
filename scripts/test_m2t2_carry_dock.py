@@ -108,9 +108,14 @@ def measured(name,fn,*args,**kwargs):
 original_audit=audit.observe
 def timed_audit(data):return measured('contact_audit_nested',original_audit,data)
 audit.observe=timed_audit
+from cross_episode_sim.control.grip_retention import GripRetention
+grip_retention=GripRetention(gripper_joints)
 start=d.time;wall=time.monotonic();status='running';rows=[];map_ready=False
 with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'state_recording') as recording,open(a.output/'progress.jsonl','w',buffering=1) as log:
  for tick in trange(round(a.seconds*50),desc='Carry and dock'):
+  if grip_retention.lost({name:float(d.joint(name).qpos[0]) for name in gripper_joints}):
+   # The fingers have run on to their stop: nothing is carried any more.
+   status='held_object_lost';guard_detail={'reason':'finger_configuration_changed'};print('CARRY_HELD_OBJECT_LOST',flush=True);break
   if tick%5==0:
    raw=measured('camera_capture',sensors.capture,include_robot_mask=CROSS_ROOM_ROBOT_MASK)
    # Reuse the observed pre-grasp surface attached by the executed grasp.

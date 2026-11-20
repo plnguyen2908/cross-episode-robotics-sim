@@ -83,6 +83,8 @@ class QwenSkillInterface:
             if not isinstance(target, str) or not target.strip():
                 raise ValueError('This skill needs an explicit semantic redock_target')
             purpose = 'place' if name == 'place' else 'pick' if name == 'pick' else 'handle'
+            if hasattr(self.redock, 'next_skill'):
+                self.redock.next_skill = name
             try:
                 dock_result = self.redock(target=target, purpose=purpose, distance=options.get('redock_distance'))
             except RuntimeError as exc:

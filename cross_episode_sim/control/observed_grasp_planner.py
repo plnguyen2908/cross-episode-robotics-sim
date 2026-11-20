@@ -71,6 +71,9 @@ class ObservedGraspPlanner:
         return self.world_clear(spheres,margin)
 
     def world_clear(self,spheres,margin=.005):
+        # Set only by the pick script for picks inside an appliance (user rule:
+        # reachable by IK is enough there). Self collision is still checked.
+        if getattr(self,'ik_only',False):return True
         # No static boxes says nothing about self collision or the moving panel;
         # those are checked independently by clear()/ObservedHingedPlanner.
         if not len(self.boxes):return True
@@ -154,6 +157,7 @@ class ObservedGraspPlanner:
 
     def world_clear_box(self,box,margin=.005):
         """Exact OBB separating-axis test; retain payload padding and margin."""
+        if getattr(self,'ik_only',False):return True      # user rule: IK found is enough (2026-11-18)
         if not len(self.boxes):return True
         # Conservative bounding-sphere broad phase before exact OBB SAT.
         if not hasattr(self,'_box_world_groups'):

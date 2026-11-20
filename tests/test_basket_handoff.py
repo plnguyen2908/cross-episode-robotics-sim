@@ -127,8 +127,9 @@ def test_hidden_floor_recovery_only_after_real_dock_and_fresh_failure(tmp_path,m
     pipeline=Pipeline()
     placed,_=place_in_basket(pipeline,tmp_path,carry,'purple basket','inside bottom','kitchen',2,lambda *a:None)
     assert events.index(('posture',-.25))>events.index(('stage','2_place'))>events.index(('stage','2_place_dock'))
-    assert placed.name=='place_reobserve_0'
-    assert pipeline.stages[2]['recovered_by']=='2_place_reobserve_0'
+    # The place is tried first from the raised arm that just showed the interior.
+    assert placed.name=='place_revealed_0'
+    assert pipeline.stages[2]['recovered_by']=='2_place_revealed_0'
 
 
 def test_recovery_redocks_from_revealed_interior_before_replanning(tmp_path,monkeypatch):
@@ -147,4 +148,4 @@ def test_recovery_redocks_from_revealed_interior_before_replanning(tmp_path,monk
             success=name!='2_place';self.stages.append(dict(name=name,success=success))
             report.write_text(json.dumps({success_key:success,'phase':'observe'}))
     place_in_basket(Pipeline(),tmp_path,carry,'purple basket','inside bottom','kitchen',2,lambda *a:None)
-    assert events.index(('arm',-.25)) < events.index(('refine','basket_recovery_0')) < events.index(('stage','2_place_reobserve_0'))
+    assert events.index(('arm',-.25)) < events.index(('refine','basket_recovery_0')) < events.index(('stage','2_place_revealed_0'))

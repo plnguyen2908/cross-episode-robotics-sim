@@ -70,7 +70,9 @@ def execution_guard(forward,yaw,dt):
  return ok
 base=OnboardBaseActuator(m,d,motion_guard=execution_guard);start=d.time;success=False;error=None
 with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'state_recording') as recording:
- for tick in range(3000):
+ # 60 s unless a planned route needs longer at the follower's speed limits.
+ budget=3000;budgets=[];tick=-1
+ while (tick:=tick+1)<budget:
   if tick%5==0:
    raw=sensors.capture();packet=payload.filter_packet(raw);tracking=slam.update(packet.cameras['navigation'],packet.timestamp)
    recording.record_map(grid,tracking,'placement_docking')
@@ -126,6 +128,10 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
     error='No observed collision-clear route to a facing dock';break
    target=chosen_targets[tuple(dock.goal)]
    route=list(dock.path);follower=DockFollower(route)
+   from cross_episode_sim.navigation.dock_follower import route_seconds,tick_budget
+   budget=tick_budget(route,pose,tick,budget)
+   budgets.append(dict(simulated_seconds=tick/50,route_seconds=route_seconds(route,pose),budget_seconds=budget/50))
+   print('DOCK_TIME_BUDGET',json.dumps(budgets[-1]),flush=True)
    print('LOADED_ROUTE', [v.tolist() for v in route],flush=True)
   try:speed,yaw=follower.command(pose)
   except RuntimeError as e:
@@ -151,6 +157,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    continue
   try:base.step(speed,yaw,diagnostic_observer=audit.observe)
   except RuntimeError as e:error=str(e);break
+ else:error=f'Dock time budget of {budget/50:.0f} s exhausted'
 
 cp=a.output/'private_checkpoint';cp.mkdir();artifacts.save_model(m,str(cp/'model.mjb'),None);spec=mujoco.mjtState.mjSTATE_INTEGRATION;state=np.empty(mujoco.mj_stateSize(m,spec));mujoco.mj_getState(m,d,state,spec);artifacts.save_array(cp/'state.npy',state);artifacts.save_array(a.output/'observed_payload_tool.npy',tool)
 grid.save(a.output);slam.save(a.output/'slam')
@@ -172,6 +179,7 @@ if success:
   station=perception_report.get('station') or (arrival.get('selected_object') or {}).get('label','dining table')
   route_memory.record_dock(slam.trajectory,slam.anchor,station)
 report=dict(semantic_receptacle=json.loads(artifacts.read_text(a.perception/'report.json')).get('semantic_receptacle'),fixed_map_unchanged=unchanged,initial_map_sha256=frozen_digest,final_map_sha256=map_digest(grid),wall_seconds=time.monotonic()-wall_start,dense_fusion=False,private_hold_retained=retained,contact_diagnostics=list(audit.events.values()),placement_target_base=target_base[:3].tolist(),docking_heading_error_rad=heading_error,docking_success=success,error=error,guard_detail=detail,target_observed=target.tolist(),selected_dock_pose=None if getattr(dock,'goal',None) is None else dock.goal.tolist(),simulated_seconds=float(d.time-start),route_events=dock.events,scope='Observed A-star local redock from supplied physical checkpoint; cross-room navigation scored separately.')
+report['time_budgets']=budgets
 report.update(docking_policy='qwen_ranked_observed_candidates',qwen_selections=dock_selections,
     observed_front=front,frontal_docking=front is not None,
     pre_dock_arm_ik=False,fresh_manipulation_observation_required=True,

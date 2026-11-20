@@ -10,12 +10,30 @@ from scipy.ndimage import distance_transform_edt
 from .house_exploration import HouseExplorationConfig
 
 
-def reverse_approach(grid, poses, current, free, max_distance=1.5):
+def without_backtracking(route, radius=.05):
+    """Drop excursions that return to within radius of an earlier sample.
+
+    Redocking corrections move the base a few centimeters back and forth. Every
+    kept point is still a recorded position, at most radius from the last one.
+    """
+    route=np.asarray(route);keep=[0]
+    while keep[-1]<len(route)-1:
+        i=keep[-1];near=np.flatnonzero(np.linalg.norm(route[i+1:]-route[i],axis=1)<radius)
+        keep.append(i+1+int(near[-1]) if len(near) else i+1)
+    return route[keep]
+
+
+def reverse_approach(grid, poses, current, free, max_distance=6., margin=.06):
     """Select the recent continuous approach back to the transit region.
 
     Input poses are chronological onboard SLAM estimates in the map frame.
     Clearance is used to select an endpoint, not to veto the traveled segment.
     No map pixels are cleared and no simulator coordinates are consumed.
+    The endpoint lies more than margin inside the region.
+
+    An approach along a long table stays outside the transit region for
+    meters (5-room grocery fix run 7, call 4: 2.8 m), so the limit only
+    bounds the search. It counts traveled distance, corrections included.
     """
     if not len(poses):
         return None
@@ -23,7 +41,7 @@ def reverse_approach(grid, poses, current, free, max_distance=1.5):
     if np.linalg.norm(points[-1]-current[:2])>.2:
         return None  # Not an approach ending at this dock.
     clearance=distance_transform_edt(np.pad(free,1))[1:-1,1:-1]*grid.config.resolution
-    interior=free & (clearance>.06)
+    interior=free & (clearance>margin)
     route=[np.asarray(current[:2]).copy()];distance=0.
     for point in points[::-1]:
         step=float(np.linalg.norm(point-route[-1]))
@@ -38,8 +56,11 @@ def reverse_approach(grid, poses, current, free, max_distance=1.5):
         col,row=grid.world_to_cell(point)
         if (0<=row<free.shape[0] and 0<=col<free.shape[1] and
                 interior[row,col] and distance>=.1):
-            return np.asarray(route)
+            return without_backtracking(route)
     return None
+
+
+STOP_TOLERANCE=.04  # the retrace ends this close to the path's endpoint
 
 
 class RecordedPathFollower:
@@ -54,7 +75,7 @@ class RecordedPathFollower:
     endpoint is an open-floor connection, not a parking pose.
     """
     def __init__(self, path, max_speed, max_yaw_speed, approach_gain,
-                 lookahead=.15, tolerance=.04, drive_angle=.25):
+                 lookahead=.15, tolerance=STOP_TOLERANCE, drive_angle=.25):
         self.path=np.asarray(path,float)
         self.arclength=np.r_[0.,np.cumsum(np.linalg.norm(np.diff(self.path,axis=0),axis=1))]
         self.max_speed=float(max_speed);self.max_yaw_speed=float(max_yaw_speed)
@@ -66,6 +87,11 @@ class RecordedPathFollower:
 
     @property
     def complete(self):return self.remaining<self.tolerance
+
+    def extend(self, distance):
+        """Lengthen the path along its last direction."""
+        self.path=np.vstack([self.path,self.point(self.arclength[-1]+distance)])
+        self.arclength=np.r_[self.arclength,self.arclength[-1]+distance]
 
     def point(self, distance):
         last=self.path[-1]-self.path[-2]
@@ -127,12 +153,31 @@ def recorded_fallback(undock, grid):
 
 
 class RecordedDeparture:
+    """Retrace the approach until the base stands in the transit region.
+
+    Transit planning starts from the cell under the base, so stopping within
+    the follower's tolerance of an endpoint that is barely inside the region
+    can leave the base one cell short of it (set-table fix run 6, call 8:
+    clearance .559 m where transit needs more than .56 m). The endpoint is
+    therefore chosen deep enough that any stop within tolerance is inside, and
+    a stop that still falls short continues a bounded distance along the
+    path's last direction.
+    """
+    # Beyond the endpoint the base moves over floor it has not retraced. The
+    # endpoint is a transit cell, so mapped obstacles are farther from it than
+    # the transit clearance; the overrun must leave the base footprint clear.
+    max_overrun=.15
+
     def __init__(self, grid, approach_poses=None):
         self.grid=grid;self.approach_poses=approach_poses
         self.follower=None;self.error=None;self.runtime_collision_stop=False
         self.docking=SimpleNamespace(events=[],checker=None)
         self.velocity=np.zeros(2);self.config=HouseExplorationConfig()
-        self.goal=None;self.started=None
+        self.goal=None;self.started=None;self.overrun=0.
+
+    def _inside(self,xy,free):
+        col,row=self.grid.world_to_cell(xy)
+        return bool(0<=row<free.shape[0] and 0<=col<free.shape[1] and free[row,col])
 
     def step(self,packet,tracking,free,now):
         stop=lambda status:dict(status=status,forward=0.,yaw=0.)
@@ -142,7 +187,13 @@ class RecordedDeparture:
         pose=np.r_[T[:2,3],np.arctan2(T[1,0],T[0,0])]
         if self.follower is None:
             history=live_approach(tracking) if self.approach_poses is None else self.approach_poses
-            path=reverse_approach(self.grid,history,pose,free)
+            # A stop within tolerance of the endpoint may fall in any cell
+            # whose center is within tolerance plus one cell diagonal of the
+            # endpoint cell's center.
+            deep=STOP_TOLERANCE+np.sqrt(2)*self.grid.config.resolution
+            path=reverse_approach(self.grid,history,pose,free,margin=deep)
+            if path is None:  # a narrow region may hold no such sample
+                path=reverse_approach(self.grid,history,pose,free)
             if path is None:
                 self.error='recorded_departure_unavailable'
                 return stop(self.error)
@@ -158,5 +209,14 @@ class RecordedDeparture:
         limit=np.array([self.config.acceleration,self.config.yaw_acceleration])*.02
         self.velocity+=np.clip(desired-self.velocity,-limit,limit)
         done=self.follower.complete and np.max(np.abs(self.velocity))<1e-8
+        if done and not self._inside(pose[:2],free):
+            step=self.grid.config.resolution
+            if self.overrun+step>self.max_overrun+1e-9:
+                self.error='recorded_departure_short_of_transit'
+                self.docking.events.append(dict(event=self.error,position=pose[:2].tolist(),overrun=self.overrun))
+                return stop(self.error)
+            self.follower.extend(step);self.overrun=round(self.overrun+step,6);done=False
+            self.docking.events.append(dict(event='continue_to_transit_region',time=float(now),
+                position=pose[:2].tolist(),overrun=self.overrun))
         return dict(status='undock_complete' if done else 'reverse_recorded_approach',
                     forward=float(self.velocity[0]),yaw=float(self.velocity[1]))

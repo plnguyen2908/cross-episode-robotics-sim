@@ -23,8 +23,13 @@ from cross_episode_sim.control.onboard_base import OnboardBaseActuator
 
 
 def setup(source, initial_backoff=0., preserve_initial_state=False):
-    m=mujoco.MjModel.from_binary_path(str(source/'action_recording/model.mjb'));d=mujoco.MjData(m)
-    with np.load(source/'action_recording/initial_state.npz') as x:mujoco.mj_setState(m,d,x['state'],int(x['state_type']))
+    # One evaluation platform: the same loader as the agent-policy (GPT) and
+    # replay-scoring paths (every fixture articulated, two-knob stove, saved
+    # visual settings). fix171/fix172 loaded the raw saved model here instead.
+    from cross_episode_sim.evaluation.articulated_scene import load_saved_scene
+    import json as _json
+    m,d,report=load_saved_scene(source)
+    print('EVAL_SCENE',_json.dumps({k:v for k,v in report.items() if k!='added_joints'}),flush=True)
     if preserve_initial_state:
         if initial_backoff:
             raise ValueError('Saved-state evaluation cannot apply an initial backoff')
