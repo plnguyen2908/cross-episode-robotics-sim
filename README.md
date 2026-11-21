@@ -16,8 +16,8 @@ private task scorer gives success and a progress rate. Details: [docs/qwen_zero_
 
 | | |
 |---|---|
-| GPUs | **2 × 80 GB** (A100/H100) on one node: one runs the model services (~41 GB), the other runs up to 8 episodes at once (~1.2 GB each). With 24 GB GPUs: 2 for services + 1 per running episode. |
-| CPU / RAM | ~10 cores and ~6 GB RAM per running episode (8 episodes: **96 cores, 128 GB**) |
+| GPUs (80 GB A100/H100, one node) — choose a layout | **A. Own services per episode (recommended): 8 GPUs.** `SERVICE_SETS=8`: each GPU runs one full copy of the model services (~41 GB) and one episode that uses only that copy, so episodes never wait for each other's model requests. 300 episodes ≈ 30 h ≈ 240 GPU-hours (`EPISODES_PER_SET=2`: 16 episodes at once, ≈ 15 h ≈ 120 GPU-hours, two episodes share a copy). <br>**B. Shared services: 2 GPUs** (the default). One GPU runs one copy of the services for all episodes, the other runs up to 8 episodes (~1.2 GB each); cheaper (≈ 30 h ≈ 60 GPU-hours) but episodes queue for the shared models. |
+| CPU / RAM | ~10 cores and ~6 GB RAM per running episode + ~10 GB per service copy (8 episodes: **96 cores, 128 GB**; 16 episodes: 192 cores, 256 GB) |
 | Disk | ~200 GB data + ~110 GB download (deleted after unpacking with `--delete-shards`) + ~150–300 GB results |
 | Software | Linux x86-64, NVIDIA driver for CUDA 12.x, CUDA toolkit 12.x (`nvcc`, to build cuRobo/M2T2 ops), gcc, `git`, `zstd`, EGL/libGL for headless MuJoCo rendering, internet on the setup node |
 | API | `OPENAI_API_KEY` for `--planner gpt_*` (not needed for `qwen_*`) |
@@ -64,12 +64,16 @@ scenes as a check. It ends with `ready: --dataset $DATA`. Re-running resumes.
 
 ```bash
 export OPENAI_API_KEY=...            # only for gpt_* planners; inherited by the job, never written to disk
+# A. own services per episode (recommended): 8 GPUs, 8 episodes at once
+DATA=$DATA SERVICE_SETS=8 sbatch --gres=gpu:8 --cpus-per-task=96 --mem=160G scripts/slurm/household_eval.sbatch
+# B. shared services (cheaper): 2 GPUs, 8 episodes at once
 DATA=$DATA sbatch scripts/slurm/household_eval.sbatch
 tail -f household-eval-<jobid>.out   # one line per event; "finished: success=... progress=..." per episode
 ```
 
-The job starts the model services on its first GPU, checks EGL rendering on the others,
-runs all 300 episodes (8 at a time per episode GPU) and writes the summaries. Settings
+The job starts the model services (layout A: one copy on every GPU; B: one copy on the
+first GPU), checks EGL rendering on the episode GPUs, runs all 300 episodes and writes
+the summaries. Settings
 (environment variables, defaults in the script):
 
 | Variable | Default | Meaning |
@@ -113,8 +117,10 @@ and task × rooms, and how episodes ended), `planner_usage.json` (API tokens and
 ### Time and cost (estimate for all 300 episodes)
 
 - **Wall time:** almost every episode uses its full 45-minute budget, so 300 episodes at 8 in
-  parallel take **~30 h** (16 in parallel on 3 GPUs: ~15 h).
-- **GPU:** 2 × 80 GB for ~30 h ≈ **60 GPU-hours** (≈ $90–180 at typical cloud A100 prices).
+  parallel take **~30 h** (16 in parallel: ~15 h).
+- **GPU:** layout A (8 × 80 GB, own services per episode): **~240 GPU-hours** (~120 with
+  `EPISODES_PER_SET=2`); layout B (2 × 80 GB, shared services): **~60 GPU-hours**. At typical cloud
+  A100 prices ($1.5–3 per GPU-hour): A ≈ $360–720 (≈ $180–360 with 2 per set), B ≈ $90–180.
 - **OpenAI API (`gpt_replan`, GPT-6.1 Sol: $2 input / $0.10 cached input / $10 output per million tokens):**
   GPT is called only to write the plan (plus up to 2 repairs if it breaks a catalog/contract rule)
   and to rewrite the rest of the plan after a failed call (at most 10 replans); the robot's skills
