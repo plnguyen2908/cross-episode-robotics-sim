@@ -57,7 +57,9 @@ def rates(rows):
     return dict(runs=len(rows), successes=sum(r.get('success') is True for r in rows),
                 success_rate=round(sum(r.get('success') is True for r in rows) / len(rows), 3) if rows else None,
                 mean_progress_rate=round(sum(progress) / len(progress), 3) if progress else None,
-                runs_without_report=sum(r.get('progress_rate') is None for r in rows))
+                runs_without_report=sum(r.get('progress_rate') is None for r in rows),
+                terminations={t: sum((r.get('termination') or 'no_report') == t for r in rows)
+                              for t in sorted({r.get('termination') or 'no_report' for r in rows})})
 
 
 def by_rooms(results):
@@ -87,6 +89,7 @@ def rescore(batch):
         results[folder.name] = dict(source=str(source), task=task, rooms=rooms, success=report.get('success'),
                                     progress_done=prog.get('done'), progress_total=prog.get('total'), progress_rate=prog.get('rate'),
                                     completed_calls=report.get('completed_calls'), planned_calls=report.get('planned_calls'),
+                                 termination=report.get('termination'), simulated_minutes=round((report.get('simulated_seconds') or 0) / 60, 1),
                                     wall_minutes=round((report.get('wall_seconds') or 0) / 60, 1), output=str(folder),
                                     has_report=bool(report))
     (batch / 'summary.json').write_text(json.dumps(results, indent=2))
@@ -112,13 +115,35 @@ def main():
     p.add_argument('--output', type=Path, help='default runs/household_eval/batch_<time>')
     p.add_argument('--raw', action='store_true', help='show every line of every run')
     p.add_argument('--list', action='store_true', help='print the selected episodes and exit')
+    p.add_argument('--gpt-limits', action='store_true', help='the GPT agent-as-policy eval budgets: 45 wall min, 15 simulated min, 100 calls')
+    p.add_argument('--wall-minutes', type=float, help='per-episode wall limit; the live state is scored when reached')
+    p.add_argument('--sim-minutes', type=float, help='per-episode simulated-time limit')
+    p.add_argument('--max-calls', type=int, help='per-episode limit on plan calls')
+    p.add_argument('--planner-endpoint', default='127.0.0.1:51510', help='Qwen worker for zero-shot planning (not the perception worker)')
+    p.add_argument('--planner', choices=('recipe', 'qwen_zero_shot', 'qwen_zero_shot_pure', 'qwen_replan', 'gpt_zero_shot', 'gpt_replan'), default='recipe',
+                   help='recipe (fixed plan, default); qwen_zero_shot (Qwen writes the whole plan with the contract rules and '
+                        'up to 2 repair requests, executed open loop); qwen_zero_shot_pure (one request, no rules); '
+                        'qwen_replan (qwen_zero_shot plus a new rest-of-plan from Qwen after each failed call); '
+                        'gpt_zero_shot / gpt_replan (the same with GPT through the OpenAI API: OPENAI_API_KEY, '
+                        'PLANNER_MODEL default gpt-6.1-sol, PLANNER_EFFORT default high)')
     p.add_argument('--into', type=Path, help='rerun into this existing batch folder: an episode folder there '
                    'without a report is renamed <name>_failedstart_<n> (kept) and replaced; one with a report is skipped')
     p.add_argument('--rescore', type=Path, help='rebuild summary.json and summary_by_rooms.json of a batch folder '
                    'from its episode reports (renamed *_failedstart_* folders excluded), print the tables and exit')
     a = p.parse_args()
+    if a.planner.startswith('gpt_') and not a.list and not a.rescore:
+        # Fail in seconds, before any simulator starts, on a missing key or a wrong model ID.
+        if not os.environ.get('OPENAI_API_KEY'):p.error('--planner gpt_* needs OPENAI_API_KEY in the environment')
+        sys.path.insert(0, str(ROOT))
+        from cross_episode_sim.evaluation.gpt_planner import check_planner_model, PlannerServiceError
+        try:print('planner model:', check_planner_model() or os.environ.get('PLANNER_MODEL', 'gpt-6.1-sol') + ' (key cannot list models; not checked)', flush=True)
+        except PlannerServiceError as exc:p.error(str(exc))
+    if a.gpt_limits:a.wall_minutes, a.sim_minutes, a.max_calls = a.wall_minutes or 45., a.sim_minutes or 15., a.max_calls or 100
     if a.rescore:
-        rescore(a.rescore);return
+        rescore(a.rescore)
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        from collect_results import collect
+        print(f'all_results.jsonl: {collect(a.rescore)} episodes');return
     sources = [ROOT / s for s in SUITES[a.suite]] if a.suite else []
     if a.split:
         sys.path.insert(0, str(ROOT))
@@ -138,6 +163,14 @@ def main():
     if a.into:
         out = a.into.resolve()
         if not out.is_dir():p.error(f'--into needs an existing batch folder: {out}')
+        used = {json.loads(i.read_text()).get('planner', 'recipe') for i in out.glob('*/run_info.json')}
+        if used - {a.planner}:p.error(f'{out.name} was run with planner {sorted(used)}; pass the same --planner')
+        want = dict(wall_minutes=a.wall_minutes, sim_minutes=a.sim_minutes, max_calls=a.max_calls)
+        for info in out.glob('*/run_info.json'):
+            had = json.loads(info.read_text()).get('limits')
+            had = had if isinstance(had, dict) else dict(wall_minutes=None, sim_minutes=None, max_calls=None)
+            if {k: (float(v) if v is not None else None) for k, v in had.items()} != {k: (float(v) if v is not None else None) for k, v in want.items()}:
+                p.error(f'{info.parent.name} ran with limits {had}; pass the same limits')
         stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S');summary_name = f'summary_rerun_{stamp}.json'
         kept = []
         for s in sources:
@@ -152,7 +185,9 @@ def main():
         sources = kept
         if not sources:print('nothing to rerun');return
     else:
-        out = a.output or ROOT / 'runs/household_eval' / ('batch_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        out = a.output or ROOT / 'runs/household_eval' / ('batch_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                                                          + ('' if a.planner == 'recipe' else '_' + a.planner)
+                                                          + ('_limited' if a.wall_minutes or a.sim_minutes or a.max_calls else ''))
         out.mkdir(parents=True, exist_ok=False)
     jobs = queue.Queue()
     names = {}
@@ -161,7 +196,7 @@ def main():
         while name in names.values():name += '+'
         names[s] = name;jobs.put(s)
     width = max(len(n) for n in names.values())
-    lock = threading.Lock();procs = {};results = {};stopping = threading.Event();last = {}
+    lock = threading.Lock();procs = {};results = {};stopping = threading.Event();last = {};starts = {}
     started = time.monotonic()
 
     def say(tag, text):
@@ -177,8 +212,19 @@ def main():
             if stopping.is_set():return
             try:source = jobs.get_nowait()
             except queue.Empty:return
+            # /nobackup is shared and nearly full: a full disk kills runs and
+            # the model services. Wait (do not start) under 40 GB free.
+            while not stopping.is_set():
+                free = __import__('shutil').disk_usage(out).free / 1e9
+                if free >= 40:break
+                say('eval', f'only {free:.0f} GB free on {out.anchor or "/"}{str(out).split("/")[1]}; waiting before starting {names[source]}')
+                time.sleep(300)
+            if stopping.is_set():return
             name = names[source];folder = out / name
             command = ['bash', str(ROOT / 'scripts/eval_household.sh'), str(source), '--gpu', gpu, '--output', str(folder)]
+            command += ['--planner', a.planner, '--planner-endpoint', a.planner_endpoint]
+            for flag, value in (('--wall-minutes', a.wall_minutes), ('--sim-minutes', a.sim_minutes), ('--max-calls', a.max_calls)):
+                if value is not None:command += [flag, str(value)]
             if a.raw:command.append('--raw')
             proc = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, bufsize=1, start_new_session=True)
@@ -197,16 +243,40 @@ def main():
             if stopping.is_set():return
             try:report = json.loads((folder / 'episode/report.json').read_text())
             except Exception:report = {}
+            if not report and time.monotonic() - t0 < 600 and starts.get(source, 0) < 1:
+                # Ended without a report within 10 min: a startup failure, not a
+                # policy result. Keep its folder (renamed) and run it once more.
+                starts[source] = starts.get(source, 0) + 1
+                n = 1
+                while (out / f'{name}_failedstart_{n}').exists():n += 1
+                folder.rename(out / f'{name}_failedstart_{n}')
+                cause = [l for l in (out / f'{name}_failedstart_{n}' / 'live.log').read_text(errors='replace').splitlines()
+                         if 'Error' in l or 'not ready' in l][-1:] if (out / f'{name}_failedstart_{n}' / 'live.log').exists() else []
+                say(name, f"ended without a report after {round(time.monotonic() - t0)} s "
+                          f"({cause[0].split(' | ', 1)[-1][:120] if cause else 'no error line'}); kept as {name}_failedstart_{n}, retrying in 60 s")
+                time.sleep(60);jobs.put(source);continue
+            # Finished run: hard-link its byte-identical model copies (same
+            # paths and contents; about 0.7 GB per run in batch 20261120).
+            subprocess.run([sys.executable, str(ROOT / 'scripts/dedupe_run_mjb.py'), str(folder)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             prog = report.get('progress') or {}
             task, rooms = episode_meta(source)
             results[name] = dict(source=str(source), task=task, rooms=rooms, gpu=gpu, exit_code=code, success=report.get('success'),
                                  progress_done=prog.get('done'), progress_total=prog.get('total'), progress_rate=prog.get('rate'),
                                  completed_calls=report.get('completed_calls'), planned_calls=report.get('planned_calls'),
+                                 termination=report.get('termination'), simulated_minutes=round((report.get('simulated_seconds') or 0) / 60, 1),
                                  wall_minutes=round((time.monotonic() - t0) / 60, 1), output=str(folder))
             (out / summary_name).write_text(json.dumps(results, indent=2))
+            try:
+                # Everything about this episode in one line of <batch>/all_results.jsonl.
+                sys.path.insert(0, str(ROOT / 'scripts'))
+                from collect_results import append_episode
+                append_episode(out, folder)
+            except Exception as exc:say(name, f'all_results.jsonl not updated: {exc}')
             stats = by_rooms(results)
             if not a.into:(out / 'summary_by_rooms.json').write_text(json.dumps(stats, indent=2))
             say(name, f"finished: success={report.get('success')} progress={prog.get('done')}/{prog.get('total')} "
+                      f"termination={report.get('termination')} "
                       f"in {results[name]['wall_minutes']} min")
             say('eval', f"so far {len(results)}/{len(sources)} done | " +
                 ' | '.join(f"{k} rooms: {fmt(v)}" for k, v in stats['by_rooms'].items()))
@@ -236,7 +306,8 @@ def main():
             for name, (t0, where) in list(last.items()):
                 say(name, f'... running {round((time.monotonic() - t0) / 60)} min, at {where}')
     threading.Thread(target=heartbeat, daemon=True).start()
-    say('eval', f'{len(sources)} episodes on GPUs {",".join(gpus)} -> {out}')
+    say('eval', f'{len(sources)} episodes on GPUs {",".join(gpus)} -> {out} | planner {a.planner} | limits: wall '
+               f'{a.wall_minutes or "none"} min, simulated {a.sim_minutes or "none"} min, calls {a.max_calls or "none"}')
     threads = [threading.Thread(target=worker, args=(g,), daemon=True) for g in gpus]
     for i, t in enumerate(threads):
         t.start()

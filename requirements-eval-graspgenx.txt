@@ -1,0 +1,44 @@
+# Self-contained runtime for the GraspGen-X grasp service
+#   .venv-graspgenx/bin/python scripts/serve_sensor_model.py --kind graspgenx ...
+# Pins follow the working /nobackup/le/cross-episode-graspgenx/.venv-graspgenx (eager PyTorch
+# inference, GraspGenX @ 44eb1d7 installed editable by scripts/setup_eval_env.sh), with ONE
+# deliberate change: that env used torch 2.15.0 + CUDA 13 wheels, which do not run on CUDA 12.x
+# drivers. Here torch is the CUDA 12.6 build 2.7.1 (same as .venv-sift); GraspGenX declares
+# torch>=2.1,<3 and its eager path has no compiled extensions.
+torch==2.7.1
+numpy==1.26.4
+scipy==1.17.1
+trimesh==4.5.3
+diffusers==0.11.1
+huggingface-hub==0.25.2
+omegaconf==2.4.0
+addict==2.4.0
+tqdm==4.70.1
+pyyaml==6.0.3
+yourdfpy==0.0.60
+lxml==6.1.3
+pycollada==0.9.3
+networkx==3.6.1
+shapely==2.2.0
+rtree==1.4.1
+manifold3d==3.5.4
+mapbox-earcut==2.1.0
+embreex==4.4.0.post1
+vhacdx==0.1.1
+xatlas==0.0.11
+xxhash==4.1.0
+svg-path==7.1
+jsonschema==4.26.0
+chardet==7.7.0
+colorlog==6.12.0
+httpx==0.28.1
+lazy-importer==0.1.0
+pillow==13.0.0
+regex==2026.11.9
+requests==2.34.2
+# service transport (cross_episode_sim/perception/rpc.py)
+grpcio==1.85.1
+msgpack==1.2.4
+# GraspGenX builds with setuptools<78
+setuptools==77.0.3
+wheel==0.48.0

@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 .venv*/
+/eval_env.sh
 .pytest_cache/
 .ruff_cache/
 # Downloaded data bundle and episode outputs

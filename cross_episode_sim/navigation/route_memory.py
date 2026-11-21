@@ -14,18 +14,51 @@ SIGHTING = 'exploration_sighting'
 STANDOFF = 'exploration_standoff'
 
 
+# Qwen planners: a 'kitchen' / 'dining table' label is kept only at a pose
+# within this straight distance (m) of that station's observed object and
+# nearer to it than to the other station (the stations are >= 6 m apart). A
+# carry that "arrived" at the wrong spot wrote 'kitchen' at the dining table
+# six times in one 5-room run, and every later carry stayed put (2026-11-21).
+STATION_LABEL_RADIUS = 3.0
+
+
+def labels_checked():
+    from cross_episode_sim.runtime.episode import current_runtime
+    return getattr(current_runtime(), 'planner_mode', 'recipe') != 'recipe'
+
+
 class RouteMemory:
     def __init__(self):
+        self.station_objects = {}
+        self.rejected_labels = []
         self.routes = []
         self.nodes = []
         self.edges = []
         self.stations = {}
         self.poses = []
 
+    def label_ok(self, label, xy):
+        """Is a station label believable at this (anchored) position? Other labels always are."""
+        if not labels_checked() or label not in self.station_objects:
+            return True
+        distance = {k: float(np.linalg.norm(np.asarray(xy, float)[:2] - v)) for k, v in self.station_objects.items()}
+        return distance[label] <= STATION_LABEL_RADIUS and min(distance, key=distance.get) == label
+
+    def checked(self, label, xy, kind):
+        if label and not self.label_ok(label, xy):
+            import json
+            row = dict(event='station_label_rejected', label=label, kind=kind, position=np.round(np.asarray(xy)[:2], 2).tolist(),
+                       distances_m={k: round(float(np.linalg.norm(np.asarray(xy)[:2] - v)), 2) for k, v in self.station_objects.items()})
+            self.rejected_labels.append(row);print('ROUTE_MEMORY_' + json.dumps(row), flush=True)
+            return None
+        return label
+
     def record(self, poses, anchor, start, end, start_kind='successful_transit_endpoint'):
         points = np.asarray([p[:2, 3] for p in poses])
         if len(points) < 2 or not start or not end:
             return
+        ends = transform(points[[0, -1]], anchor)
+        start = self.checked(start, ends[0], start_kind);end = self.checked(end, ends[1], 'successful_transit_endpoint')
         # Retain actual traveled samples, not proposed paths or failed attempts.
         world = transform(points, anchor)
         self.routes.append((start, end, world))
@@ -36,6 +69,7 @@ class RouteMemory:
         self.edges.extend((offset+i,offset+i+1,route_id) for i in range(len(world)-1))
         for label,index,pose,kind in ((start,offset,poses[0],start_kind),
                                       (end,len(self.nodes)-1,poses[-1],'successful_transit_endpoint')):
+            if not label:continue
             global_pose = anchor @ pose
             self.stations.setdefault(label,[]).append(dict(node=index,
                 pose=global_pose.copy(),kind=kind))
@@ -44,7 +78,7 @@ class RouteMemory:
         """Remember a successful local approach, without certifying future grasps."""
         if len(poses)<2:return
         self.record(poses,anchor,station,station)
-        self.stations[station][-1]['kind']='successful_dock'
+        if self.stations.get(station):self.stations[station][-1]['kind']='successful_dock'
 
     def plan(self, xy, destination, anchor, segment_clear, connector, join_radius=1.5):
         """Shortest checked graph route, including the local A* connector cost.
@@ -78,7 +112,8 @@ class RouteMemory:
             cost=float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
             costs[index]=cost;connectors[index]=path
             heapq.heappush(queue,(cost,index))
-        goals={s['node'] for s in self.stations[destination]}
+        goals={s['node'] for s in self.stations[destination] if self.label_ok(destination,np.asarray(s['pose'])[:2,3])}
+        if not goals:return None
         end=None
         while queue:
             cost,node=heapq.heappop(queue)
@@ -150,6 +185,10 @@ def record_exploration(slam, landmarks, success, *, destination_ready=True):
     # once it has stood there. Without that visit the kitchen end is only where
     # the counter was recognised from. Say so; a loaded carry continues from there.
     kind=STANDOFF if confirmed['kitchen'].get('reached') else SIGHTING
+    # Where the stations' objects were observed (anchored frame): checks labels for Qwen planners.
+    for label in ('kitchen','dining table'):
+        position=confirmed[label].get('position')
+        if position is not None:memory.station_objects[label]=transform(np.asarray([position[:2]]),slam.anchor)[0]
     memory.record(poses[first:],slam.anchor,'kitchen',destination,start_kind=kind)
     # A recognition viewpoint can be across the room, or even through a door.
     # Keep the traveled graph, but do not alias a remote sighting as a reached

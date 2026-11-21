@@ -51,6 +51,23 @@ def surface_description(receptacle,region):
     return 'interior shelf inside the open '+receptacle
 
 
+# recipe: fixed semantic recipe. qwen_*/gpt_*: the model writes the whole plan
+# (qwen_zero_shot_plan.py); *_replan also rewrites the rest after a failed call.
+PLANNERS=('recipe','qwen_zero_shot','qwen_zero_shot_pure','qwen_replan','gpt_zero_shot','gpt_replan')
+REPLAN_PLANNERS=('qwen_replan','gpt_replan')
+
+
+def planner_client(planner,kind):
+    """Qwen: the local gRPC worker (qwen_planner endpoint, else the perception one). GPT: the OpenAI API."""
+    import os
+    if planner.startswith('gpt_'):
+        from .gpt_planner import GPTPlannerClient
+        return GPTPlannerClient()
+    from ..perception.rpc import ModelClient
+    served=json.loads(os.environ.get('SENSOR_MODEL_ENDPOINTS','{}'))
+    return ModelClient(served.get('qwen_planner') or served['qwen'],timeout=600,kind=kind)
+
+
 class SensorHouseholdPipeline(SensorSetTablePipeline):
     def _remember_stove(self,ctx,root):
         """After an empty-hand stove-knob navigation: measure both red knobs and remember the stove.
@@ -145,7 +162,11 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
         command=list(command)
         if self.config['task']!='set_table' and len(command)>1 and command[1]=='scripts/test_m2t2_carry_dock.py':
             command+=['--allow-initial-overlap-exit','--station-endpoints']
-        if self.config['task']!='set_table' and len(command)>1 and command[1]=='scripts/test_fixed_map_transit.py':
+        # Qwen planners on set table too (argtest 2026-11-21): a second kitchen
+        # transit was recorded as a route from the dining table, putting a
+        # 'dining table' station in the kitchen, and the carry 'arrived' at
+        # once. The set-table recipe keeps its qualified behaviour.
+        if (self.config['task']!='set_table' or getattr(self,'planner','recipe')!='recipe') and len(command)>1 and command[1]=='scripts/test_fixed_map_transit.py':
             requested=command[command.index('--room')+1]
             if self.current_station==requested:
                 # A successful local fixture/object call has not left this
@@ -194,13 +215,27 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             print(f'STAGE DIAGNOSTIC: {name} failed; continuing with recorded output',flush=True)
             return json.loads(artifacts.read_text(Path(report)))
 
-    def __init__(self,source,output,*,continue_on_failure=True,qwen_interface=True,**kwargs):
+    def __init__(self,source,output,*,continue_on_failure=True,qwen_interface=True,planner='recipe',
+                 wall_seconds_limit=None,sim_seconds_limit=None,max_calls=None,**kwargs):
         config=json.loads((Path(source)/'config.json').read_text())
         super().__init__(source,output,expected_task=config['task'],initial_doors='open',**kwargs)
         self.config=config
         self.continue_on_failure=continue_on_failure
         self.qwen_interface=qwen_interface
         self.fixture_views={};self.current_station=None
+        # Evaluation budgets (episode_limits.py); None = no limit, as before.
+        self.limit_config=dict(wall_seconds=wall_seconds_limit,sim_seconds=sim_seconds_limit,max_calls=max_calls)
+        from .episode_limits import EpisodeLimits
+        EpisodeLimits(**self.limit_config)  # reject bad values before the run starts
+        if planner not in PLANNERS:
+            raise ValueError('planner must be one of '+', '.join(PLANNERS))
+        self.planner=planner;self.planner_record=None
+        if planner!='recipe':
+            if not qwen_interface:raise ValueError('The Qwen plan runs through the Qwen sensor interface')
+            # Qwen writes the plan at the start of the run (evaluation/
+            # qwen_zero_shot_plan.py): no recipe, no counts from the scene config.
+            self.plan=[]
+            return
         # Diagnostic component runs only: HOUSEHOLD_PLAN_COUNTS='{"cup":0}' shortens
         # the recipe (e.g. the cabinet half of clear-and-store). Unset in real runs.
         import os
@@ -272,7 +307,30 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
         # transfer-stage dispatch. Additional recipes extend the same primitives.
         if self.config['task']=='set_table' and not self.qwen_interface:return super()._run(**unused)
         self.runtime.qwen_docking=self.qwen_interface
+        # Stage scripts read this (test_fixed_map_transit: map-based station labels for Qwen planners).
+        self.runtime.planner_mode=self.planner
         self.output.mkdir(parents=True,exist_ok=False);started=time.monotonic()
+        from .episode_limits import EpisodeLimits,EpisodeLimitReached
+        limits=EpisodeLimits(**self.limit_config,started=started)
+        if self.planner!='recipe':
+            # Whole-task plan from the instruction text and the skill catalog only.
+            from .qwen_zero_shot_plan import qwen_zero_shot_plan,semantic_calls
+            source_text=self.source/'instruction.txt'
+            instruction=(artifacts.read_text(source_text) if artifacts.exists(source_text) else self.config['instruction']).strip()
+            # Qwen: its own worker when given, so a long plan generation does not
+            # queue in front of other episodes' perception requests (argtest
+            # 2026-11-21: a 331 s plan wait, a 240 s perception deadline). GPT: API.
+            client=planner_client(self.planner,'qwen_zero_shot_planner')
+            try:calls,self.planner_record=qwen_zero_shot_plan(instruction,client,
+                    repair=self.planner in ('qwen_zero_shot','qwen_replan','gpt_zero_shot','gpt_replan'))
+            finally:client.close()
+            # Straight to disk: the in-memory artifact store exports only a few
+            # files at the end (batch 20261120_215253 kept this in 2 of 10 runs).
+            self.planner_record['replans']=[]
+            (self.output/'qwen_plan.json').write_text(json.dumps(self.planner_record,indent=2))
+            self.planner_instruction=instruction
+            self.plan=semantic_calls(calls)
+            for number,call in enumerate(self.plan,1):print(f'QWEN PLAN {number:2d}: {call.skill} {json.dumps(call.arguments)}',flush=True)
         artifacts.write_text(self.output/'semantic_plan.json',json.dumps([c.to_dict() for c in self.plan],indent=2))
         ctx=dict(continuation=None,held=None,station=None,number=0);fixtures=None;appliances=None
         scorer=None;initial=None;last_score_time=None;original_step=mujoco.mj_step
@@ -295,6 +353,7 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             # Private observer only: no outcome is supplied to the skill.
             if last_score_time is None or data.time-last_score_time>=.02-1e-8:
                 scorer.observe(data);last_score_time=float(data.time)
+            limits.check_sim(float(data.time))
         def progress(skill,stage,status):
             print(f'{time.strftime("%Y-%m-%dT%H:%M:%S%z")} | {skill}: {stage} — {status}',flush=True)
         def explore(*,progress):
@@ -312,6 +371,9 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 raise
         def navigate_once(*,target,destination=None,search_at=None,mode='auto',purpose='pick',progress):
             nonlocal fixtures
+            if ctx.get('continuation') is None:
+                # Exploration never produced a map (failed or not yet run).
+                progress('navigation','failed');return SkillOutcome(False,'exploration_required')
             from ..runtime.appliance_controls import invalidate_appliance_targets
             invalidate_appliance_targets(self.runtime)
             if destination is not None and ctx.get('held') is None:
@@ -340,6 +402,23 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     fixtures.navigation_posture(root,progress)
                     ctx['continuation']=self.checkpoint(root/'posture_handoff',ctx['continuation'])
                 station=search_at or 'kitchen'
+                if mode=='transit':
+                    # The catalog's transit mode (skill_arguments.py): drive to
+                    # the room only. The next pick/fixture call redocks locally.
+                    transit=root/'room_transit'
+                    report=self.stage(f'{n}_transit_{station.replace(" ","_")}',[sys.executable,'scripts/test_fixed_map_transit.py',
+                        '--start',str(ctx['continuation']),'--output',str(transit),'--room',station,
+                        '--seconds',str(self.navigation_seconds),'--receptacle',station],transit/'report.json')
+                    if not (report or {}).get('success'):
+                        # The household stage continues past a failed stage; a
+                        # transit that never ran (no map: exploration_required)
+                        # has no handoff, so keep the live state (rerun 2: the
+                        # next calls read its missing navigation_map.npz).
+                        progress('navigation','failed')
+                        return SkillOutcome(False,str((report or {}).get('status') or 'room_transit_failed'))
+                    ctx.update(root=root,dock=None,continuation=transit,target=target,station=station)
+                    self.current_station=station;self.arrived_station=True
+                    progress('navigation','completed');return SkillOutcome(True,'room_transit_completed')
                 description='handle on '+target if purpose=='handle' else target
                 dock=self._navigate_to_object(n,description,root,ctx['continuation'],search_at=station)
                 ctx.update(root=root,dock=dock,continuation=dock,target=target,station=station)
@@ -423,6 +502,9 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
         def pick(*,target,progress):
             if ctx.get('held') is not None:
                 return SkillOutcome(False,'placement_pending_retained_grasp')
+            if ctx.get('root') is None:
+                # No navigate call has run yet; nothing to pick from.
+                progress('grasp','failed');return SkillOutcome(False,'no_object_approach_before_pick')
             progress('grasp','running');out=ctx['root']/'pick'
             # A new attempt owns its pickup reference even when perception
             # fails before creating a physics handoff. Never carry a previous
@@ -437,6 +519,11 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                                held=target if outcome['success'] else None)
                 progress('grasp','completed' if outcome['success'] else 'failed')
                 return SkillOutcome(outcome['success'],outcome.get('reason',''))
+            if ctx.get('dock') is None:
+                # The approach to the object failed, so no observed target
+                # exists (batch 20261120: TypeError on a None dock, 8 calls).
+                ctx.update(pick=out,held=None)
+                progress('grasp','failed');return SkillOutcome(False,'no_successful_approach_before_pick')
             result=self._pick_object(ctx['number'],ctx['dock'],out)
             success=bool(result.get('execution_success'))
             ctx.update(pick=out,held=target if success else None)
@@ -854,21 +941,41 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     model_link=self.output/'recording_model.mjb')
                 saved_failures.append(count);print('FAILED_CALL_INPUTS_SAVED',json.dumps(dict(files=count)),flush=True)
             except Exception as exc:print('FAILED_CALL_INPUTS_NOT_SAVED',str(exc)[:120],flush=True)
+        failure_cause={}
+        def stage_causes(stages):
+            # The stage's own status/reason, as its report.json gives it.
+            causes=[]
+            for stage in stages:
+                if stage['success']:continue
+                try:r=json.loads(artifacts.read_text(Path(stage['report'])))
+                except Exception:r={}
+                reason=r.get('reason',r.get('error'))
+                if reason is None:
+                    # Nested reports (pick candidates): the first error text in it.
+                    import re as _re
+                    found=_re.search(r'"(?:error|reason)": "([^"]+)"',json.dumps(r))
+                    reason=found.group(1) if found else None
+                causes.append(f"{stage['name']}: status={r.get('status')} reason={str(reason)[:160]}")
+            return causes
         def diagnostic(handler):
             def call(**kw):
-                before=len(self.stages)
+                before=len(self.stages);failure_cause.clear()
                 try:
                     outcome=handler(**kw)
                     attempted=self.stages[before:]
                     recovered={stage['name'] for stage in attempted if stage['success']}
                     if any(not stage['success'] and stage.get('recovered_by') not in recovered for stage in attempted):
+                        failure_cause['cause']='; '.join(stage_causes([s for s in attempted if s.get('recovered_by') not in recovered]))
                         keep_failed_call_inputs()
                         return SkillOutcome(False,'backend_stage_failed_continued')
                     if not getattr(outcome,'success',True):keep_failed_call_inputs()
                     return outcome
-                except Exception:
+                except Exception as exc:
                     import traceback
                     traceback.print_exc()
+                    causes=stage_causes(self.stages[before:])
+                    failure_cause['cause']=('; '.join(causes) if causes and isinstance(exc,RuntimeError) and 'failed; see' in str(exc)
+                                            else f'{type(exc).__name__}: {str(exc)[:200]}')
                     keep_failed_call_inputs()
                     # Preserve the current physical state after a partial
                     # command. Never reload the previous skill's checkpoint.
@@ -890,20 +997,56 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
         if self.qwen_interface:
             from ..runtime.qwen_pipeline import full_task_interface
             interface=full_task_interface(interface,self,ctx,lambda:fixtures)
-        print('SKILL_INTERFACE',type(interface).__name__,flush=True)
+        # Every skill reads its optional catalog arguments (skill_arguments.py);
+        # the recipe's own arguments pass through unchanged.
+        from .skill_arguments import ArgumentReading
+        interface=ArgumentReading(interface,lambda:ctx.get('held'))
+        print('SKILL_INTERFACE','ArgumentReading('+type(interface.interface).__name__+')',flush=True)
         artifacts.write_text(self.output/'interface_dispatch.json',json.dumps(dict(
             interface=type(interface).__name__,task=self.config['task'],
             navigation='existing full-task SLAM / graph-A* / One-Ring handlers',
             default_redock=sorted(getattr(interface,'default_redock',())),
             placement='loaded docking/refinement owned by placement backend'),indent=2))
         error=None;checks={};success=False;timings=[];failures=[]
+        public_history=[]
+        def replan_after(index):
+            # Option A (qwen_zero_shot_plan.py): rest of the plan from the public
+            # outcomes so far. Fixture states come only from successful public
+            # open/close outcomes, as in the note's planner.
+            from .qwen_zero_shot_plan import qwen_replan,semantic_calls,MAX_REPLANS
+            from .planning_contract import update_fixtures
+            record=self.planner_record
+            if len(record['replans'])>=MAX_REPLANS:
+                print('QWEN_REPLAN_SKIPPED',json.dumps(dict(reason=f'{MAX_REPLANS} replans used')),flush=True);return
+            fixtures={}
+            for row in public_history:update_fixtures(fixtures,row,row['success'])
+            state=dict(map_ready=any(r['skill']=='explore' and r['success'] for r in public_history),
+                       held_target=ctx.get('held'),station=ctx.get('station'),fixture_states=fixtures)
+            client=planner_client(self.planner,'qwen_replanner')
+            try:calls,rec=qwen_replan(self.planner_instruction,client,list(public_history),
+                                      [c.to_dict() for c in self.plan[index+1:]],state)
+            finally:client.close()
+            rec['after_call']=index+1;record['replans'].append(rec)
+            if calls is not None:
+                self.plan[index+1:]=semantic_calls(calls)
+                for number,c in enumerate(self.plan[index+1:],index+2):
+                    print(f'QWEN REPLAN {number:2d}: {c.skill} {json.dumps(c.arguments)}',flush=True)
+            (self.output/'qwen_plan.json').write_text(json.dumps(record,indent=2))
         try:
             mujoco.mj_step=scored_step
+            limits.arm()
             from .sensor_recipe_execution import execute_recipe
             def sim_time():
                 return float(self.runtime.data.time) if self.runtime.data is not None else 0.
-            for index,call,result,duration in execute_recipe(
-                    interface,self.plan,sim_time,continue_on_failure=self.continue_on_failure):
+            if self.planner in REPLAN_PLANNERS:
+                # The plan list itself: a replan below rewrites the calls not yet run.
+                from .qwen_zero_shot_plan import execute_with_replans
+                execution=execute_with_replans(interface,self.plan,sim_time,limits.max_calls)
+            elif self.planner!='recipe':
+                from .qwen_zero_shot_plan import execute_open_loop
+                execution=execute_open_loop(interface,limits.calls_allowed(self.plan),sim_time)
+            else:execution=execute_recipe(interface,limits.calls_allowed(self.plan),sim_time,continue_on_failure=self.continue_on_failure)
+            for index,call,result,duration in execution:
                 timings.append(dict(index=index,skill=call.skill,simulated_seconds=duration,
                     wall_seconds=result['wall_seconds'],commands_completed=result['success'],
                     over_15_seconds=duration>15.,
@@ -913,7 +1056,26 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                         'over-target call; see stage logs for motion and perception breakdown' if duration>15. else None)))
                 artifacts.write_text(self.output/'skill_timings.json',json.dumps(timings,indent=2))
                 if not result['success']:
-                    failures.append(dict(index=index,skill=call.skill,reason=result['reason']))
+                    cause=failure_cause.get('cause') or result['reason']
+                    failures.append(dict(index=index,skill=call.skill,reason=result['reason'],cause=cause))
+                    print('CALL FAILURE CAUSE',json.dumps(dict(call=index+1,skill=call.skill,reason=result['reason'],cause=cause)),flush=True)
+                if self.planner in REPLAN_PLANNERS:
+                    from .qwen_zero_shot_plan import public_reason
+                    reason=result['reason'] if result['success'] else (result['reason'] if cause in (None,result['reason']) else f"{result['reason']}; {cause}")
+                    public_history.append(dict(call=index+1,skill=call.skill,arguments=call.arguments,
+                        success=bool(result['success']),reason=public_reason(reason)))
+                    if not result['success']:replan_after(index)
+                # Every call on disk as it happens (user request 2026-11-21):
+                # planned and executed arguments, outcome and real cause.
+                read=getattr(interface,'last_executed',None) or {};interface.last_executed=None
+                with open(self.output/'calls.jsonl','a') as calls_log:
+                    calls_log.write(json.dumps(dict(call=index+1,skill=call.skill,planned_arguments=call.arguments,
+                        executed_arguments=read.get('arguments',call.arguments),argument_notes=read.get('notes') or [],
+                        success=bool(result['success']),reason=result.get('reason'),
+                        cause=None if result['success'] else (failure_cause.get('cause') or result.get('reason')),
+                        simulated_seconds=round(duration,3),wall_seconds=round(result.get('wall_seconds') or 0,3),
+                        planner=self.planner),default=str)+'\n')
+                failure_cause.clear()
                 # Private task progress after every call, for watching a run
                 # (live.log and progress_log.jsonl). A read-only diagnostic like
                 # the final checks: never returned to a skill or used to decide.
@@ -928,10 +1090,18 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     except Exception as exc:print('TASK_PROGRESS_UNAVAILABLE',str(exc)[:160],flush=True)
             if scorer is None:raise RuntimeError('No physical execution')
             checks=scorer.score(initial,self.runtime.data);success=all(checks.values())
+        except EpisodeLimitReached as exc:
+            # Stopped where it was; the live state is scored below.
+            print('EPISODE_LIMIT_REACHED',json.dumps(dict(reason=exc.reason,wall_seconds=round(time.monotonic()-started,1),
+                sim_seconds=round(float(self.runtime.data.time),1) if self.runtime.data is not None else None,
+                calls_attempted=len(timings))),flush=True)
         except Exception as exc:
             import traceback
             traceback.print_exc();error=str(exc)
-        finally:mujoco.mj_step=original_step
+        finally:
+            limits.disarm();mujoco.mj_step=original_step
+        if limits.reached is not None and scorer is not None:
+            checks=scorer.score(initial,self.runtime.data);success=bool(checks) and all(checks.values())
         progress=None
         if scorer is not None:
             # Partial goal diagnostics are private and never returned to a skill.
@@ -950,4 +1120,23 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             all_calls_attempted=len(interface.history)==len(self.plan),
             continue_on_failure=self.continue_on_failure,
             scope='full continuous two-room all-open sensor-skill task',initial_doors='open')
+        report.update(limits=limits.to_dict(),simulated_seconds=float(self.runtime.data.time) if self.runtime.data is not None else None,
+            termination=(limits.reached or ('error' if error else 'success' if success else
+                'call_limit' if len(limits.calls_allowed(self.plan))<len(self.plan) else 'plan_completed')))
+        if self.planner!='recipe':
+            # Refused calls never reach interface.history; count from the timings.
+            record=self.planner_record or {}
+            report.update(completed_calls=sum(t['commands_completed'] for t in timings),attempted_calls=len(timings),
+                all_calls_attempted=len(timings)==len(self.plan),
+                planner=dict(mode=self.planner+'_open_loop',requests=record.get('requests'),
+                    planning_wall_seconds=record.get('wall_seconds'),explore_prepended=record.get('explore_prepended'),
+                    diagnostic_schema_errors=record.get('diagnostic_schema_errors'),
+                    diagnostic_precondition_errors=record.get('diagnostic_precondition_errors'),
+                    plan_file='qwen_plan.json',history='none',scene_images=0,replans=len(record.get('replans') or []),
+                    planning_rules_in_prompt=record.get('planning_rules_in_prompt'),repair_requests=record.get('repair_requests')),
+                scope='Qwen zero-shot whole-task plan, executed open loop by the household sensor skills')
+        if self.planner!='recipe':
+            # The calls actually planned (replans included), on disk.
+            (self.output/'semantic_plan.json').write_text(json.dumps([c.to_dict() for c in self.plan],indent=2))
+            if self.planner_record is not None:(self.output/'qwen_plan.json').write_text(json.dumps(self.planner_record,indent=2))
         artifacts.write_text(self.output/'report.json',json.dumps(report,indent=2));return report

@@ -137,10 +137,14 @@ class SensorSetTablePipeline:
         from cross_episode_sim.perception.rpc import ModelClient
         for kind,address in endpoints.items():
             if kind=='onering' and address in ('','scan'):continue  # no local-policy service to check
-            client=ModelClient(address,timeout=10)
+            # Each worker answers one request at a time: a health check queues
+            # behind another episode's long request (batch 20261120: 7 starts
+            # failed on a 10 s deadline). Wait for it like a normal request.
+            client=ModelClient(address,timeout=600);asked=time.monotonic()
             try:
                 if not client.call(operation='health').get('ready'):raise RuntimeError(f'{kind} worker not ready')
             finally:client.close()
+            if time.monotonic()-asked>10:print(f'SERVICE_BUSY_AT_START {kind} answered after {time.monotonic()-asked:.0f} s',flush=True)
         try:
             with self.runtime.activate():
                 return self._run(continuation=continuation,completed_transfers=completed_transfers,exploration_only=exploration_only)

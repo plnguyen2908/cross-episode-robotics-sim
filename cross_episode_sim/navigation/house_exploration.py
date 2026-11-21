@@ -147,12 +147,14 @@ class HouseExplorer:
 
     def _follow_escape(self,xy,now):
         while len(self.path)>1 and np.linalg.norm(self.path[0]-xy)<self.grid.config.resolution:self.path.pop(0)
-        arrived=self.clearance>self.escape_clearance
-        if not arrived and now-self.escape_started<=15.:return None
+        # No planned escape (clearance or clock unset) counts as a stalled one.
+        arrived=self.escape_clearance is not None and self.clearance is not None and self.clearance>self.escape_clearance
+        if not arrived and self.escape_started is not None and now-self.escape_started<=15.:return None
         status='margin_escape_complete' if arrived else 'margin_escape_stalled'
-        self.events.append(dict(time=now,event=status,position=xy.tolist(),clearance=self.clearance,goal=self.escape_goal.tolist()))
+        self.events.append(dict(time=now,event=status,position=xy.tolist(),clearance=self.clearance,
+                                goal=None if self.escape_goal is None else self.escape_goal.tolist()))
         if arrived:self.failed_escapes=[]
-        else:self.failed_escapes.append(self.escape_goal)
+        elif self.escape_goal is not None:self.failed_escapes.append(self.escape_goal)
         self.path=[];self.escaping=False;self.escape_goal=None
         if arrived and self.goal is not None:
             # Escapes that bring the goal no nearer mean its route cannot be
@@ -286,7 +288,12 @@ class HouseExplorer:
             self.escaping=self.in_margin
             if not self.escaping:self.escape_goal=None
             error=self._plan_escape(xy,now) if self.escaping else self._plan(xy,now)
-            if error:self.terminal=error;return self._stop(error)
+            if error:
+                # A failed escape plan leaves no escape to follow (batch
+                # 20261120 table-5r-000003: escaping stayed True with no
+                # escape clearance and the next tick crashed comparing None).
+                self.escaping=False;self.escape_goal=None
+                self.terminal=error;return self._stop(error)
         if self.escaping:
             result=self._follow_escape(xy,now)
             if result:return result

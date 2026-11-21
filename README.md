@@ -1,5 +1,141 @@
 # Cross-Episode Robotics Sim
 
+
+## Household evaluation on Slurm (zero-shot planner; start here to run the eval)
+
+This runs our household evaluation: **300 test episodes** of five long-horizon tasks
+(`set_table`, `clear_and_store`, `prepare_and_serve_meal`, `unpack_and_sort_groceries`,
+`warm_two_pots`) in 2–5 room houses (`test_same_map` 200 episodes + `test_new_map` 100).
+A language model writes the whole plan zero-shot from the task instruction and our skill
+catalog, and **rewrites the rest of the plan after any failed call** (`--planner gpt_replan`,
+GPT-6.1 through the OpenAI API; `qwen_replan` uses a local Qwen3-VL-8B instead). The robot
+executes every call with onboard sensors only (SLAM, pointing, grasping, navigation); the
+private task scorer gives success and a progress rate. Details: [docs/qwen_zero_shot_open_loop.md](docs/qwen_zero_shot_open_loop.md).
+
+### What you need
+
+| | |
+|---|---|
+| GPUs | **2 × 80 GB** (A100/H100) on one node: one runs the model services (~41 GB), the other runs up to 8 episodes at once (~1.2 GB each). With 24 GB GPUs: 2 for services + 1 per running episode. |
+| CPU / RAM | ~10 cores and ~6 GB RAM per running episode (8 episodes: **96 cores, 128 GB**) |
+| Disk | ~200 GB data + ~110 GB download (deleted after unpacking with `--delete-shards`) + ~150–300 GB results |
+| Software | Linux x86-64, NVIDIA driver for CUDA 12.x, CUDA toolkit 12.x (`nvcc`, to build cuRobo/M2T2 ops), gcc, `git`, `zstd`, EGL/libGL for headless MuJoCo rendering, internet on the setup node |
+| API | `OPENAI_API_KEY` for `--planner gpt_*` (not needed for `qwen_*`) |
+
+### 1. Get the code and build the environments (once, ~10–30 min, ~62 GB)
+
+Run on a node with internet access (a login node is fine); no sudo needed.
+
+```bash
+git clone https://github.com/plnguyen2908/cross-episode-robotics-sim.git
+cd cross-episode-robotics-sim
+export TORCH_CUDA_ARCH_LIST="8.0;9.0"   # your GPUs' compute capability (A100 8.0, H100 9.0); default covers A100/3090/L40/H100
+bash scripts/setup_eval_env.sh
+source eval_env.sh                      # before every run (the Slurm script does this itself)
+```
+
+It clones the external code at pinned commits and applies our patches (`patches/eval_env/`),
+installs Python 3.11.14 with `uv`, and builds three self-contained environments from pinned
+requirements (`.venv-sift` main runtime, `.venv-m2t2`, `.venv-graspgenx`). It also compiles M2T2's CUDA op,
+downloading a CUDA 12.6 compiler if no `nvcc` 12.x is found. Then it downloads the model weights at
+pinned revisions (Qwen3-VL-8B, Molmo2-4B, M2T2, GraspGen-X, FastSAM) and the MolmoSpaces resources
+(~13 GB) into `.venv-eval-cache/`, so offline compute nodes work. It writes `eval_env.sh` and ends with a
+self-check (`scripts/check_eval_env.py`: CUDA, EGL rendering, Open3D/pycolmap CUDA, cuRobo IK,
+model loading). Re-running continues after a failure. Requirements and knobs (`HF_HOME`,
+`CUDA_HOME`, `SKIP_HF_MODELS`, ...) are listed at the top of the script.
+`.venv-sift/bin/python scripts/check_eval_services.py --base-port 52000 --gpu 0` optionally starts each
+model service once, sends one request and stops it.
+
+### 2. Download and prepare the test data (once, ~110 GB download)
+
+```bash
+export DATA=/scratch/$USER/cross-episodic-sim-v4        # any large disk
+HF_HUB_OFFLINE=0 .venv-sift/bin/python scripts/prepare_eval_data.py --root $DATA --delete-shards
+```
+
+This downloads only the two test splits and `eval/eval_scene_assets.tar.zst` from
+[plnguyen2908/cross-episodic-sim](https://huggingface.co/datasets/plnguyen2908/cross-episodic-sim),
+unpacks them, rewrites the scenes' asset paths to `$DATA/assets` and compiles a sample of
+scenes as a check. It ends with `ready: --dataset $DATA`. Re-running resumes.
+
+(`eval_env.sh` sets `HF_HUB_OFFLINE=1` so jobs never download; data preparation needs it off.)
+
+### 3. Run on Slurm
+
+```bash
+export OPENAI_API_KEY=...            # only for gpt_* planners; inherited by the job, never written to disk
+DATA=$DATA sbatch scripts/slurm/household_eval.sbatch
+tail -f household-eval-<jobid>.out   # one line per event; "finished: success=... progress=..." per episode
+```
+
+The job starts the model services on its first GPU, checks EGL rendering on the others,
+runs all 300 episodes (8 at a time per episode GPU) and writes the summaries. Settings
+(environment variables, defaults in the script):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PLANNER` | `gpt_replan` | `gpt_replan`, `gpt_zero_shot` (no replanning), `qwen_replan`, `qwen_zero_shot`, `recipe` (fixed oracle-style recipe) |
+| `PLANNER_MODEL` / `PLANNER_EFFORT` | `gpt-6.1-sol` / `high` | OpenAI model and reasoning effort for `gpt_*` |
+| `LIMITS` | `--gpt-limits` | per episode: 45 min wall, 15 simulated min, 100 skill calls (same budget as our GPT-as-policy baseline); e.g. `"--sim-minutes 15 --max-calls 100"` drops the wall cap |
+| `EPISODES_PER_GPU` | `8` | parallel episodes per episode GPU (CPU is usually the limit) |
+| `SPLITS` / `TASKS` | `test` / all five | e.g. `SPLITS=test_same_map TASKS=set_table` |
+| `OUT` | `runs/household_eval/slurm_<jobid>` | re-submit with the same `OUT=` to resume an interrupted batch (finished episodes are kept) |
+
+Without Slurm, the same steps by hand on one machine:
+
+```bash
+bash scripts/start_eval_services.sh --gpus 0 --out runs/services &   # add --qwen-planner for qwen_*
+export SERVICE_ENDPOINTS_FILE=runs/services/endpoints.json
+PYTHONPATH=$PWD .venv-sift/bin/python scripts/eval_households.py --dataset $DATA --split test --tasks set_table,clear_and_store,prepare_and_serve_meal,unpack_and_sort_groceries,warm_two_pots \
+    --gpus 1,1,1,1,1,1,1,1 --planner gpt_replan --gpt-limits --output runs/household_eval/my_batch
+bash scripts/eval_household.sh $DATA/test_same_map/batches/round_continuous/set_table_000024 --gpu 1 --planner gpt_replan --gpt-limits  # one episode, live log
+```
+
+### 4. Results
+
+**Everything in one file:** `<OUT>/batch/all_results.jsonl`, one JSON line per episode, appended as
+each episode finishes: task, room count, split, success, termination, final checks, progress
+(done/total/rate and per step), the progress after every call, every skill call (planned and
+executed arguments, outcome, real cause, time), every planner request (prompt, raw reply,
+repairs, replans, token usage for GPT), the executed plan and the failed calls
+(`scripts/collect_results.py <batch>` rebuilds it; the shared skill catalog is in `planner_catalog.json`).
+
+The same data per episode folder `<task>-<rooms>r-<id>/`:
+`live.log`, `episode/report.json` (success, progress, termination, failed calls with causes),
+`episode/calls.jsonl` (every skill call: planned and executed arguments, outcome, real cause,
+time), `episode/qwen_plan.json` (planner prompt, every reply, repairs, replans and, for GPT,
+token usage per request), `episode/semantic_plan.json`. Batch files: `summary.json`,
+`summary_by_rooms.json` (success rate and mean progress rate overall, by task, by room count
+and task × rooms, and how episodes ended), `planner_usage.json` (API tokens and cost for `gpt_*`).
+`python3 scripts/eval_households.py --rescore <batch>` rebuilds the summaries.
+
+### Time and cost (estimate for all 300 episodes)
+
+- **Wall time:** almost every episode uses its full 45-minute budget, so 300 episodes at 8 in
+  parallel take **~30 h** (16 in parallel on 3 GPUs: ~15 h).
+- **GPU:** 2 × 80 GB for ~30 h ≈ **60 GPU-hours** (≈ $90–180 at typical cloud A100 prices).
+- **OpenAI API (`gpt_replan`, GPT-6.1 Sol: $2 input / $0.10 cached input / $10 output per million tokens):**
+  GPT is called only to write the plan (plus up to 2 repairs if it breaks a catalog/contract rule)
+  and to rewrite the rest of the plan after a failed call (at most 10 replans); the robot's skills
+  execute the up-to-100 calls without the model. Our runs average **2–3 requests per episode**;
+  each sends ~4–5 k input tokens (mostly a cacheable repeated prefix) and gets back the plan
+  (~0.5–1 k tokens) plus reasoning tokens (~2–8 k at `high` effort). Expect **~$0.07–0.25 per
+  episode, ≈ $20–75 for 300 episodes**; many failures and long reasoning push it higher (hard
+  upper bound with all 10 replans and repairs in every episode ≈ $1,000). For comparison, GPT
+  *controlling the robot directly* (one request per action, two camera images each, 100 calls)
+  used 393 M input tokens for 95 episodes, ≈ $0.68 per episode. `planner_usage.json` gives the real total.
+
+### Troubleshooting
+
+- **A service does not get ready:** see `<OUT>/services/<name>.log`; the first start downloads weights.
+- **EGL render check fails under Slurm:** MuJoCo renders headless through EGL on the episode's GPU.
+  Check that the GPU nodes have the NVIDIA EGL library (`libEGL_nvidia.so`) and its vendor file
+  (`/usr/share/glvnd/egl_vendor.d/10_nvidia.json`); some clusters number EGL devices differently
+  inside a job, in which case request whole nodes/exclusive GPUs or ask the admins.
+- **`--planner gpt_*` stops at launch:** the launcher checks `OPENAI_API_KEY` and the model ID first.
+- **Episodes "ended without a report":** usually a service or disk problem at start; the launcher
+  retries each such episode once and keeps the failed folder as `<name>_failedstart_<n>`.
+
 ## Sensor pipeline SLAM default
 
 The sensor-only pipeline uses **CUDA SIFT + CUDA RGB-D fusion**, eight OpenCV

@@ -60,13 +60,24 @@ def main():
   return ok
  base.motion_guard=execution_guard
  # OnboardBaseActuator stores the callback under motion_guard.
- status='budget_exhausted';start=d.time;wall=time.monotonic()
+ status='budget_exhausted';start=d.time;wall=time.monotonic();located=None
+ # The set-table recipe keeps its qualified labelling; Qwen planners use the map.
+ from cross_episode_sim.runtime.episode import current_runtime as _runtime
+ from_map=getattr(_runtime(),'planner_mode','recipe')!='recipe' or os.environ.get('TRANSIT_ROOM_FROM_MAP')=='1'
  with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'state_recording') as recording,(a.output/'progress.jsonl').open('w',buffering=1) as log:
   for tick in range(round(a.seconds*50)):
    if tick%5==0:
     packet=sensors.capture(include_robot_mask=CROSS_ROOM_ROBOT_MASK);tracking=slam.update(packet.cameras['navigation'],packet.timestamp)
     if not tracking.accepted:status='localization_lost';break
     T=tracking.T_map_base;pose=np.r_[T[:2,3],np.arctan2(T[1,0],T[0,0])]
+    if tick==0 and from_map:
+     # Qwen planners: where the robot is, from its own map (station_locator.py).
+     # The route start label and the already-there check use this, not a guess.
+     from cross_episode_sim.navigation.station_locator import current_station
+     located,where=current_station(policy,pose[:2],memory)
+     policy.events.append(dict(event='current_station_from_map',**where));print(json.dumps(policy.events[-1]),flush=True)
+     if located is not None and located==(a.receptacle or a.room):
+      status='already_in_destination_room';break
     if checker is None:
      checker=ObservedShapeChecker(grid,geometry.boxes(packet.arm.position),pose,support_poses=support+[pose])
     else:
@@ -112,12 +123,14 @@ def main():
      if not tracking.accepted:status='localization_lost'
     break
    if policy.terminal:status=policy.terminal;break
- record_transit(slam,a.source_station if a.source_station is not None else ('dining table' if (a.receptacle or a.room)=='kitchen' else 'kitchen'),a.receptacle or a.room,status=='known_room_waypoint_reached' and map_digest(grid)==digest)
+ # Start label: the station the map says the robot started at. Not at any
+ # station (a third room, a hallway): no label, so the route is not recorded.
+ record_transit(slam,located if from_map else (a.source_station if a.source_station is not None else ('dining table' if (a.receptacle or a.room)=='kitchen' else 'kitchen')),a.receptacle or a.room,status=='known_room_waypoint_reached' and map_digest(grid)==digest)
  unchanged=map_digest(grid)==digest
  cp=a.output/'private_checkpoint';cp.mkdir()
  artifacts.save_model(m,str(cp/'model.mjb'),None);spec=mujoco.mjtState.mjSTATE_INTEGRATION
  state=np.empty(mujoco.mj_stateSize(m,spec));mujoco.mj_getState(m,d,state,spec);artifacts.save_array(cp/'state.npy',state)
- report=dict(transit_obstacles='frozen_observed_map',live_depth_veto=False,robot_mask_enabled=CROSS_ROOM_ROBOT_MASK,route_events=policy.events,semantic_receptacle=a.receptacle,departure_events=departure.events,plans=policy.plans,scans=policy.scans,success=status=='known_room_waypoint_reached' and unchanged,status=status,fixed_map_unchanged=unchanged,initial_map_sha256=digest,final_map_sha256=map_digest(grid),wall_seconds=time.monotonic()-wall,simulated_seconds=float(d.time-start),guard_detail=guard_detail,contact_events=list(audit.events.values()),scope='empty-hand fixed-map transit via success graph or A*')
+ report=dict(transit_obstacles='frozen_observed_map',live_depth_veto=False,robot_mask_enabled=CROSS_ROOM_ROBOT_MASK,route_events=policy.events,semantic_receptacle=a.receptacle,departure_events=departure.events,plans=policy.plans,scans=policy.scans,success=status in ('known_room_waypoint_reached','already_in_destination_room') and unchanged,status=status,fixed_map_unchanged=unchanged,initial_map_sha256=digest,final_map_sha256=map_digest(grid),wall_seconds=time.monotonic()-wall,simulated_seconds=float(d.time-start),guard_detail=guard_detail,contact_events=list(audit.events.values()),scope='empty-hand fixed-map transit via success graph or A*')
  grid.save(a.output);slam.save(a.output/'slam');save_memory(a.output,memory)
  artifacts.write_text(a.output/'report.json',json.dumps(report,indent=2));print(json.dumps(report,indent=2))
  return 0 if report['success'] else 1
