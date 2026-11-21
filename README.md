@@ -78,6 +78,7 @@ runs all 300 episodes (8 at a time per episode GPU) and writes the summaries. Se
 | `PLANNER_MODEL` / `PLANNER_EFFORT` | `gpt-6.1-sol` / `high` | OpenAI model and reasoning effort for `gpt_*` |
 | `LIMITS` | `--gpt-limits` | per episode: 45 min wall, 15 simulated min, 100 skill calls (same budget as our GPT-as-policy baseline); e.g. `"--sim-minutes 15 --max-calls 100"` drops the wall cap |
 | `EPISODES_PER_GPU` | `8` | parallel episodes per episode GPU (CPU is usually the limit) |
+| `SERVICE_SETS` / `EPISODES_PER_SET` | `1` / `1` | `SERVICE_SETS=N`: N copies of the model services, one per GPU (~41 GB each), and each episode uses only its own copy, so episodes never wait for each other's model requests; request N GPUs (`--gres=gpu:N`). E.g. `SERVICE_SETS=8` on 8 × 80 GB GPUs runs 8 episodes, each with its own services (~4× the GPU-hours of the default 2-GPU layout) |
 | `SPLITS` / `TASKS` | `test` / all five | e.g. `SPLITS=test_same_map TASKS=set_table` |
 | `OUT` | `runs/household_eval/slurm_<jobid>` | re-submit with the same `OUT=` to resume an interrupted batch (finished episodes are kept) |
 

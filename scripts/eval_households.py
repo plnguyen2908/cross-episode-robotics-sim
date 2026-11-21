@@ -112,6 +112,9 @@ def main():
     p.add_argument('--dataset', type=Path, default=ROOT / 'runs/all_open_fixed_v4', help='dataset for --split')
     p.add_argument('--tasks', default='set_table,warm_two_pots,unpack_and_sort_groceries', help='tasks taken from --split')
     p.add_argument('--gpus', default='2,5,6,7', help='comma-separated GPU ids, one run per GPU at a time')
+    p.add_argument('--endpoints', help='comma-separated service endpoints files (scripts/start_eval_services.sh '
+                   '--sets): the worker of --gpus entry i uses file i (cycled), so each episode slot has its own '
+                   'model services; default: SERVICE_ENDPOINTS_FILE or the built-in addresses for every worker')
     p.add_argument('--output', type=Path, help='default runs/household_eval/batch_<time>')
     p.add_argument('--raw', action='store_true', help='show every line of every run')
     p.add_argument('--list', action='store_true', help='print the selected episodes and exit')
@@ -207,7 +210,13 @@ def main():
             # them running without a launcher.
             if not stopping.is_set():threading.Thread(target=stop, daemon=False).start()
 
-    def worker(gpu):
+    endpoint_files = [f.strip() for f in (a.endpoints or '').split(',') if f.strip()]
+    for f in endpoint_files:
+        if not Path(f).exists():p.error(f'no endpoints file {f}')
+
+    def worker(gpu, slot=0):
+        env = dict(os.environ)
+        if endpoint_files:env['SERVICE_ENDPOINTS_FILE'] = str(Path(endpoint_files[slot % len(endpoint_files)]).resolve())
         while True:
             if stopping.is_set():return
             try:source = jobs.get_nowait()
@@ -226,7 +235,7 @@ def main():
             for flag, value in (('--wall-minutes', a.wall_minutes), ('--sim-minutes', a.sim_minutes), ('--max-calls', a.max_calls)):
                 if value is not None:command += [flag, str(value)]
             if a.raw:command.append('--raw')
-            proc = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            proc = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, bufsize=1, start_new_session=True)
             procs[name] = proc;t0 = time.monotonic();last[name] = [t0, 'starting']
             say(name, f'started on GPU {gpu}')
@@ -308,7 +317,9 @@ def main():
     threading.Thread(target=heartbeat, daemon=True).start()
     say('eval', f'{len(sources)} episodes on GPUs {",".join(gpus)} -> {out} | planner {a.planner} | limits: wall '
                f'{a.wall_minutes or "none"} min, simulated {a.sim_minutes or "none"} min, calls {a.max_calls or "none"}')
-    threads = [threading.Thread(target=worker, args=(g,), daemon=True) for g in gpus]
+    if endpoint_files:say('eval', 'service sets: ' + ', '.join(f'worker {i} (GPU {g}) -> {Path(endpoint_files[i % len(endpoint_files)]).parent.name}'
+                                                           for i, g in enumerate(gpus)))
+    threads = [threading.Thread(target=worker, args=(g, i), daemon=True) for i, g in enumerate(gpus)]
     for i, t in enumerate(threads):
         t.start()
         if i < len(threads) - 1:time.sleep(20)   # stagger startup (model loads, SLAM init)
