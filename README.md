@@ -19,7 +19,7 @@ private task scorer gives success and a progress rate. Details: [docs/qwen_zero_
 | GPUs (80 GB A100/H100, one node) — choose a layout | **A. Own services per episode (recommended): 8 GPUs.** `SERVICE_SETS=8`: each GPU runs one full copy of the model services (~41 GB) and one episode that uses only that copy, so episodes never wait for each other's model requests. 300 episodes ≈ 30 h ≈ 240 GPU-hours (`EPISODES_PER_SET=2`: 16 episodes at once, ≈ 15 h ≈ 120 GPU-hours, two episodes share a copy). <br>**B. Shared services: 2 GPUs** (the default). One GPU runs one copy of the services for all episodes, the other runs up to 8 episodes (~1.2 GB each); cheaper (≈ 30 h ≈ 60 GPU-hours) but episodes queue for the shared models. |
 | CPU / RAM | ~10 cores and ~6 GB RAM per running episode + ~10 GB per service copy (8 episodes: **96 cores, 128 GB**; 16 episodes: 192 cores, 256 GB) |
 | Disk | ~200 GB data + ~110 GB download (deleted after unpacking with `--delete-shards`) + ~150–300 GB results |
-| Software | Linux x86-64, NVIDIA driver for CUDA 12.x, CUDA toolkit 12.x (`nvcc`, to build cuRobo/M2T2 ops), gcc, `git`, `zstd`, EGL/libGL for headless MuJoCo rendering, internet on the setup node |
+| Software | Linux x86-64, NVIDIA driver for CUDA 12.x, CUDA toolkit 12.x `nvcc` for M2T2's CUDA op (optional: the setup downloads a CUDA 12.6 compiler if none is found; cuRobo needs none), gcc, `git`, `zstd`, EGL/libGL for headless MuJoCo rendering, internet on the setup node |
 | API | `OPENAI_API_KEY` for `--planner gpt_*` (not needed for `qwen_*`) |
 
 ### 1. Get the code and build the environments (once, ~10–30 min, ~62 GB)
@@ -34,7 +34,9 @@ bash scripts/setup_eval_env.sh
 source eval_env.sh                      # before every run (the Slurm script does this itself)
 ```
 
-It clones the external code at pinned commits and applies our patches (`patches/eval_env/`),
+It clones the external code at pinned commits and applies our patches (`patches/eval_env/`):
+MolmoSpaces (robot models, controllers; our controller patch), cuRobo (arm motion planning, built
+from source at a pinned commit), M2T2, GraspGen-X, DAAAM/FastSAM, RoboCasa and RoboSuite. It
 installs Python 3.11.14 with `uv`, and builds three self-contained environments from pinned
 requirements (`.venv-sift` main runtime, `.venv-m2t2`, `.venv-graspgenx`). It also compiles M2T2's CUDA op,
 downloading a CUDA 12.6 compiler if no `nvcc` 12.x is found. Then it downloads the model weights at
