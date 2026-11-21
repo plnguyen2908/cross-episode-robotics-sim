@@ -46,7 +46,7 @@
 #   SKIP_MLSPACES_PREFETCH=1 skip their ~13 GB download (it then happens on first scene load)
 #
 # Not done here (data, not environment): saved episodes reference meshes/textures by absolute
-# path; see scripts/pack_eval_episodes.py to copy episodes + exactly the assets they use.
+# path; scripts/prepare_eval_data.py downloads the episodes plus exactly the assets they use and rewrites those paths.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -94,7 +94,7 @@ clone_pinned molmospaces  https://github.com/allenai/molmospaces.git 3ad93ae1f77
 apply_patch external/molmospaces patches/eval_env/molmospaces.patch
 if [ "${SKIP_ROBOCASA:-0}" != 1 ]; then
   # Source only (no `download_kitchen_assets`): saved scenes reference robosuite/robocasa
-  # meshes, which scripts/pack_eval_episodes.py ships with the episodes.
+  # meshes, which scripts/prepare_eval_data.py installs with the episodes (eval/eval_scene_assets.tar.zst).
   clone_pinned robosuite https://github.com/ARISE-Initiative/robosuite.git 5ce6643f3092639d08f7b0f90ed1c6a84f50552c
   clone_pinned robocasa  https://github.com/robocasa/robocasa.git          4f8a2980def75a55dff96b990745b83540425f09
   apply_patch external/robosuite patches/eval_env/robosuite.patch
