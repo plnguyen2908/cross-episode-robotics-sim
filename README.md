@@ -119,9 +119,9 @@ and task × rooms, and how episodes ended), `planner_usage.json` (API tokens and
   and to rewrite the rest of the plan after a failed call (at most 10 replans); the robot's skills
   execute the up-to-100 calls without the model. Our runs average **2–3 requests per episode**;
   each sends ~4–5 k input tokens (mostly a cacheable repeated prefix) and gets back the plan
-  (~0.5–1 k tokens) plus reasoning tokens (~2–8 k at `high` effort). Expect **~$0.07–0.25 per
-  episode, ≈ $20–75 for 300 episodes**; many failures and long reasoning push it higher (hard
-  upper bound with all 10 replans and repairs in every episode ≈ $1,000). For comparison, GPT
+  (~0.5–1 k tokens) plus reasoning tokens. Measured on a grocery episode with `gpt-6.1-sol` at `high`
+  effort: 1 request, 3.0 k input + 1.2 k output (0.7 k reasoning) tokens, **$0.02 per episode**; with
+  replans after failures expect **~$0.02–0.10 per episode, ≈ $6–30 for 300 episodes** (hard upper bound with all 10 replans and repairs in every episode ≈ $300). For comparison, GPT
   *controlling the robot directly* (one request per action, two camera images each, 100 calls)
   used 393 M input tokens for 95 episodes, ≈ $0.68 per episode. `planner_usage.json` gives the real total.
 
