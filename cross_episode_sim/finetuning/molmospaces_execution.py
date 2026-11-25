@@ -114,4 +114,12 @@ def configure_native_actuators(model, configuration=DEFAULT_CONFIG):
             if not np.array_equal(array[index], value):
                 changes.append(dict(actuator=name, field=field))
             array[index] = value
+    # per-task grip force (evaluation/articulated_scene.GRIP_FORCE_BY_TASK): only the loaded pots scene changes
+    from cross_episode_sim.evaluation.articulated_scene import grip_force_for_current_scene
+    limit = grip_force_for_current_scene()
+    if limit is not None:
+        index = model.actuator('robot_0/gripper/fingers_actuator').id
+        if not np.array_equal(model.actuator_forcerange[index], [-limit, limit]):
+            changes.append(dict(actuator='robot_0/gripper/fingers_actuator', field='actuator_forcerange', per_task=limit))
+        model.actuator_forcerange[index] = [-limit, limit]
     return changes

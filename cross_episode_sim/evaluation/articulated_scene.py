@@ -233,6 +233,18 @@ def _rebuild(source, old):
     return model
 
 
+# Grip force limit per task: warm two pots grips at 10 N (the 2.7 kg pot slides out of a 5 N rim grasp; the v4 oracle
+# used 10 N); every other task keeps the shared controller config's 5 N.
+DEFAULT_GRIP_FORCE_N = 5.
+GRIP_FORCE_BY_TASK = {'warm_two_pots': 10.}
+
+
+def grip_force_for_current_scene():
+    """The grip force limit for the scene this process loaded (None: no per-task override)."""
+    import os
+    return GRIP_FORCE_BY_TASK.get(os.environ.get('EVAL_SCENE_TASK'))
+
+
 def load_saved_scene(source, tolerance=1e-4):
     """Return (model, data, report) for a saved episode as every evaluated method sees it."""
     from cross_episode_sim.evaluation.stove_knobs import paint_kept_knobs, PAINTED_TASKS
@@ -240,6 +252,10 @@ def load_saved_scene(source, tolerance=1e-4):
     model, data, report = _load_saved_scene(source, tolerance)
     task = json.loads((source/'config.json').read_text()).get('task') if (source/'config.json').exists() else None
     report['painted_knobs'] = paint_kept_knobs(model) if task in PAINTED_TASKS else []
+    # per-task grip force: the controllers apply it after the shared actuator config
+    import os
+    if task:os.environ['EVAL_SCENE_TASK'] = task
+    report['grip_force_limit_n'] = GRIP_FORCE_BY_TASK.get(task, DEFAULT_GRIP_FORCE_N)
     return model, data, report
 
 
