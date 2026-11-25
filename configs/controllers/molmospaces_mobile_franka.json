@@ -460,10 +460,10 @@
       ],
       "actuator_ctrllimited": 1,
       "actuator_forcerange": [
-        -200.0,
-        200.0
+        0.0,
+        0.0
       ],
-      "actuator_forcelimited": 1
+      "actuator_forcelimited": 0
     },
     "robot_0/base_y_act": {
       "actuator_gainprm": [
@@ -511,10 +511,10 @@
       ],
       "actuator_ctrllimited": 1,
       "actuator_forcerange": [
-        -200.0,
-        200.0
+        0.0,
+        0.0
       ],
-      "actuator_forcelimited": 1
+      "actuator_forcelimited": 0
     },
     "robot_0/base_theta_act": {
       "actuator_gainprm": [
@@ -562,10 +562,10 @@
       ],
       "actuator_ctrllimited": 0,
       "actuator_forcerange": [
-        -50.0,
-        50.0
+        0.0,
+        0.0
       ],
-      "actuator_forcelimited": 1
+      "actuator_forcelimited": 0
     }
   },
   "action_noise_config": {

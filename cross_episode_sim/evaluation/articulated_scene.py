@@ -243,29 +243,6 @@ def load_saved_scene(source, tolerance=1e-4):
     return model, data, report
 
 
-# The saved mobile base is a 50 kN/m position servo with no force limit on a 19 kg base:
-# commanded 10 cm into a counter it pushes ~5 kN. Frozen fixtures absorbed that; articulated
-# cabinet doors get crushed into their cabinets and the simulation diverges. Normal driving
-# (0.5 m/s, 0.8 rad/s limits) needs tens of newtons; these limits are ~10x that.
-BASE_FORCE_LIMIT_N = 200.
-BASE_TORQUE_LIMIT_NM = 50.
-
-
-def limit_base_force(model):
-    """Cap the planar base actuators' force/torque; returns {actuator: limit} applied.
-
-    Call AFTER the robot controller is constructed: MolmoSpacesController rewrites actuator
-    gains and force limits at start-up. Every evaluated method must apply the same cap.
-    """
-    applied = {}
-    for name, limit in (('robot_0/base_x_act', BASE_FORCE_LIMIT_N), ('robot_0/base_y_act', BASE_FORCE_LIMIT_N),
-                        ('robot_0/base_theta_act', BASE_TORQUE_LIMIT_NM)):
-        try: a = model.actuator(name).id
-        except KeyError: continue
-        model.actuator_forcelimited[a] = 1; model.actuator_forcerange[a] = [-limit, limit]; applied[name] = limit
-    return applied
-
-
 def _load_saved_scene(source, tolerance=1e-4):
     """Return (model, data, report) for a saved episode with all fixture joints present."""
     from cross_episode_sim.evaluation.fixture_articulation import authored_fixture_joints
@@ -286,86 +263,12 @@ def _load_saved_scene(source, tolerance=1e-4):
     still = sorted(set(frozen) - {new.joint(j).name for j in range(new.njnt)})
     if still:
         raise RuntimeError(f'Rebuilt scene still lacks {len(still)} authored fixture joints, e.g. {still[:4]}')
-    door_armature = stabilize_door_hinges(new, new_data, added)
-    cabinet_contacts = settle_cabinet_fronts(new, new_data, added)
     removed = _removed_bodies(old, new)
-    gaps =[(float(np.linalg.norm(new_data.body(old.body(b).name).xpos - old_data.body(old.body(b).name).xpos)),
+    gaps = [(float(np.linalg.norm(new_data.body(old.body(b).name).xpos - old_data.body(old.body(b).name).xpos)),
              old.body(b).name) for b in range(1, old.nbody) if old.body(b).name not in removed]
     worst = max(gaps)
     if worst[0] > tolerance:
         raise RuntimeError(f'Rebuilt scene moves saved body {worst[1]} by {worst[0]*1000:.3f} mm')
     return new, new_data, dict(rebuilt=True, saved_joints=old.njnt, rebuilt_joints=new.njnt,
                                added_joints=added, max_body_gap_m=worst[0], tolerance_m=tolerance,
-                               removed_stove_knobs=sorted(removed), door_hinge_armature=door_armature,
-                               cabinet_fronts=cabinet_contacts)
-
-
-# Cabinet doors in the authored assets weigh 55-140 g with ~0.003 kg m^2 about their
-# hinge. Frozen, that never mattered; articulated, a robot contact on such a door
-# gives accelerations MuJoCo cannot integrate at 2 ms and the episode diverges.
-# A real 0.3-0.5 m wooden cabinet door (~2-3 kg) has ~0.1 kg m^2 about its hinge.
-DOOR_HINGE_MIN_INERTIA = 0.1
-
-
-def stabilize_door_hinges(model, data, joints, minimum=DOOR_HINGE_MIN_INERTIA):
-    """Raise each added cabinet door hinge's effective inertia to `minimum` (armature).
-
-    Only joints named *doorhinge* (cabinet doors). Appliance doors, drawers, knobs
-    and buttons keep their authored dynamics. Joint ranges, damping, collisions and
-    the start pose are unchanged. Returns {joint: added armature}.
-    """
-    mujoco.mj_forward(model, data)
-    full = np.zeros((model.nv, model.nv)); mujoco.mj_fullM(model, full, data.qM)
-    added = {}
-    for name in joints:
-        j = model.joint(name)
-        if 'doorhinge' not in name or int(j.type[0]) != mujoco.mjtJoint.mjJNT_HINGE: continue
-        dof = int(model.jnt_dofadr[j.id])
-        need = minimum - float(full[dof, dof])
-        if need > 0:
-            model.dof_armature[dof] += need; added[name] = round(need, 4)
-    if added: mujoco.mj_forward(model, data)
-    return added
-
-
-# Saved v4 scenes had every cabinet front frozen, so MuJoCo never computed a door's contact
-# with its own cabinet. Articulated, a closed door is held by its hinge limit AND contacts
-# with its own cabinet AND the robot pressing on it; that over-constrained stack diverges.
-# The soft default limit (solref 0.02) also let the robot push doors/drawers past closed into
-# the neighbouring appliance. Validated on 6 crashed + 3 successful GPT episodes (full replays).
-FRONT_LIMIT_SOLREF = (0.004, 1.0)          # 2x the 2 ms timestep: stiffest stable time constant
-FRONT_LIMIT_SOLIMP = (0.99, 0.999, 0.001)
-
-
-def settle_cabinet_fronts(model, data, joints):
-    """For added cabinet door hinges (*doorhinge) and cabinet drawer slides (stack*/cab* *slidejoint):
-    stiff joint limits; for doors also no collision with their OWN cabinet body (contype bits:
-    door 4/1, own cabinet 2/1; every other geom is 1/1 so both still collide with the robot,
-    objects, walls and other fixtures). Appliance doors, knobs and buttons are unchanged.
-    """
-    def subtree(root):
-        out = set()
-        for b in range(model.nbody):
-            p = b
-            while p > 0:
-                if p == root: out.add(b); break
-                p = model.body_parentid[p]
-        return out
-    report = dict(stiff_limits=[], doors_without_own_cabinet_contact=[])
-    for name in joints:
-        j = model.joint(name).id
-        door = 'doorhinge' in name
-        drawer = 'slidejoint' in name and name.startswith(('stack', 'cab'))
-        if not (door or drawer) or not model.jnt_limited[j]: continue
-        model.jnt_solref[j] = FRONT_LIMIT_SOLREF; model.jnt_solimp[j, :3] = FRONT_LIMIT_SOLIMP
-        report['stiff_limits'].append(name)
-        if not door: continue
-        front = subtree(model.jnt_bodyid[j]); cabinet = subtree(model.body_parentid[model.jnt_bodyid[j]]) - front
-        for g in range(model.ngeom):
-            if not (model.geom_contype[g] or model.geom_conaffinity[g]): continue
-            if model.geom_bodyid[g] in front: model.geom_contype[g], model.geom_conaffinity[g] = 4, 1
-            elif model.geom_bodyid[g] in cabinet and model.geom_contype[g] != 4:
-                model.geom_contype[g], model.geom_conaffinity[g] = 2, 1
-        report['doors_without_own_cabinet_contact'].append(name)
-    if report['stiff_limits']: mujoco.mj_forward(model, data)
-    return report
+                               removed_stove_knobs=sorted(removed))
