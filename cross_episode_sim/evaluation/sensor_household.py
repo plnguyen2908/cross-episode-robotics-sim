@@ -387,6 +387,25 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
         artifacts.write_text(physics/'continuation.json',json.dumps(dict(navigation_source=str(previous),input=str(out/'input.npz'),success=True),indent=2))
         return physics
 
+    def live_handoff(self,output,previous):
+        """After a memory attempt that gave up (it moved the base/arm and stepped physics), the baseline stage needs the
+        LIVE state, not the handoff saved before memory ran (2026-11-27: 'Checkpoint is not the current live state' in
+        24 baseline stages after MEMORY_PICK_FALLBACK / failed MEMORY_PLACE). A fresh checkpoint here, plus the previous
+        handoff's other files (held payload points, report, support poses) that the stage reads."""
+        import copy
+        out=self.checkpoint(output,previous)
+        # handoff files are in-memory artifacts during an episode (runtime.artifacts, keyed by resolved path); copy
+        # the previous handoff's top-level ones this checkpoint did not write (observed_payload_tool.npy, report.json, ...)
+        store=self.runtime.artifacts;src=artifacts.key(previous)+'/';dst=artifacts.key(out)+'/'
+        for k in [k for k in store if k.startswith(src) and '/' not in k[len(src):]]:
+            if dst+k[len(src):] not in store:store[dst+k[len(src):]]=copy.deepcopy(store[k])
+        if Path(previous).is_dir():
+            import shutil
+            for f in Path(previous).iterdir():
+                if f.is_file() and not artifacts.exists(out/f.name):shutil.copy2(f,out/f.name)
+        print('MEMORY_FALLBACK_LIVE_HANDOFF',json.dumps(dict(previous=str(previous),live=str(out))),flush=True)
+        return out
+
     def checkpoint(self,output,previous):
         """In-memory handoff of the current live state, never a restoration."""
         from ..mapping.continuity import load_memory,save_memory
@@ -759,8 +778,9 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             # fails before creating a physics handoff. Never carry a previous
             # object's successful pickup after a failed current attempt.
             ctx.update(pick=out,held=None,carry=None)
-            mem_loc=ctx.pop('memory_pick_location',None)
+            mem_loc=ctx.pop('memory_pick_location',None);mem_tried=False
             if MEMORY_CONSTRAINED_REPLAY and getattr(self,'memory_nav',None) is not None and mem_loc is not None and _call_memory():
+                mem_tried=True
                 # remembered pick from INSIDE a fixture (constrained), gated like fixture replays; the baseline pick otherwise
                 from ..navigation.memory_navigation import fixture_replay
                 try:mem_log=fixture_replay(self.memory_nav,'pick',mem_loc)
@@ -781,12 +801,15 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 if bo.get('result')=='backed off':
                     ctx['continuation']=self.checkpoint(out.parent/'memory_back_off',ctx['continuation'])
             from ..runtime.household_components import confined_pick_options, pick_confined
-            if mem_loc is not None and ctx.get('dock') is None and ctx.get('memory_approach'):
-                # the redock before this pick was skipped for the remembered take-out; it did not finish: the usual redock
-                # before the live pick
+            if mem_tried or (mem_loc is not None and ctx.get('dock') is None and ctx.get('memory_approach')):
+                # the redock before this pick was skipped for the remembered take-out, or memory moved the robot away from
+                # the redock pose before giving up (2026-11-27 table-2r-000007: the live pick then loaded the stale redock
+                # handoff): the usual redock before the live pick, from the live state (it saves a fresh dock handoff)
                 ctx['memory_approach']=False
                 try:print('MEMORY_PICK_FALLBACK_REDOCK',json.dumps({k:v for k,v in (interface.redock(target=target,purpose='pick') or {}).items() if k in ('success','reason')},default=str),flush=True)
-                except Exception as exc:print('MEMORY_PICK_FALLBACK_REDOCK_FAILED',f'{type(exc).__name__}: {exc}'[:160],flush=True)
+                except Exception as exc:
+                    print('MEMORY_PICK_FALLBACK_REDOCK_FAILED',f'{type(exc).__name__}: {exc}'[:160],flush=True)
+                    if mem_tried and ctx.get('dock') is not None:ctx['dock']=self.live_handoff(out.parent/'memory_fallback_dock',ctx['dock'])
             if confined_pick_options(target) is not None:
                 outcome,physics=pick_confined(self.runtime,out,ctx['dock'],fixtures,target,
                                               redock=not self.qwen_interface)
@@ -838,6 +861,16 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     ctx.update(held=None,carry=ctx['continuation'])
                     progress('observe_dock_place','completed')
                     return SkillOutcome(True,'memory_place_replayed')
+                # memory moved the robot before giving up: the place redock's session and the carry handoff were saved
+                # before that (2026-11-27 store-4r-000003: 'Checkpoint is not the current live state' for the carry)
+                ctx.pop('qwen_prepared_session',None)
+                geo=(getattr(self,'memory_opened_geometry',{}) or {}).get(receptacle)
+                if geo is not None and fixtures is not None and receptacle not in (getattr(fixtures,'hinges',{}) or {}):
+                    # the cabinet memory opened, as the live open_door records it, so the live place uses its cabinet
+                    # place (it used the generic place and found 'No freshly observed support surface')
+                    fixtures.hinges=getattr(fixtures,'hinges',{}) or {};fixtures.hinges[receptacle]={k:np.asarray(v,float) for k,v in geo.items()}
+                    print('MEMORY_FALLBACK_OPENED_GEOMETRY',json.dumps(dict(receptacle=receptacle)),flush=True)
+                if ctx.get('carry') is not None:ctx['carry']=self.live_handoff(self.output/f'memory_place_fallback_{len(interface.history):03d}',ctx['carry'])
             if getattr(self,'memory_nav',None) is None and getattr(self,'fixture_transfer',None) is not None and ctx.get('held') is not None \
                     and mem_loc in ('microwave','fridge','cup_drawer','kitchen_cabinet'):
                 try:mem_log=self.fixture_transfer.run('place',mem_loc,receptacle,fixtures,self.output/f'fixture_transfer_{len(interface.history):03d}')
@@ -1143,6 +1176,10 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     fixtures.drawers=getattr(fixtures,'drawers',{}) or {}
                     fixtures.drawers[target_name]=dict(open_handle=np.asarray(geo['open_handle'],float),normal=np.asarray(geo['normal'],float),opening=float(geo['opening']))
                 print('MEMORY_FIXTURE_GEOMETRY',json.dumps(dict(target=target_name,geometry=geo),default=str)[:400],flush=True)
+                if geo and name=='open_door' and all(k in geo for k in ('hinge','open_handle','closed_handle','closed_normal')):
+                    if not hasattr(self,'memory_opened_geometry'):self.memory_opened_geometry={}
+                    self.memory_opened_geometry[target_name]=geo
+                elif name=='close_door':(getattr(self,'memory_opened_geometry',{}) or {}).pop(target_name,None)
             else:
                 print('MEMORY_FIXTURE_FALLBACK',json.dumps(dict(memory_only_approach=bool(ctx.get('memory_approach')))),flush=True)
                 if mem_log is not None and ctx.get('memory_approach'):
