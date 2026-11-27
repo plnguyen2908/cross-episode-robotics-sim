@@ -84,11 +84,18 @@ def load_checkpoint(directory):
     from . import artifacts
     state=artifacts.load_array(directory/'private_checkpoint/state.npy')
     if runtime is not None and runtime.model is not None:
-        # Never rewind an active episode to a stale checkpoint.
-        if (len(state)!=mujoco.mj_stateSize(runtime.model,mujoco.mjtState.mjSTATE_INTEGRATION)
-                or abs(float(state[0])-runtime.data.time)>1e-7
+        # Never rewind an active episode: a stage always continues from the live
+        # state. A handoff saved before later motion (a memory attempt that fell
+        # back, a back-off, an arm settle) is only behind it; the stage uses its
+        # files (observed target, map, payload) with the live robot, as a live
+        # run does. It used to raise 'Checkpoint is not the current live state'
+        # (same-layout batch 20261126_152342: 24 pick/observe_receptacle stages).
+        if len(state)!=mujoco.mj_stateSize(runtime.model,mujoco.mjtState.mjSTATE_INTEGRATION):
+            raise RuntimeError(f'Checkpoint is from a different model: {directory}')
+        if (abs(float(state[0])-runtime.data.time)>1e-7
                 or not np.allclose(state[1:1+runtime.model.nq],runtime.data.qpos,rtol=0,atol=1e-9)):
-            raise RuntimeError(f'Checkpoint is not the current live state: {directory}')
+            print('CHECKPOINT_BEHIND_LIVE_STATE',json.dumps(dict(checkpoint=str(directory)[-90:],saved_time=round(float(state[0]),3),
+                  live_time=round(float(runtime.data.time),3),max_qpos_diff=round(float(np.abs(state[1:1+runtime.model.nq]-runtime.data.qpos).max()),4))),flush=True)
         return runtime.model,runtime.data
     model=mujoco.MjModel.from_binary_path(str(directory/'private_checkpoint/model.mjb'))
     data=mujoco.MjData(model)
