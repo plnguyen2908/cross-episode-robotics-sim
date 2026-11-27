@@ -127,6 +127,7 @@ def check_memory(root):
             need(memory / 'history_streams' / 'streams' / e['id'] / 'sensors.h5')
             need(memory / 'history_streams' / 'episodes' / e['id'] / 'trajectory.npz')
             need(memory / 'wrist_memory' / f"{e['id']}.h5")
+        need(memory / 'wrist_memory' / 'past_holds.json')
     print(f'memory check: {len(ids)} history episodes, {len(houses)} houses, {len(missing)} missing files', flush=True)
     for row in missing[:10]:print('   missing', row)
     if missing:raise SystemExit('memory check failed; re-run with --memory')

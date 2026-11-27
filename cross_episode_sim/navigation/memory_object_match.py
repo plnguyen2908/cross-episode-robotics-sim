@@ -272,6 +272,21 @@ def hold_in_gripper(cam, T_base_gripper):
     return (np.linalg.inv(T_base_gripper)@pb)[:3], n
 
 
+_PAST_HOLDS = None
+
+
+def _past_holds():
+    """<wrist memory>/past_holds.json: the same past_hold measurement made once offline from the recorded wrist frames
+    and commands, {episode: {segment_id: [x,y,z] | null}}; measuring it live took ~5 s per remembered bowl place and
+    5-room store houses ran over the 60 s memory budget (2026-11-27). Missing file or entry -> measured live."""
+    global _PAST_HOLDS
+    if _PAST_HOLDS is None:
+        from ..evaluation.memory_paths import wrist_root
+        p = wrist_root()/'past_holds.json'
+        _PAST_HOLDS = json.loads(p.read_text()) if p.exists() else {}
+    return _PAST_HOLDS
+
+
 class WristObjectMatch:
     """navigator.object_shift hook: base-frame (dx, dy) that moves OUR held object onto the past one at the release.
     Reads only our live sensors/joints and the past robot's recorded data: its commands (PastRobot), its recorded wrist
@@ -314,6 +329,8 @@ class WristObjectMatch:
         """the past robot's hold of the object it carries into remembered place `row` (episode, segment): measured at
         its pick before that place (pregrasp_hold), cached; LookupError when not measurable"""
         key = ('hold', row['episode'], row['segment'])
+        if key not in self.cache and row['segment'] in (pre := _past_holds().get(row['episode'], {})):
+            h = pre[row['segment']]; self.cache[key] = None if h is None else np.asarray(h, float)
         if key not in self.cache:
             pr = self._past(row['episode']); seg = next(x for x in pr.mem['skills'] if x['segment_id'] == row['segment'])
             pk = seg if seg['skill'] == 'pick' else pr.pick_before(seg)

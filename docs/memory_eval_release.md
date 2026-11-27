@@ -169,6 +169,13 @@ main re-rendered the past wrist camera and read the past held object from that s
 replaced by the recorded wrist frames, and the 70 history scene recordings are not part of the
 Hugging Face release. `scripts/test_constrained_replay.py` (the scene reader) was removed.
 
+**Added 2026-11-27 (later):** `memory/wrist_memory/past_holds.json` (archive `wrist_past_holds.tar.zst`,
+7 kB): the past robot's hold of each carried object, the same `WristObjectMatch.past_hold` measurement made
+once offline from the recorded wrist frames and commands (70 episodes, 563 pick/place segments, 484
+measured; identical to the live measurement on 33 checked places). Measuring it live cost ~5 s per
+remembered place, and 5-room store houses ran over the 60 s memory budget and fell back to the baseline
+place. Missing file or entry: measured live as before.
+
 The README's eval section describes the memory setting as it will work after the merge. The
 branch has to provide exactly these, and the clean-room test (section 5) has to use them:
 

@@ -98,6 +98,8 @@ $DATA/memory/
   history_streams/                          onboard RGB-D streams and SLAM trajectories of 70 tracked history
                                             episodes (~11 GB)
   wrist_memory/<episode>.h5                 recorded wrist RGB-D frames of the same 70 episodes (~4 GB)
+  wrist_memory/past_holds.json              where each past robot held its object, measured once offline from
+                                            those frames and its commands (without it: measured live, ~5 s each)
   text/                                     text memory: task procedures and where objects were found
 $DATA/fine_tuning/batches/<batch>/<episode>/  skill_calls.json, instruction.txt, config.json of the 500 history
                                               episodes; not the 183 GB fine-tuning split
