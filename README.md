@@ -1,5 +1,9 @@
 # Cross-Episode Robotics Sim
 
+> **Memory evaluation (GPT / Qwen planner + memory of past episodes in the same house): not runnable from main yet.**
+> What exists, what is still missing for a collaborator, and the release plan for GitHub and Hugging Face:
+> [docs/memory_eval_release.md](docs/memory_eval_release.md).
+
 
 ## Household evaluation on Slurm (zero-shot planner; start here to run the eval)
 
