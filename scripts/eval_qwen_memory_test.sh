@@ -10,14 +10,15 @@
 # (--text-memory auto, TEXT_MEMORY_STYLE=procedure), memory navigation + skip explore when the
 # house is recognized, limits 45 wall min / 20 simulated min / 100 calls. Score = private
 # report.json success; summary.json and summary_by_rooms.json in $OUTPUT.
-# Env: GPUS (default 2,5,6,7), SPLIT (test), TASKS (all), OUTPUT (new folder on /nobackup3),
+# Env: DATA (the --root of prepare_eval_data.py, with --memory; default runs/all_open_fixed_v4), GPUS (default 0),
+# SPLIT (test), TASKS (all), OUTPUT (default runs/household_eval/qwen_memory_<split>_<time>),
 # INTO (rerun into an existing batch folder: finished episodes are skipped).
 # Extra arguments go to eval_households.py (e.g. --list, --raw, episode folders).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-GPUS=${GPUS:-2,5,6,7};SPLIT=${SPLIT:-test};TASKS=${TASKS:-all}
-args=(--qwen-memory --split "$SPLIT" --tasks "$TASKS" --gpus "$GPUS" --dataset /nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4)
+GPUS=${GPUS:-0};SPLIT=${SPLIT:-test};TASKS=${TASKS:-all};DATA=${DATA:-$ROOT/runs/all_open_fixed_v4}
+args=(--memory --planner qwen_replan --split "$SPLIT" --tasks "$TASKS" --gpus "$GPUS" --dataset "$DATA")
 if [ -n "${INTO:-}" ]; then args+=(--into "$INTO")
-else args+=(--output "${OUTPUT:-/nobackup3/le/household_eval/qwen_memory_${SPLIT}_$(date +%Y%m%d_%H%M%S)}")
+else args+=(--output "${OUTPUT:-$ROOT/runs/household_eval/qwen_memory_${SPLIT}_$(date +%Y%m%d_%H%M%S)}")
 fi
-exec python3 "$ROOT/scripts/eval_households.py" "${args[@]}" "$@"
+exec "${PYTHON:-$ROOT/.venv-sift/bin/python}" "$ROOT/scripts/eval_households.py" "${args[@]}" "$@"

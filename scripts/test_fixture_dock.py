@@ -214,7 +214,7 @@ def run(source, out):
     if not fixtures:report['decision'] = 'no fixture in this task'; return report
     model, data, _ = load_saved_scene(source); merged = memory_directory(MEM/'visual_tour_root', house, task)
     reloc = ScanRelocalization(merged); slam = create_mapper(fuse_dense=False)
-    plan = {p['id']: p for p in json.loads((HISTORY_ROOT/'plan.json').read_text())['episodes']}
+    plan = __import__('cross_episode_sim.evaluation.memory_paths', fromlist=['history_plan']).history_plan()
     W0 = np.linalg.inv(np.load(MEM/'visual_tours'/house/'private_start_pose.npy'))
     history = np.load(merged/'history_geometry.npz')['points'].astype(float); htree = cKDTree(wall2d(history, 200000)); hnormals = map_normals(htree)
     cache = {}

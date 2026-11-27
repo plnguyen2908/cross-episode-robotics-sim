@@ -134,8 +134,8 @@ def straighten(root, merged, segment=60., max_shift=.5, max_deg=10., min_gain=.0
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--root', type=Path, default=Path('/nobackup/le/cross-episode-qwen-capx/runs/visual_memory_balanced_v4'))
-    p.add_argument('--maps', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual/merged'))
+    p.add_argument('--root', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/history_streams'))
+    p.add_argument('--maps', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/visual/merged'))
     p.add_argument('--fps', type=float, default=20., help='frame rate of keyframe indices (history and tours: 20)')
     p.add_argument('--houses', nargs='+', required=True)
     p.add_argument('--segment', type=float, default=60.)

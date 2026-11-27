@@ -133,11 +133,11 @@ def yaw(T):return np.arctan2(T[1, 0], T[0, 0])
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--root', type=Path, default=Path('/nobackup/le/cross-episode-qwen-capx/runs/visual_memory_balanced_v4'))
-    p.add_argument('--maps', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual/merged'))
+    p.add_argument('--root', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/history_streams'))
+    p.add_argument('--maps', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/visual/merged'))
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--route-memory', type=Path, help='write <house>.json route memory here')
-    p.add_argument('--tours', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual_tours'))
+    p.add_argument('--tours', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/visual_tours'))
     a = p.parse_args()
     plan = {e['id']: e for e in json.loads((a.root/'plan.json').read_text())['episodes']}
     rows = []

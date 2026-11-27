@@ -14,7 +14,7 @@ def build_appliance_backend(runtime, *, output, command_observer=None, progress=
     from ..control.observed_arm import robot_calibration
     from ..control.planner_cache import sensor_arm_planner
     from ..control.sensor_appliance_backend import SensorApplianceBackend
-    from ..control.m2t2_policy import M2T2Policy
+    from ..control.m2t2_policy import M2T2Policy,default_checkpoint
     from ..perception.molmo_pointing import MolmoPointer
     from ..finetuning.molmospaces_execution import MolmoSpacesController
     m,d=runtime.model,runtime.data
@@ -80,7 +80,7 @@ def build_appliance_backend(runtime, *, output, command_observer=None, progress=
     backend=SensorApplianceBackend(capture=capture,joints=joints,fingers=fingers,command=command,
         geometry=geometry,arm=None,prepare_arm=prepare_arm,pad_vertices=pad_vertices,precise_geometry=precise_geometry,pointer=MolmoPointer(),
         motion_epoch=lambda:getattr(runtime,'appliance_motion_epoch',0),
-        m2t2=M2T2Policy('/nobackup2/le/.cache/hub/models--wentao-yuan--m2t2/snapshots/a20325dcd19cd1b838274974d0ebe35bfe383796/m2t2.pth',
+        m2t2=M2T2Policy(default_checkpoint(),
                        'external/M2T2'),progress=progress or (lambda event,detail:None))
     # Burner knobs use the documented seven-knob stove manual (user decision,
     # November 10; docs/appliance_control_conventions.md): count the observed

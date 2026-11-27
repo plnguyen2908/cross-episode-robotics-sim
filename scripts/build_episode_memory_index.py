@@ -62,7 +62,7 @@ def build(v4):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--v4', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4'))
+    p.add_argument('--v4', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4'))
     a = p.parse_args()
     out = build(a.v4)
     target = a.v4/'memory'/'episode_memory.json'

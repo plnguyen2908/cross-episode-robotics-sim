@@ -1,7 +1,7 @@
 """Text memory for the Qwen whole-plan planners (qwen_zero_shot / qwen_replan).
 
-Two text memories from the history (fine-tuning) split only, built on the memory
-worktree (/nobackup/le/cross-episode-qwen-capx, runs/task_language_memory_v4):
+Two text memories from the history (fine-tuning) split only (built as
+task_language_memory_v4; on disk in <dataset>/memory/text, memory_paths.text_root):
 
 - procedure: the Gemini task skill tree, grouped from the exact recorded skill
   logs of all history episodes of the task. Only the most-supported procedure is
@@ -23,7 +23,6 @@ import os
 from pathlib import Path
 import re
 
-DEFAULT_ROOT = Path('/nobackup/le/cross-episode-qwen-capx/runs/task_language_memory_v4')
 MAX_SOURCES = 12
 MIN_EPISODES = 2
 
@@ -152,15 +151,16 @@ def load_text_memory(root, task, source, instruction=None, style='past_plan'):
     Gemini procedure; a house without them (new layouts) keeps the procedure. 'procedure': the earlier memory."""
     from .search_places import search_order
     if style not in STYLES:raise ValueError(f'memory style must be one of {STYLES}')
-    root = Path(root or DEFAULT_ROOT)
+    from .memory_paths import dataset_root, text_root
+    root = Path(root or text_root(source))
     procedure, procedure_audit = procedure_memory(root, task)
     house, split = house_of(source)
     instruction = instruction if instruction is not None else (Path(source)/'instruction.txt').read_text().strip()
-    order, order_audit = search_order(task, instruction, house, dataset_root_of(source) if house else None, root)
+    order, order_audit = search_order(task, instruction, house, dataset_root(source) if house else None, root)
     plans, plans_audit = [], dict(available=False)
     if style == 'past_plan' and house:
         from .memory_plan import past_plans
-        plans, plans_audit = past_plans(dataset_root_of(source), house, task, instruction, root)
+        plans, plans_audit = past_plans(dataset_root(source), house, task, instruction, root)
     other = bool(order_audit['history']) and (order_audit['history'] or {}).get('scope') == 'other houses'
     memory = dict(
         what_this_is='Text memory from PREVIOUS episodes of this task'

@@ -85,13 +85,13 @@ def merge(root, ids, out):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--root', type=Path, default=Path('/nobackup/le/cross-episode-qwen-capx/runs/visual_memory_balanced_v4'))
+    p.add_argument('--root', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/history_streams'))
     p.add_argument('--scores', type=Path, required=True)
-    p.add_argument('--output', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual/merged'))
+    p.add_argument('--output', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/visual/merged'))
     p.add_argument('--houses', nargs='+')
     p.add_argument('--per-room', type=int, default=2, help='best-scoring episodes per start room')
     p.add_argument('--full-min-score', type=float, help='episodes scoring at least this use the whole recording; per-room additions use --prefix')
-    p.add_argument('--dataset', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4'))
+    p.add_argument('--dataset', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4'))
     p.add_argument('--prefix', type=float, default=150., help='use only each episode\'s first seconds (drift is smallest near its start)')
     p.add_argument('--min-score', type=float, default=.90)
     p.add_argument('--min-agreement', type=float, default=.93)

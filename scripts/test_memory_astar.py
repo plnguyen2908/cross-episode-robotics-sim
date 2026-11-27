@@ -79,8 +79,8 @@ def truth_walls(root, plan, episodes, ref_world0):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--root', type=Path, default=Path('/nobackup/le/cross-episode-qwen-capx/runs/visual_memory_balanced_v4'))
-    p.add_argument('--maps', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual/merged'))
+    p.add_argument('--root', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/history_streams'))
+    p.add_argument('--maps', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/visual/merged'))
     p.add_argument('--starts', type=Path, required=True, help='folder of test_visual_relocalization outputs')
     p.add_argument('--output', type=Path, required=True)
     a = p.parse_args()

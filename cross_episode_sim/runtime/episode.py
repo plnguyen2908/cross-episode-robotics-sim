@@ -45,7 +45,7 @@ class EpisodeRuntime:
             source,output=command[2:4]
             stages=[
                 [sys.executable,'scripts/capture_m2t2_input.py','--source',source,'--output',output],
-                [sys.executable,'scripts/m2t2_worker.py','--input',str(Path(output)/'input.npz'),'--output',str(Path(output)/'predictions.json'),'--checkpoint','/nobackup2/le/.cache/hub/models--wentao-yuan--m2t2/snapshots/a20325dcd19cd1b838274974d0ebe35bfe383796/m2t2.pth'],
+                [sys.executable,'scripts/m2t2_worker.py','--input',str(Path(output)/'input.npz'),'--output',str(Path(output)/'predictions.json'),'--checkpoint',__import__('cross_episode_sim.control.m2t2_policy',fromlist=['default_checkpoint']).default_checkpoint()],
                 [sys.executable,'scripts/test_m2t2_pick.py','--source',source,'--input',str(Path(output)/'input.npz'),'--predictions',str(Path(output)/'predictions.json'),'--output',str(Path(output)/'physics')]]
             for cmd in stages:
                 # M2T2's dependency environment has no simulator; model weights

@@ -65,7 +65,7 @@ def build(memory, house):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--memory', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory'))
+    p.add_argument('--memory', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory'))
     p.add_argument('--houses', nargs='+', required=True)
     a = p.parse_args()
     for h in a.houses:

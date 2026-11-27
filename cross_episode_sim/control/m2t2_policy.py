@@ -50,6 +50,24 @@ def propose_pick_grasps(policy, points, rgb, target, samples=3, max_samples=8):
                 empty_target_retry=len(diagnostics)>samples)
 
 
+M2T2_REPO, M2T2_REVISION = 'wentao-yuan/m2t2', 'a20325dcd19cd1b838274974d0ebe35bfe383796'
+
+
+def default_checkpoint():
+    """m2t2.pth: $M2T2_CHECKPOINT (eval_env.sh sets it), else the pinned revision in the Hugging Face cache.
+    Only read when no M2T2 service is configured (the evaluation uses the service)."""
+    import os
+    if os.environ.get('M2T2_CHECKPOINT'):return os.environ['M2T2_CHECKPOINT']
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        found = try_to_load_from_cache(M2T2_REPO, 'm2t2.pth', revision=M2T2_REVISION)
+        if isinstance(found, str):return found
+    except Exception:
+        pass
+    return str(Path(os.environ.get('HF_HOME', Path.home()/'.cache'/'huggingface'))/'hub'/'models--wentao-yuan--m2t2'
+               /'snapshots'/M2T2_REVISION/'m2t2.pth')
+
+
 class M2T2Policy:
     def __init__(self, checkpoint, repository, device='cuda:0', seed=0):
         from cross_episode_sim.perception.rpc import configured_client

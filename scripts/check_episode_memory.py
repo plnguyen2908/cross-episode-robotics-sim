@@ -107,7 +107,7 @@ def qwen(v4, n):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--v4', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4'))
+    p.add_argument('--v4', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4'))
     p.add_argument('--qwen', type=int, default=0)
     p.add_argument('--output', type=Path)
     a = p.parse_args()

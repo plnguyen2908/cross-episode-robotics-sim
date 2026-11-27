@@ -3,7 +3,7 @@ from pathlib import Path
 import json,sys
 import numpy as np
 from PIL import Image
-from cross_episode_sim.control.m2t2_policy import M2T2Policy,grasp_to_tcp
+from cross_episode_sim.control.m2t2_policy import M2T2Policy,default_checkpoint,grasp_to_tcp
 from cross_episode_sim.perception.handle_surface import observed_handle_surface
 
 
@@ -11,7 +11,7 @@ class LiveDoorOpener:
     def __init__(self,runtime,pointer,output,*,handle_then_push=False):
         self.runtime=runtime;self.pointer=pointer;self.output=Path(output);self.calls=0
         self.handle_then_push=handle_then_push
-        self.model=M2T2Policy('/nobackup2/le/.cache/hub/models--wentao-yuan--m2t2/snapshots/a20325dcd19cd1b838274974d0ebe35bfe383796/m2t2.pth','external/M2T2')
+        self.model=M2T2Policy(default_checkpoint(),'external/M2T2')
 
     def open(self,sensors,tracking,target_map):
         root=self.output/f'door_{self.calls:03d}';self.calls+=1;root.mkdir(parents=True)

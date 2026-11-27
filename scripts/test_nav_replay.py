@@ -23,11 +23,13 @@ import mujoco
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-MEM = Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory')
-ACTIONS = Path('/nobackup/le/cross-episode-qwen-capx/runs/history_language_action_v4/actions')
-import os as _os
-# MEMORY_HISTORY_ROOT: an extended history root (the balanced v4 maps plus added episodes, e.g. drawer picks 2026-11-23)
-HISTORY_ROOT = Path(_os.environ.get('MEMORY_HISTORY_ROOT', '/nobackup/le/cross-episode-qwen-capx/runs/visual_memory_balanced_v4'))
+# Memory folders (cross_episode_sim/evaluation/memory_paths.py): <dataset>/memory, or MEMORY_ROOT. The runners
+# fix MEMORY_ROOT from the episode (memory_paths.use_episode) before this module is first imported.
+from cross_episode_sim.evaluation import memory_paths as _memory_paths  # noqa: E402
+MEM = _memory_paths.memory_root()
+ACTIONS = _memory_paths.actions_root()
+# MEMORY_HISTORY_ROOT overrides: an extended history root (e.g. added drawer-pick episodes, 2026-11-23)
+HISTORY_ROOT = _memory_paths.history_streams_root()
 START_GATE = .030
 
 
@@ -208,7 +210,7 @@ def run(source, target, out, per_target, dock=False, start=None):
                 label = s['arguments'].get('destination') or s['arguments'].get('target')  # carry: its destination
                 if s['skill'] == 'navigate' and s['recorded_success'] and label == target:
                     cands.append((e.name, s))
-        plan = {p['id']: p for p in json.loads((HISTORY_ROOT/'plan.json').read_text())['episodes']}
+        plan = _memory_paths.history_plan()
         cands = [(e, s) for e, s in cands if e in plan and plan[e]['house_id'][:12] == house and plan[e]['task'] == task and e != exclude]
         if not cands:
             report['decision'] = f'no remembered navigate to {target} (search live)'; return report

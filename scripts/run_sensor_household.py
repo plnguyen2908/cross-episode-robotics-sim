@@ -31,16 +31,21 @@ def main():
         'exploration\'s first turn; when confident (fit <= 3 cm), navigation calls first move with the memory index (remembered routes '
         'or A* on the tour map) to a remembered manipulation start at the location, then the usual stages continue from there')
     p.add_argument('--memory-skip-explore',action='store_true',help='with --memory-navigation: a confident first-turn relocalization replaces exploration (memory tour map + semantic memory from the memory index)')
-    p.add_argument('--memory-index',type=Path,help='memory index folder (default: <v4>/memory/visual/memory_index_dev)')
+    p.add_argument('--memory-index',type=Path,help='memory index folder (default: <memory>/visual/memory_index_dev2)')
     a=p.parse_args()
     memory_index=None
+    if a.memory_navigation or a.text_memory is not None or a.visual_memory is not None:
+        # Memory folders: <dataset>/memory above this episode, or MEMORY_ROOT (memory_paths.py). Fixed here for
+        # the whole process, before any memory module reads them.
+        from cross_episode_sim.evaluation import memory_paths
+        print('MEMORY_ROOT',memory_paths.use_episode(a.source),flush=True)
     if a.memory_navigation:
-        from cross_episode_sim.evaluation.episode_memory import episode_memory,VISUAL_ROOT
+        from cross_episode_sim.evaluation.episode_memory import episode_memory
         if episode_memory(a.source) is None:
             print('memory navigation: no history for this episode (not a same-layout episode); running without it',flush=True)
         else:
-            a.visual_memory=Path(VISUAL_ROOT).parent/'visual_tour_root'
-            memory_index=a.memory_index or Path(VISUAL_ROOT)/'memory_index_dev2'
+            a.visual_memory=memory_paths.tour_root()
+            memory_index=a.memory_index or memory_paths.index_dir()
     # 'auto': this episode's own memory from <v4>/memory/episode_memory.json (none for new layouts).
     from cross_episode_sim.evaluation.episode_memory import resolve
     a.text_memory=resolve(a.text_memory,a.source,'text_memory');a.visual_memory=resolve(a.visual_memory,a.source,'visual_memory')

@@ -7,28 +7,31 @@ history; any other episode of a dataset that has the file returns None.
 The visual memory map is named in the entry (memory/visual/merged/<house12>: one map
 per house layout) with the episodes it was built from; resolve() refuses a map built
 from others.
-Text memory (task_language_memory_v4) is a local folder keyed by house and task.
+Text memory (task_language_memory_v4) is <memory>/text, keyed by house and task. Every folder comes
+from memory_paths.py: <dataset>/memory, or MEMORY_ROOT.
 """
 import json
 import os
 from pathlib import Path
 
-# Official visual memory: one straightened map per house (docs/visual_memory_house_maps.md).
-VISUAL_ROOT = Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual')
+from . import memory_paths
 
 
 def _find(source):
-    # The path as given first: v4 links some test episodes to v3 folders.
-    real = Path(source).resolve()
-    for start in dict.fromkeys((Path(os.path.abspath(source)), real)):
-        for root in start.parents:
-            index = root/'memory'/'episode_memory.json'
-            if index.is_file():
-                for entry in json.loads(index.read_text())['episodes'].values():
-                    if (root/entry['folder']).resolve() == real:
-                        return root, entry
-                return root, None
-    return None, None
+    """(dataset root the entry's paths resolve against, entry) of this episode, (root, None) when the memory does
+    not list it (no history: new layout), (None, None) when there is no memory metadata at all."""
+    memory = memory_paths.memory_root(source)
+    index = memory/'episode_memory.json'
+    if not index.is_file():return None, None
+    root = memory.parent
+    # The path as given first: v4 links some test episodes to v3 folders. A memory folder elsewhere
+    # (MEMORY_ROOT) matches the episode by its dataset-relative folder name.
+    real = Path(source).resolve();given = Path(os.path.abspath(source)).as_posix()
+    for entry in json.loads(index.read_text())['episodes'].values():
+        if (root/entry['folder']).resolve() == real or given.endswith('/' + entry['folder']) or \
+                real.as_posix().endswith('/' + entry['folder']):
+            return root, entry
+    return root, None
 
 
 def episode_memory(source):
@@ -55,19 +58,17 @@ def resolve(option, source, kind, text_root=None, visual_root=None):
     if entry is None and kind == 'text_memory' and os.environ.get('NEW_LAYOUT_TEXT_MEMORY', '1') == '1':
         # user 2026-11-26: Qwen plans with memory on new layouts too - the task's procedure from every past episode and
         # where objects started in OTHER houses (no map, routes or motions of this house exist)
-        from .text_memory import DEFAULT_ROOT
         print(f'{kind}=auto: {source} is a new house; using the task procedure and other houses\' object starts', flush=True)
-        return Path(text_root or DEFAULT_ROOT)
+        return Path(text_root or memory_paths.text_root(source))
     if entry is None:
         print(f'{kind}=auto: {source} has no history (not a same-layout episode); running without it', flush=True)
         return None
     if kind == 'text_memory':
-        from .text_memory import DEFAULT_ROOT
-        return Path(text_root or DEFAULT_ROOT)
+        return Path(text_root or memory_paths.text_root(source))
     # The map named in the metadata (inside the dataset), else the same house/task map in a local root.
     from ..navigation.visual_relocalization import memory_directory
     named = Path(entry['visual_memory']['map'])
-    merged = named if (named/'graph.json').is_file() else memory_directory(visual_root or VISUAL_ROOT, entry['house_id'], entry['task'])
+    merged = named if (named/'graph.json').is_file() else memory_directory(visual_root or memory_paths.visual_root(source), entry['house_id'], entry['task'])
     built_from = list(json.loads((merged/'graph.json').read_text())['episodes'])
     if built_from != entry['visual_memory']['episodes']:
         raise ValueError(f'{merged}: built from {built_from}, metadata says {entry["visual_memory"]["episodes"]}')

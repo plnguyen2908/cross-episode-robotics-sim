@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.test_nav_replay import ACTIONS, HISTORY_ROOT, MEM, START_GATE, Runner, planar, flat, body_world  # noqa: E402
 import scripts.test_fixture_dock as fd  # noqa: E402
 
-PLAN = {p['id']: p for p in json.loads((HISTORY_ROOT/'plan.json').read_text())['episodes']}
+PLAN = __import__('cross_episode_sim.evaluation.memory_paths', fromlist=['history_plan']).history_plan()
 _objs = {}
 
 

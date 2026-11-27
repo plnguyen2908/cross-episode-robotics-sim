@@ -15,9 +15,9 @@ from cross_episode_sim.mapping.room_geometry_localization import reconstruct_his
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--streams-root', type=Path, default=Path('/nobackup/le/cross-episode-qwen-capx/runs/visual_memory_balanced_v4'),
+    p.add_argument('--streams-root', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/history_streams'),
                    help='memory root that still has streams/<episode>/sensors.h5')
-    p.add_argument('--maps', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual/merged'))
+    p.add_argument('--maps', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/visual/merged'))
     a = p.parse_args()
     for merged in sorted(a.maps.iterdir()):
         out = merged/'history_geometry.npz'

@@ -103,11 +103,11 @@ DRAWER_PUSH_STANDOFF=.04
 class LiveFixtureControls:
     def __init__(self,runtime,output,*,verify_fixture_points=True):
         from ..perception.molmo_pointing import MolmoPointer
-        from ..control.m2t2_policy import M2T2Policy
+        from ..control.m2t2_policy import M2T2Policy,default_checkpoint
         self.runtime=runtime;self.output=Path(output);self.index=0;self.hinges={};self.target_observation=None;self.drawers={}
         self.verify_fixture_points=verify_fixture_points
         self.pointer=MolmoPointer()
-        self.model=M2T2Policy('/nobackup2/le/.cache/hub/models--wentao-yuan--m2t2/snapshots/a20325dcd19cd1b838274974d0ebe35bfe383796/m2t2.pth','external/M2T2')
+        self.model=M2T2Policy(default_checkpoint(),'external/M2T2')
 
     def handlers(self):
         return {name:(lambda _name=name,**kw:self.execute(_name,**kw))

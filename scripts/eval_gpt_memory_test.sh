@@ -13,15 +13,15 @@
 # (45 wall min / 20 simulated min / 100 calls; GPT_LIMITS=1 for the agent-as-policy budgets 45/15/100).
 # Model: PLANNER_MODEL (default gpt-6.1-sol), PLANNER_EFFORT (default high), PLANNER_TIMEOUT (600 s).
 # API tokens per request go into each episode's qwen_plan.json (scripts/planner_usage.py totals them).
-# Env: GPUS (default 2,5,6: GPU 7 renderer failures 2026-11-26), SPLIT (test), TASKS (all),
-# OUTPUT (new folder on /nobackup3), INTO (rerun into an existing batch folder).
+# Env: DATA (the --root of prepare_eval_data.py, with --memory; default runs/all_open_fixed_v4), GPUS (default 0),
+# SPLIT (test), TASKS (all), OUTPUT (default runs/household_eval/gpt_memory_<split>_<time>), INTO (rerun into an existing batch).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 [ -n "${OPENAI_API_KEY:-}" ] || { echo "export OPENAI_API_KEY first (it is only read from the environment)";exit 2; }
-GPUS=${GPUS:-2,5,6};SPLIT=${SPLIT:-test};TASKS=${TASKS:-all}
-args=(--qwen-memory --planner gpt_replan --split "$SPLIT" --tasks "$TASKS" --gpus "$GPUS" --dataset /nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4)
+GPUS=${GPUS:-0};SPLIT=${SPLIT:-test};TASKS=${TASKS:-all};DATA=${DATA:-$ROOT/runs/all_open_fixed_v4}
+args=(--memory --planner gpt_replan --split "$SPLIT" --tasks "$TASKS" --gpus "$GPUS" --dataset "$DATA")
 [ "${GPT_LIMITS:-0}" = 1 ] && args+=(--gpt-limits)
 if [ -n "${INTO:-}" ]; then args+=(--into "$INTO")
-else args+=(--output "${OUTPUT:-/nobackup3/le/household_eval/gpt_memory_${SPLIT}_$(date +%Y%m%d_%H%M%S)}")
+else args+=(--output "${OUTPUT:-$ROOT/runs/household_eval/gpt_memory_${SPLIT}_$(date +%Y%m%d_%H%M%S)}")
 fi
-exec python3 "$ROOT/scripts/eval_households.py" "${args[@]}" "$@"
+exec "${PYTHON:-$ROOT/.venv-sift/bin/python}" "$ROOT/scripts/eval_households.py" "${args[@]}" "$@"

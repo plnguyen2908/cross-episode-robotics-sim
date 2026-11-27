@@ -26,7 +26,6 @@ from pathlib import Path
 
 import numpy as np
 
-INDEX_DIR = Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual/memory_index_dev2')
 LOCATIONS = ('microwave', 'fridge', 'kitchen_cabinet', 'cup_drawer')
 BUTTONS = ('microwave_start', 'microwave_stop')  # pressed relative to the microwave's own frame (user 2026-11-26)
 def frame_of(location):return 'microwave' if location in BUTTONS else location
@@ -100,7 +99,8 @@ def library():
     global _LIB
     if _LIB is None:
         _LIB = []
-        for f in sorted(INDEX_DIR.glob('*.json')):
+        from ..evaluation.memory_paths import index_dir
+        for f in sorted(index_dir().glob('*.json')):
             for r in json.loads(f.read_text()).get('segments', []):
                 if (r['location'] in LOCATIONS and r['skill'] in ('open_door', 'close_door', 'open_drawer', 'close_drawer', 'place')) or \
                         (r['location'] in BUTTONS and r['skill'] == 'push_button'):

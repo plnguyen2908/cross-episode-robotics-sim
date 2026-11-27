@@ -19,7 +19,7 @@ from scripts.test_nav_replay import ACTIONS, HISTORY_ROOT, run  # noqa: E402
 
 
 def carry_starts(per_house_task=1):
-    plan = {p['id']: p for p in json.loads((HISTORY_ROOT/'plan.json').read_text())['episodes']}
+    plan = __import__('cross_episode_sim.evaluation.memory_paths', fromlist=['history_plan']).history_plan()
     tracked = [e for e in plan if (HISTORY_ROOT/'episodes'/e/'trajectory.npz').exists() and (ACTIONS/e/'memory.json').exists()]
     groups = {}
     for e in tracked:groups.setdefault((plan[e]['house_id'][:12], plan[e]['task']), []).append(e)

@@ -19,7 +19,8 @@ from scipy.spatial import cKDTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-MEM = Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory')
+from cross_episode_sim.evaluation.memory_paths import memory_root  # noqa: E402
+MEM = memory_root()
 START_GATE = .030
 
 
@@ -46,7 +47,7 @@ def truth_walls(house):
     import h5py, mujoco
     from cross_episode_sim.mapping.history_localization import load_keyframes
     from cross_episode_sim.perception.surfaces import project_mask
-    plan = {e['id']: e for e in json.loads(Path('/nobackup/le/cross-episode-qwen-capx/runs/visual_memory_balanced_v4/plan.json').read_text())['episodes']}
+    plan = {e['id']: e for e in json.loads((Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/history_streams'/'plan.json').read_text())['episodes']}
     g = json.loads((MEM/'visual/merged'/house/'graph.json').read_text())
     m = mujoco.MjModel.from_binary_path(str(Path(plan[next(iter(g['episodes']))]['source'])/'action_recording/model.mjb')); d = mujoco.MjData(m)
     b = m.body('robot_0/base').id; W0 = np.linalg.inv(np.load(MEM/'visual_tours'/house/'private_start_pose.npy')); pts = []

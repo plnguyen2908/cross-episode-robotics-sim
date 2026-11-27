@@ -27,14 +27,14 @@ def base_pose(model, data):
     return T
 
 
-PLAN = Path('/nobackup/le/cross-episode-qwen-capx/runs/visual_memory_balanced_v4/plan.json')
+PLAN = (Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/history_streams'/'plan.json')
 
 
 def reference_origin(memory_root, merged):
     """Private scoring only: world pose of the memory frame's origin."""
     graph = json.loads((merged/'graph.json').read_text()); reference = next(iter(graph['episodes']))
     if reference.startswith('tour_'):  # planned-tour map: its frame is the tour's start pose
-        tours = Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual_tours')
+        tours = (Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/visual_tours')
         house = reference[len('tour_'):].split('_loop')[0]  # loops of one house share its start pose
         return np.load(tours/house/'private_start_pose.npy'), reference
     plan = json.loads(((memory_root/'plan.json') if (memory_root/'plan.json').is_file() else PLAN).read_text())
@@ -130,7 +130,7 @@ if __name__ == '__main__':
     cv2.setNumThreads(8); cv2.setRNGSeed(0)
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source', type=Path, nargs='+', required=True)
-    p.add_argument('--memory', type=Path, default=Path('/nobackup/le/cross-episode-robotics-sim/runs/all_open_fixed_v4/memory/visual'), help='Visual memory root (has merged/ and episodes/)')
+    p.add_argument('--memory', type=Path, default=(Path(__file__).resolve().parents[1]/'runs/all_open_fixed_v4/memory/visual'), help='Visual memory root (has merged/ and episodes/)')
     p.add_argument('--output', type=Path, required=True)
     a = p.parse_args()
     for s in a.source:
