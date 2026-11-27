@@ -190,7 +190,7 @@ def main():
     if not sources:p.error('give episode folders or --suite')
     for s in sources:
         if not (s / 'config.json').exists():p.error(f'not an episode folder: {s}')
-    if (a.memory_navigation or a.text_memory == 'auto') and not a.rescore:
+    if (a.memory_navigation or a.text_memory == 'auto') and not a.rescore and not a.list:
         # Stop before any simulator starts when the memory of a selected episode is not on disk.
         sys.path.insert(0, str(ROOT))
         from cross_episode_sim.evaluation.memory_paths import missing_memory
