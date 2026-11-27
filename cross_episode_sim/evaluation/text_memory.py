@@ -140,6 +140,14 @@ def dataset_root_of(source):
     return parent.parent if parent else None
 
 
+def history_root_of(source):
+    """Root the memory lists' paths resolve against: the memory folder's dataset (memory_paths: MEMORY_ROOT, or
+    <dataset>/memory with episode_memory.json above the episode), else the dataset of the split manifest."""
+    from .memory_paths import dataset_root, find_memory_root
+    if os.environ.get('MEMORY_ROOT') or find_memory_root(source) is not None:return dataset_root(source)
+    return dataset_root_of(source)
+
+
 STYLES = ('past_plan', 'procedure')
 
 
@@ -151,16 +159,16 @@ def load_text_memory(root, task, source, instruction=None, style='past_plan'):
     Gemini procedure; a house without them (new layouts) keeps the procedure. 'procedure': the earlier memory."""
     from .search_places import search_order
     if style not in STYLES:raise ValueError(f'memory style must be one of {STYLES}')
-    from .memory_paths import dataset_root, text_root
+    from .memory_paths import text_root
     root = Path(root or text_root(source))
     procedure, procedure_audit = procedure_memory(root, task)
     house, split = house_of(source)
     instruction = instruction if instruction is not None else (Path(source)/'instruction.txt').read_text().strip()
-    order, order_audit = search_order(task, instruction, house, dataset_root(source) if house else None, root)
+    order, order_audit = search_order(task, instruction, house, history_root_of(source) if house else None, root)
     plans, plans_audit = [], dict(available=False)
     if style == 'past_plan' and house:
         from .memory_plan import past_plans
-        plans, plans_audit = past_plans(dataset_root(source), house, task, instruction, root)
+        plans, plans_audit = past_plans(history_root_of(source), house, task, instruction, root)
     other = bool(order_audit['history']) and (order_audit['history'] or {}).get('scope') == 'other houses'
     memory = dict(
         what_this_is='Text memory from PREVIOUS episodes of this task'

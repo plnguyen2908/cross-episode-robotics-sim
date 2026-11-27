@@ -158,6 +158,10 @@ Expect several hours, mostly the environment build and the ~36 GB model download
 
 ## 7. Interface the README already documents (must exist when the branch lands)
 
+**Implemented on main (2026-11-27)**: all rows below, plus `--memory-only` and `--revision` for
+`prepare_eval_data.py`, and the history recordings (`action_recording/` of the 70 tracked history
+episodes) in the download and check. Paths: `cross_episode_sim/evaluation/memory_paths.py`.
+
 The README's eval section describes the memory setting as it will work after the merge. The
 branch has to provide exactly these, and the clean-room test (section 5) has to use them:
 

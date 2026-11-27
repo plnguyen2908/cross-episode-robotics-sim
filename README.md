@@ -1,8 +1,9 @@
 # Cross-Episode Robotics Sim
 
-> **Status (2026-11-27):** the memory evaluation below (`MEMORY=1`, `prepare_eval_data.py --memory`) is being
-> merged into main and its data uploaded to Hugging Face; until that lands, only the zero-shot evaluation runs from
-> main (submit with `MEMORY=0`). Progress and the release checklist: [docs/memory_eval_release.md](docs/memory_eval_release.md).
+> **Status (2026-11-27):** the memory evaluation code below (`MEMORY=1`, `prepare_eval_data.py --memory`) is on
+> main. The memory data upload to Hugging Face and a clean-room run (fresh clone + fresh download) are in progress;
+> until the clean-room run passes, treat the memory setting as unverified outside our machine. Progress and the
+> release checklist: [docs/memory_eval_release.md](docs/memory_eval_release.md).
 
 
 ## Household evaluation on Slurm (GPT / Qwen planner, with or without memory; start here to run the eval)
@@ -33,7 +34,7 @@ summaries of them. See [What the memory does](#what-the-memory-does) below.
 |---|---|
 | GPUs (80 GB A100/H100, one node) — choose a layout | **A. Own services per episode (recommended): 8 GPUs.** `SERVICE_SETS=8`: each GPU runs one full copy of the model services (~41 GB) and one episode that uses only that copy, so episodes never wait for each other's model requests. 300 episodes ≈ 30 h ≈ 240 GPU-hours (`EPISODES_PER_SET=2`: 16 episodes at once, ≈ 15 h ≈ 120 GPU-hours, two episodes share a copy). <br>**B. Shared services: 2 GPUs** (the default). One GPU runs one copy of the services for all episodes, the other runs up to 8 episodes (~1.2 GB each); cheaper (≈ 30 h ≈ 60 GPU-hours) but episodes queue for the shared models. |
 | CPU / RAM | ~10 cores and ~6 GB RAM per running episode + ~10 GB per service copy (8 episodes: **96 cores, 128 GB**; 16 episodes: 192 cores, 256 GB) |
-| Disk | ~200 GB data + ~110 GB download (deleted after unpacking with `--delete-shards`) + ~150–300 GB results; memory adds ~17 GB |
+| Disk | ~200 GB data + ~110 GB download (deleted after unpacking with `--delete-shards`) + ~150–300 GB results; memory adds ~27 GB download (deleted after unpacking with `--delete-shards`) + ~63 GB unpacked |
 | Software | Linux x86-64, NVIDIA driver for CUDA 12.x, CUDA toolkit 12.x `nvcc` for M2T2's CUDA op (optional: the setup downloads a CUDA 12.6 compiler if none is found; cuRobo needs none), gcc, `git`, `zstd`, EGL/libGL for headless MuJoCo rendering, internet on the setup node |
 | API | `OPENAI_API_KEY` for `--planner gpt_*` (not needed for `qwen_*`) |
 
@@ -77,10 +78,11 @@ scenes as a check. It ends with `ready: --dataset $DATA`. Re-running resumes.
 
 (`eval_env.sh` sets `HF_HUB_OFFLINE=1` so jobs never download; data preparation needs it off.)
 
-**Then download the memory** (~17 GB, into the same `$DATA`; needed for `MEMORY=1`, the default):
+**Then download the memory** (~27 GB of archives, ~63 GB unpacked, into the same `$DATA`; needed for `MEMORY=1`, the default):
 
 ```bash
-HF_HUB_OFFLINE=0 .venv-sift/bin/python scripts/prepare_eval_data.py --root $DATA --memory
+HF_HUB_OFFLINE=0 .venv-sift/bin/python scripts/prepare_eval_data.py --root $DATA --memory --delete-shards
+# test splits already prepared: add --memory-only; another dataset revision: --revision <branch|tag|commit>
 ```
 
 This puts everything the memory reads under the same `$DATA`:
@@ -91,13 +93,17 @@ $DATA/memory/
   visual/                                   visual memory map and memory index of each house
   visual_tour_root/                         links into visual/ (recreated by the script)
   actions/                                  recorded robot commands of the 500 history episodes
-  history_streams/                          their onboard RGB-D streams and SLAM trajectories (~15 GB)
+  history_streams/                          onboard RGB-D streams and SLAM trajectories of 70 tracked history
+                                            episodes (~15 GB)
   text/                                     text memory: task procedures and where objects were found
-$DATA/fine_tuning/batches/<batch>/<episode>/  skill_calls.json, instruction.txt, config.json of the
-                                              500 history episodes only (a few MB, not the 183 GB split)
+$DATA/fine_tuning/batches/<batch>/<episode>/  skill_calls.json, instruction.txt, config.json of the 500 history
+                                              episodes, and action_recording/ (scene + recorded states, ~46 GB)
+                                              of the 70 tracked ones; not the 183 GB fine-tuning split
 ```
 
-The code finds all of it from `--dataset` (`MEMORY_ROOT=<dir>` overrides `$DATA/memory`).
+The archives are checked against `memory/archives/MANIFEST.json` (sha256) before unpacking, and the
+script ends by checking that every file the memory lists name is there. The code finds all of it
+from `--dataset` (`MEMORY_ROOT=<dir>` overrides `$DATA/memory`; code: `cross_episode_sim/evaluation/memory_paths.py`).
 
 ### 3. Run on Slurm
 
@@ -181,7 +187,9 @@ memory), `navigation/{visual_relocalization,memory_navigation,live_route_memory,
 each episode finishes: task, room count, split, success, termination, final checks, progress
 (done/total/rate and per step), the progress after every call, every skill call (planned and
 executed arguments, outcome, real cause, time), every planner request (prompt, raw reply,
-repairs, replans, token usage for GPT), the executed plan and the failed calls
+repairs, replans, token usage for GPT), the executed plan and the failed calls, and for memory runs
+`memory` (the setting: text memory, style, memory navigation, skip explore) and `memory_events`
+(every memory decision from `live.log`, below, with its time and parsed details)
 (`scripts/collect_results.py <batch>` rebuilds it; the shared skill catalog is in `planner_catalog.json`).
 
 The same data per episode folder `<task>-<rooms>r-<id>/`:
@@ -198,7 +206,8 @@ memory navigation), `episode/qwen_plan.json` holds the prompt with the memory te
 `live.log` shows each memory decision: `TEXT_MEMORY` (what went into the prompt),
 `MEMORY_HANDOVER` (relocalization fit in m; `null` = refused, the episode explores live),
 `MEMORY_MOVE` / `MEMORY_FIXTURE` / `MEMORY_PICK` / `MEMORY_PLACE` (each remembered motion and
-its result) and `MEMORY_*_FALLBACK` (a fall back to the zero-shot skill, with the cause).
+its result) and `MEMORY_*_FALLBACK` (a fall back to the zero-shot skill, with the cause); the same lines
+are the `memory_events` of each episode in `all_results.jsonl`.
 Compare a memory batch with a zero-shot batch of the same splits: `summary_by_rooms.json` of each.
 
 ### Time and cost (estimate for all 300 episodes)

@@ -11,7 +11,7 @@
 # Household evaluation on one node. Edit the variables below, then:
 #   sbatch scripts/slurm/household_eval.sbatch
 # Prerequisites (once, on a login or build node): scripts/setup_eval_env.sh and
-# scripts/prepare_eval_data.py --root $DATA (see README "Household evaluation on Slurm").
+# scripts/prepare_eval_data.py --root $DATA --memory (see README "Household evaluation on Slurm").
 # For --planner gpt_*, export OPENAI_API_KEY before sbatch (it is inherited, never written).
 set -euo pipefail
 
@@ -19,12 +19,18 @@ REPO=${REPO:-$SLURM_SUBMIT_DIR}                # this repository (with .venv-* f
 DATA=${DATA:?set DATA to the --root used with prepare_eval_data.py}
 OUT=${OUT:-$REPO/runs/household_eval/slurm_${SLURM_JOB_ID}}
 PLANNER=${PLANNER:-gpt_replan}                 # gpt_replan | gpt_zero_shot | qwen_replan | qwen_zero_shot | recipe
+MEMORY=${MEMORY:-1}                            # 1: the memory setting (eval_households.py --memory); 0: zero-shot
+PER_TASK=${PER_TASK:-}                         # N: only the first N episodes of each task in each split (quick check)
 SPLITS=${SPLITS:-test}                         # test = test_same_map,test_new_map (300 episodes)
 TASKS=${TASKS:-set_table,clear_and_store,prepare_and_serve_meal,unpack_and_sort_groceries,warm_two_pots}
 EPISODES_PER_GPU=${EPISODES_PER_GPU:-8}        # SERVICE_SETS=1: parallel episodes on each episode GPU (CPU-bound)
 SERVICE_SETS=${SERVICE_SETS:-1}                # >1: one model-service set per GPU (~41 GB each), each episode
 EPISODES_PER_SET=${EPISODES_PER_SET:-1}        #     uses only its own set; EPISODES_PER_SET episodes per set
-LIMITS=${LIMITS:---gpt-limits}                 # 45 wall min, 15 simulated min, 100 calls per episode
+if [ "$MEMORY" = 1 ]; then
+  LIMITS=${LIMITS:---memory-limits}            # 45 wall min, 20 simulated min, 100 calls per episode
+else
+  LIMITS=${LIMITS:---gpt-limits}               # 45 wall min, 15 simulated min, 100 calls per episode
+fi
 BASE_PORT=${BASE_PORT:-$((52000 + SLURM_JOB_ID % 1000 * 10))}
 
 cd "$REPO"
@@ -40,7 +46,7 @@ if [ "$SERVICE_SETS" -gt 1 ]; then
 else
   SERVICE_GPU=${JOB_GPUS[0]};EPISODE_GPUS=("${JOB_GPUS[@]:1}")
 fi
-echo "job $SLURM_JOB_ID on $(hostname): $SERVICE_SETS service set(s) on GPU(s) $SERVICE_GPU, episode GPUs ${EPISODE_GPUS[*]}, planner $PLANNER"
+echo "job $SLURM_JOB_ID on $(hostname): $SERVICE_SETS service set(s) on GPU(s) $SERVICE_GPU, episode GPUs ${EPISODE_GPUS[*]}, planner $PLANNER, memory $MEMORY"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 
 # MuJoCo renders with EGL on the same GPU number; check every episode GPU before
@@ -80,8 +86,10 @@ WORKERS=${WORKERS%,}
 BATCH=$OUT/batch
 RESUME=(); [ -d "$BATCH" ] && RESUME=(--into "$BATCH")   # a re-submitted job continues the same batch
 [ -d "$BATCH" ] || RESUME=(--output "$BATCH")
+SETTING=(); [ "$MEMORY" = 1 ] && SETTING+=(--memory)
+[ -n "$PER_TASK" ] && SETTING+=(--per-task "$PER_TASK")
 .venv-sift/bin/python scripts/eval_households.py --dataset "$DATA" --split "$SPLITS" --tasks "$TASKS" \
-  --gpus "$WORKERS" "${ENDPOINT_ARGS[@]}" --planner "$PLANNER" $LIMITS "${RESUME[@]}"
+  --gpus "$WORKERS" "${ENDPOINT_ARGS[@]}" --planner "$PLANNER" "${SETTING[@]}" $LIMITS "${RESUME[@]}"
 .venv-sift/bin/python scripts/eval_households.py --rescore "$BATCH"
 [ "${PLANNER#gpt_}" != "$PLANNER" ] && .venv-sift/bin/python scripts/planner_usage.py "$BATCH" || true
 echo "done: $BATCH (summary.json, summary_by_rooms.json, <episode>/episode/calls.jsonl)"

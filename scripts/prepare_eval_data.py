@@ -14,6 +14,15 @@ scene.xml files refer to assets by absolute paths on the machine that generated
 them; those paths are rewritten to <root>/assets. A sample of scenes is then
 compiled in MuJoCo as a check. Re-running skips finished steps.
 
+--memory also downloads the memory of the memory setting (~60 GB of archives) into
+<root>/memory and <root>/fine_tuning (the history episodes' skill logs and, for the
+70 tracked history episodes, their recorded scenes): memory/{episode_memory.json,
+index.json, FROZEN.json, README.md, lists/} as files and memory/archives/*.tar.zst
+(checked against memory/archives/MANIFEST.json, then unpacked into <root>). It
+recreates the memory/visual_tour_root links and checks that every file the memory
+lists name is there. It never downloads the fine-tuning episode shards.
+--revision selects the dataset revision (default main) for everything.
+
 Disk: ~110 GB of downloads (deleted after unpacking with --delete-shards) plus
 ~120-150 GB unpacked. Needs `zstd` and `tar` on PATH.
 """
@@ -43,13 +52,84 @@ def run(command):
     subprocess.run(command, check=True)
 
 
-def download(root, splits):
+def download(root, splits, revision='main'):
     from huggingface_hub import snapshot_download
     patterns = ['eval/eval_scene_assets.tar.zst', 'episode_index.json', 'dataset_config.json', 'all_open_fixed_v4.yaml']
     for split in splits:
         patterns += [f'{split}/manifest.json', f'{split}/objects.json', f'{split}/batches/*/batch_configs.json',
                      f'episodes/{split}/*.tar.zst']
-    snapshot_download(REPO, repo_type='dataset', local_dir=str(root), allow_patterns=patterns, max_workers=8)
+    snapshot_download(REPO, repo_type='dataset', revision=revision, local_dir=str(root), allow_patterns=patterns, max_workers=8)
+
+
+MEMORY_FILES = ['memory/episode_memory.json', 'memory/index.json', 'memory/FROZEN.json', 'memory/README.md',
+                'memory/lists/*.json', 'memory/archives/*']
+TOUR_LINKS = {'episodes': '../visual/episodes', 'merged': '../visual/merged_tour'}
+
+
+def sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for block in iter(lambda: stream.read(1 << 24), b''):h.update(block)
+    return h.hexdigest()
+
+
+def download_memory(root, revision='main'):
+    from huggingface_hub import snapshot_download
+    snapshot_download(REPO, repo_type='dataset', revision=revision, local_dir=str(root), allow_patterns=MEMORY_FILES, max_workers=8)
+
+
+def unpack_memory(root, delete_archives):
+    archives = root / 'memory' / 'archives'
+    manifest = json.loads((archives / 'MANIFEST.json').read_text())
+    for name, info in sorted(manifest.items()):
+        archive = archives / name;done = archives / (name + '.unpacked')
+        if done.exists():continue
+        if not archive.exists():raise SystemExit(f'missing {archive}; re-run with --memory to download it')
+        if archive.stat().st_size != info['bytes'] or sha256(archive) != info['sha256']:
+            raise SystemExit(f'{archive}: size or sha256 differs from MANIFEST.json; delete it and re-run')
+        run(['bash', '-c', f"zstd -dcf '{archive}' | tar -xf - -C '{root}'"])
+        done.write_text(info['sha256'] + '\n')
+        if delete_archives:archive.unlink()
+    tour = root / 'memory' / 'visual_tour_root';tour.mkdir(exist_ok=True)
+    for name, target in TOUR_LINKS.items():
+        link = tour / name
+        if link.is_symlink() and os.readlink(link) == target:continue
+        if link.is_symlink() or link.exists():
+            if not link.is_symlink():raise SystemExit(f'{link} exists and is not a link')
+            link.unlink()
+        link.symlink_to(target)
+
+
+def check_memory(root):
+    """Every file the memory metadata names is on disk (the history logs, maps, index, commands, streams, recordings)."""
+    memory = root / 'memory';missing = []
+    def need(path):
+        if not Path(path).exists():missing.append(str(path))
+    need(memory / 'text' / 'trees')
+    ids = set()
+    for path in sorted((memory / 'lists').glob('*.json')):
+        for e in json.loads(path.read_text())['history_episodes']:
+            ids.add(e['id']);need(root / e['skill_calls'])
+            folder = root / (e.get('folder') or Path(e['skill_calls']).parent)
+            need(folder / 'instruction.txt')
+    for i in sorted(ids):need(memory / 'actions' / i / 'commands.npz')
+    entries = json.loads((memory / 'episode_memory.json').read_text())['episodes'].values()
+    houses = set()
+    for e in entries:
+        need(root / e['history']['list']);need(root / e['visual_memory']['map'] / 'graph.json')
+        houses.add(e['house_id'][:12])
+    for house in sorted(houses):need(memory / 'visual' / 'memory_index_dev2' / f'{house}.json')
+    plan = memory / 'history_streams' / 'plan.json';need(plan)
+    if plan.exists():
+        for e in json.loads(plan.read_text())['episodes']:
+            need(memory / 'history_streams' / 'streams' / e['id'] / 'sensors.h5')
+            need(memory / 'history_streams' / 'episodes' / e['id'] / 'trajectory.npz')
+            source = Path(e['source']);source = source if source.is_absolute() else root / source
+            need(source / 'action_recording' / 'model.mjb');need(source / 'action_recording' / 'actions.npz')
+    print(f'memory check: {len(ids)} history episodes, {len(houses)} houses, {len(missing)} missing files', flush=True)
+    for row in missing[:10]:print('   missing', row)
+    if missing:raise SystemExit('memory check failed; re-run with --memory')
 
 
 def unpack(root, splits, delete_shards):
@@ -114,15 +194,23 @@ def main():
     p.add_argument('--delete-shards', action='store_true', help='delete each .tar.zst after unpacking it')
     p.add_argument('--check-sample', type=int, default=20, help='scenes to compile as a check (0 = none)')
     p.add_argument('--skip-download', action='store_true')
+    p.add_argument('--memory', action='store_true', help='also download and unpack the memory (memory/ and the history logs)')
+    p.add_argument('--memory-only', action='store_true', help='only the memory steps (the test splits are already prepared)')
+    p.add_argument('--revision', default='main', help='Hugging Face dataset revision (branch, tag or commit; default main)')
     a = p.parse_args()
     if not shutil.which('zstd'):sys.exit('zstd is required (e.g. conda install zstd, or apt install zstd)')
     root = a.root.resolve();root.mkdir(parents=True, exist_ok=True)
     splits = [s.strip() for s in a.splits.split(',') if s.strip()]
-    if not a.skip_download:download(root, splits)
-    unpack(root, splits, a.delete_shards)
-    relocate(root, splits)
-    if a.check_sample:check(root, splits, a.check_sample)
-    print(f'ready: --dataset {root}')
+    if not a.memory_only:
+        if not a.skip_download:download(root, splits, a.revision)
+        unpack(root, splits, a.delete_shards)
+        relocate(root, splits)
+        if a.check_sample:check(root, splits, a.check_sample)
+    if a.memory or a.memory_only:
+        if not a.skip_download:download_memory(root, a.revision)
+        unpack_memory(root, a.delete_shards)
+        check_memory(root)
+    print(f'ready: --dataset {root}' + (' (with memory)' if a.memory or a.memory_only else ''))
 
 
 if __name__ == '__main__':

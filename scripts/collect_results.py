@@ -29,6 +29,26 @@ def read_jsonl(path):
     except (OSError, ValueError):return []
 
 
+MEMORY_TAGS = ('TEXT_MEMORY', 'MEMORY_', 'FIXTURE_TRANSFER', 'LIVE_ROUTE')
+
+
+def memory_events(log):
+    """The memory decisions in live.log, in order: TEXT_MEMORY, MEMORY_HANDOVER (relocalization fit; null = refused),
+    MEMORY_MOVE / MEMORY_FIXTURE / MEMORY_PICK / MEMORY_PLACE, MEMORY_*_FALLBACK, FIXTURE_TRANSFER, LIVE_ROUTE*."""
+    rows = []
+    try:lines = Path(log).read_text(errors='replace').splitlines()
+    except OSError:return rows
+    for line in lines:
+        text = line.split(' | ', 1)[1] if ' | ' in line[:40] else line
+        tag = text.split(' ', 1)[0]
+        if not tag.startswith(MEMORY_TAGS) or not tag.replace('_', '').isalnum() or not tag.isupper():continue
+        detail = text[len(tag):].strip()
+        try:value = json.loads(detail) if detail else None
+        except ValueError:value = detail[:2000]
+        rows.append(dict(time=line.split(' | ', 1)[0] if ' | ' in line[:40] else None, event=tag, detail=value))
+    return rows
+
+
 def episode_record(folder):
     folder = Path(folder);episode = folder / 'episode'
     info = read_json(folder / 'run_info.json', {})
@@ -48,6 +68,9 @@ def episode_record(folder):
         planned_calls=report.get('planned_calls'), completed_calls=report.get('completed_calls'),
         failed_calls=report.get('failed_calls'), planner_summary=report.get('planner'), planner=info.get('planner'),
         code_commit=info.get('commit'), gpu=info.get('gpu'),
+        memory=dict(text_memory=info.get('text_memory'), text_memory_style=info.get('text_memory_style'),
+                    memory_navigation=info.get('memory_navigation', False), memory_skip_explore=info.get('memory_skip_explore', False)),
+        memory_events=memory_events(folder / 'live.log'),
         progress_after_calls=read_jsonl(episode / 'progress_log.jsonl'),
         calls=read_jsonl(episode / 'calls.jsonl'),
         executed_plan=read_json(episode / 'semantic_plan.json', None),

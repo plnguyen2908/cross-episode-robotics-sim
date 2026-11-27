@@ -1,3 +1,4 @@
+import pytest
 """Text memory in the Qwen whole-plan / replan prompts; the contract audit and repairs stay on."""
 import json
 
@@ -13,6 +14,12 @@ class FakeQwen:
     def __init__(self, replies):self.replies = list(replies);self.prompts = []
     def call(self, **request):self.prompts.append(request['prompt']);return self.replies.pop(0)
 
+
+
+@pytest.fixture(autouse=True)
+def _own_memory_folders(monkeypatch):
+    """These tests build their own small datasets: no memory folder from the environment."""
+    for name in ('MEMORY_ROOT', 'MEMORY_TEXT_ROOT', 'MEMORY_ACTIONS_ROOT', 'MEMORY_HISTORY_ROOT'):monkeypatch.delenv(name, raising=False)
 
 def test_no_memory_prompt_has_no_memory_text():
     prompt = repair_prompt('task', [])
