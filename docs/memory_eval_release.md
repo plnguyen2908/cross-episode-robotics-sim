@@ -1,16 +1,20 @@
 # Memory evaluation release: status and checklist
 
-2026-11-27. This covers the GPT/Qwen + memory evaluation described in
-the memory-eval handoff notes (`docs/memory_eval_handoff_2026-11-26.md` in the eval
-trees; not on main yet). Only this checklist is on main so far: no memory code has
-been pushed and no memory data has been uploaded.
+**Current status (2026-11-27, released):** the memory code is on GitHub main and the memory data is on the
+Hugging Face dataset `plnguyen2908/cross-episodic-sim` (`memory/archives/`, 14 archives, sizes and sha256 checked
+against `MANIFEST.json`, unpacked by `prepare_eval_data.py --memory`). To run it, follow the README section
+"Household evaluation on Slurm".
 
-**Bottom line:** a collaborator cannot reproduce the memory evaluation from
-GitHub main and the Hugging Face dataset today. The code is not on main, the
-memory data is not on Hugging Face, several paths point at our disks, and the
-memory pipeline has never run in the self-contained release environment. Close
-the gaps below, then pass the clean-room test (section 5) before anything goes
-public.
+What was checked from a fresh clone and a fresh download (the clean-room test, section 5): one same-layout
+set-table episode with `qwen_replan` and memory passed all 15 stages, and an strace showed no file opened outside
+the clone and `$DATA` except per-user caches, and no history scene recording. Not yet run in that clean setup:
+the GPT planner (needs an `OPENAI_API_KEY`) and `62d7bb8`, which hands the baseline the live state when a memory
+pick or place gives up (fixes "Checkpoint is not the current live state"; tested on our machine with forced
+fallbacks).
+
+Sections 1–8 below are the checklist written before the release and are kept as the record of what was
+changed. Where they say something is missing from main or Hugging Face, it has since been added (see the
+"Implemented on main" and "Added" notes in section 3).
 
 ## 1. What a collaborator already gets
 

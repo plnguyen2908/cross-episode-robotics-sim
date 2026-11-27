@@ -1,9 +1,11 @@
 # Cross-Episode Robotics Sim
 
-> **Status (2026-11-27):** the memory evaluation code below (`MEMORY=1`, `prepare_eval_data.py --memory`) is on
-> main. The memory data upload to Hugging Face and a clean-room run (fresh clone + fresh download) are in progress;
-> until the clean-room run passes, treat the memory setting as unverified outside our machine. Progress and the
-> release checklist: [docs/memory_eval_release.md](docs/memory_eval_release.md).
+> **Status (2026-11-27):** the memory evaluation is released. The code (`MEMORY=1`, `prepare_eval_data.py --memory`)
+> is on main and the memory data is on Hugging Face (`memory/archives/`, 14 archives, checked against `MANIFEST.json`).
+> It was tested from a fresh clone and a fresh download: one same-layout set-table episode with the Qwen planner and memory
+> ran all 15 stages and opened no file outside the clone and `$DATA` (only per-user caches). That clean setup has not run
+> the GPT planner, which needs your `OPENAI_API_KEY`, or the memory-fallback fix (`62d7bb8`, tested on our machine).
+> Release notes: [docs/memory_eval_release.md](docs/memory_eval_release.md).
 
 
 ## Household evaluation on Slurm (GPT / Qwen planner, with or without memory; start here to run the eval)
