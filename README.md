@@ -122,15 +122,24 @@ from `--dataset` (`MEMORY_ROOT=<dir>` overrides `$DATA/memory`; code: `cross_epi
 
 ```bash
 export OPENAI_API_KEY=...            # only for gpt_* planners; inherited by the job, never written to disk
-# GPT planner with memory, all 300 test episodes
-# A. own services per episode (recommended): 8 GPUs, 8 episodes at once
-DATA=$DATA MEMORY=1 SERVICE_SETS=8 sbatch --gres=gpu:8 --cpus-per-task=96 --mem=160G scripts/slurm/household_eval.sbatch
-# B. shared services (cheaper): 2 GPUs, 8 episodes at once
-DATA=$DATA MEMORY=1 sbatch scripts/slurm/household_eval.sbatch
-# Quick check first: one same-layout episode per task (5 episodes)
-DATA=$DATA MEMORY=1 SPLITS=test_same_map PER_TASK=1 sbatch scripts/slurm/household_eval.sbatch
+
+# 1. Quick check first: one same-layout episode per task (5 episodes, about 1 h)
+DATA=$DATA MEMORY=1 SPLITS=test_same_map PER_TASK=1 OUT=$PWD/runs/household_eval/quick_check \
+    sbatch scripts/slurm/household_eval.sbatch
+
+# 2. The evaluation: GPT planner with memory, all 300 test episodes (200 same-layout + 100 new-layout, ~30 h)
+#    A. own services per episode (recommended): 8 GPUs, 8 episodes at once
+DATA=$DATA MEMORY=1 SERVICE_SETS=8 OUT=$PWD/runs/household_eval/gpt_memory_300 \
+    sbatch --gres=gpu:8 --cpus-per-task=96 --mem=160G scripts/slurm/household_eval.sbatch
+#    B. shared services (cheaper): 2 GPUs, 8 episodes at once
+DATA=$DATA MEMORY=1 OUT=$PWD/runs/household_eval/gpt_memory_300 sbatch scripts/slurm/household_eval.sbatch
+
+#    If the job stops before all 300 are done (time limit, preemption, node failure), submit the SAME command
+#    again: the same OUT continues the batch, keeps the finished episodes and runs only the rest.
 tail -f household-eval-<jobid>.out   # one line per event; "finished: success=... progress=..." per episode
-# Zero-shot baseline for comparison: the same commands with MEMORY=0
+
+# Zero-shot baseline for comparison: the same commands with MEMORY=0 and a different OUT
+# (a batch keeps its setting; continuing a memory batch with MEMORY=0 stops with an error)
 ```
 
 The job starts the model services (layout A: one copy on every GPU; B: one copy on the
@@ -148,7 +157,7 @@ the summaries. Settings
 | `SERVICE_SETS` / `EPISODES_PER_SET` | `1` / `1` | `SERVICE_SETS=N`: N copies of the model services, one per GPU (~41 GB each), and each episode uses only its own copy, so episodes never wait for each other's model requests; request N GPUs (`--gres=gpu:N`). E.g. `SERVICE_SETS=8` on 8 × 80 GB GPUs runs 8 episodes, each with its own services (~4× the GPU-hours of the default 2-GPU layout) |
 | `SPLITS` / `TASKS` | `test` / all five | e.g. `SPLITS=test_same_map TASKS=set_table` |
 | `PER_TASK` | all | run only the first N episodes of each task (a quick check) |
-| `OUT` | `runs/household_eval/slurm_<jobid>` | re-submit with the same `OUT=` to resume an interrupted batch (finished episodes are kept) |
+| `OUT` | `runs/household_eval/slurm_<jobid>` | where the batch goes. Set it (as above) so that re-submitting the same command resumes an interrupted batch (finished episodes are kept); the default changes with every job ID |
 
 Without Slurm, the same steps by hand on one machine:
 
