@@ -2,7 +2,7 @@
 
 > **Status (2026-11-27):** the memory evaluation below (`MEMORY=1`, `prepare_eval_data.py --memory`) is being
 > merged into main and its data uploaded to Hugging Face; until that lands, only the zero-shot evaluation runs from
-> main. Progress and the release checklist: [docs/memory_eval_release.md](docs/memory_eval_release.md).
+> main (submit with `MEMORY=0`). Progress and the release checklist: [docs/memory_eval_release.md](docs/memory_eval_release.md).
 
 
 ## Household evaluation on Slurm (GPT / Qwen planner, with or without memory; start here to run the eval)
@@ -18,10 +18,10 @@ private task scorer gives success and a progress rate. Details: [docs/qwen_zero_
 
 Two settings, same robot, skills, planner and scorer:
 
-| Setting | What the planner and robot get | Run with |
+| Setting | What the planner and robot get | Slurm |
 |---|---|---|
-| **Zero-shot** | the task instruction and the skill catalog only; the robot explores the house live | default |
-| **With memory** | also what happened in this house before: the 500 recorded *history* episodes (same house, same task) give the planner a text procedure and where objects were found, and give the robot a visual map of the house to relocalize in, remembered routes, and remembered fixture motions. Every memory step falls back to the zero-shot skill if it does not apply | `MEMORY=1` (data: `prepare_eval_data.py --memory`) |
+| **Zero-shot** | the task instruction and the skill catalog only; the robot explores the house live | `MEMORY=0` |
+| **With memory** | also what happened in this house before: the 500 recorded *history* episodes (same house, same task) give the planner a text procedure and where objects were found, and give the robot a visual map of the house to relocalize in, remembered routes, and remembered fixture motions. Every memory step falls back to the zero-shot skill if it does not apply | `MEMORY=1` (default; data: `prepare_eval_data.py --memory`) |
 
 Memory never contains simulator truth (no true poses, maps or object identities): only the history
 episodes' onboard camera streams, the robot's own recorded commands and skill logs, and text
@@ -77,7 +77,7 @@ scenes as a check. It ends with `ready: --dataset $DATA`. Re-running resumes.
 
 (`eval_env.sh` sets `HF_HUB_OFFLINE=1` so jobs never download; data preparation needs it off.)
 
-**For the memory setting**, also download the memory (~17 GB, into the same `$DATA`):
+**Then download the memory** (~17 GB, into the same `$DATA`; needed for `MEMORY=1`, the default):
 
 ```bash
 HF_HUB_OFFLINE=0 .venv-sift/bin/python scripts/prepare_eval_data.py --root $DATA --memory
@@ -95,15 +95,15 @@ points it at a different folder.
 
 ```bash
 export OPENAI_API_KEY=...            # only for gpt_* planners; inherited by the job, never written to disk
+# GPT planner with memory, all 300 test episodes
 # A. own services per episode (recommended): 8 GPUs, 8 episodes at once
-DATA=$DATA SERVICE_SETS=8 sbatch --gres=gpu:8 --cpus-per-task=96 --mem=160G scripts/slurm/household_eval.sbatch
-# B. shared services (cheaper): 2 GPUs, 8 episodes at once
-DATA=$DATA sbatch scripts/slurm/household_eval.sbatch
-# With memory (GPT planner): add MEMORY=1 to either layout
 DATA=$DATA MEMORY=1 SERVICE_SETS=8 sbatch --gres=gpu:8 --cpus-per-task=96 --mem=160G scripts/slurm/household_eval.sbatch
-# Quick check first: one episode per task, same layout, with memory
+# B. shared services (cheaper): 2 GPUs, 8 episodes at once
+DATA=$DATA MEMORY=1 sbatch scripts/slurm/household_eval.sbatch
+# Quick check first: one same-layout episode per task (5 episodes)
 DATA=$DATA MEMORY=1 SPLITS=test_same_map PER_TASK=1 sbatch scripts/slurm/household_eval.sbatch
 tail -f household-eval-<jobid>.out   # one line per event; "finished: success=... progress=..." per episode
+# Zero-shot baseline for comparison: the same commands with MEMORY=0
 ```
 
 The job starts the model services (layout A: one copy on every GPU; B: one copy on the
@@ -115,7 +115,7 @@ the summaries. Settings
 |---|---|---|
 | `PLANNER` | `gpt_replan` | `gpt_replan`, `gpt_zero_shot` (no replanning), `qwen_replan`, `qwen_zero_shot`, `recipe` (fixed oracle-style recipe) |
 | `PLANNER_MODEL` / `PLANNER_EFFORT` | `gpt-6.1-sol` / `high` | OpenAI model and reasoning effort for `gpt_*` |
-| `MEMORY` | `0` | `1`: the memory setting (`eval_households.py --memory`): text memory of this house and task in the planner prompt, visual relocalization, memory navigation (a confident relocalization replaces exploration), remembered fixture motions. Works with `gpt_replan` and `qwen_replan`. Needs `prepare_eval_data.py --memory` |
+| `MEMORY` | `1` | `1`: the memory setting (`eval_households.py --memory`): text memory of this house and task in the planner prompt, visual relocalization, memory navigation (a confident relocalization replaces exploration), remembered fixture motions. Works with `gpt_replan` and `qwen_replan`. Needs `prepare_eval_data.py --memory`. `0`: zero-shot |
 | `LIMITS` | `--gpt-limits`; with `MEMORY=1`: `--memory-limits` | per episode: 45 min wall, 15 simulated min, 100 skill calls (same budget as our GPT-as-policy baseline); `--memory-limits` is 45 min wall, **20** simulated min, 100 calls (the budget of our memory runs; pass `LIMITS=--gpt-limits` to compare at 15 min); e.g. `"--sim-minutes 15 --max-calls 100"` drops the wall cap |
 | `EPISODES_PER_GPU` | `8` | parallel episodes per episode GPU (CPU is usually the limit) |
 | `SERVICE_SETS` / `EPISODES_PER_SET` | `1` / `1` | `SERVICE_SETS=N`: N copies of the model services, one per GPU (~41 GB each), and each episode uses only its own copy, so episodes never wait for each other's model requests; request N GPUs (`--gres=gpu:N`). E.g. `SERVICE_SETS=8` on 8 × 80 GB GPUs runs 8 episodes, each with its own services (~4× the GPU-hours of the default 2-GPU layout) |

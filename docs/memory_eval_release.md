@@ -167,7 +167,7 @@ branch has to provide exactly these, and the clean-room test (section 5) has to 
 | `eval_households.py --memory` | today's `--qwen-memory` preset (text memory auto, procedure style, memory navigation + skip explore) without forcing the planner: works with `--planner gpt_replan` and `qwen_replan` (keep `--qwen-memory` as an alias) |
 | `--memory-limits` | 45 min wall, 20 simulated min, 100 calls |
 | `eval_household.sh <episode> --memory` | the same options for one episode, using main's endpoints file (no fixed ports) |
-| sbatch `MEMORY=1`, `PER_TASK=N` | pass `--memory` (+ `--memory-limits` unless `LIMITS` is set) and a first-N-per-task selection |
+| sbatch `MEMORY` (default `1`), `PER_TASK=N` | `MEMORY=1` passes `--memory`; `MEMORY=0` runs zero-shot (+ `--memory-limits` unless `LIMITS` is set) and a first-N-per-task selection |
 | every memory path relative to `--dataset`, `MEMORY_ROOT` override | replaces `DEFAULT_ROOT`, `VISUAL_ROOT`, `INDEX_DIR`, `ACTIONS`, `HISTORY_ROOT` (section 4.2) |
 | launcher stops with "memory not found" | check each same-layout episode's history list and the memory folders before starting |
 | batch remembers its setting | already true (`run_info.json` check in `eval_households.py`) |
