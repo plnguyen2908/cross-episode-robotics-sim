@@ -13,6 +13,7 @@
 #   .venv-sift       main runtime + qwen/molmo/fastsam services   (requirements-eval-sift.txt, exact, --no-deps)
 #   .venv-m2t2       M2T2 service, pointnet2_ops compiled          (requirements-eval-m2t2.txt)
 #   .venv-graspgenx  GraspGen-X service                            (requirements-eval-graspgenx.txt)
+#   .venv-hydra      native Hydra object mapping (conda lock + pinned sources built in .tools/hydra_ws)
 #   external/DAAAM/checkpoints/fastsam/FastSAM-s.pt, GraspGenX checkpoints + gripper descriptions,
 #   HF snapshots (pinned revisions) of Qwen/Qwen3-VL-8B-Instruct, allenai/Molmo2-4B, wentao-yuan/m2t2
 #   eval_env.sh      `source` it before running anything (PYTHONPATH, MUJOCO_GL, HF_HOME, ...)
@@ -174,6 +175,23 @@ for repo, kind, rev, name in (('adithyamurali/GraspGenXModel', 'model', '7c83404
     marker.write_text(rev + '\n'); print('downloaded', repo, rev, '->', target)
 PY
 
+# ---------------------------------------------------------------- .venv-hydra
+# Native Hydra (C++ scene-graph mapping): navigate to a cup/bowl maps objects with it
+# (scripts/demo_semantic_navigation.py --object-map hydra, the default; cross_episode_sim/mapping/hydra_process.py).
+# A conda env from configs/navigation/hydra_environment_linux64.lock (micromamba, pinned below) plus pinned
+# MIT-SPARK sources built into .tools/hydra_ws (configs/navigation/hydra_sources.json, scripts/hydra_patches/).
+log ".venv-hydra (native Hydra)"
+MICROMAMBA_VERSION=2.0.5-0
+export MAMBA_EXE=${MAMBA_EXE:-$ROOT/.tools/bin/micromamba}
+if [ ! -x "$MAMBA_EXE" ]; then
+  mkdir -p "$(dirname "$MAMBA_EXE")"
+  curl -fsSL -o "$MAMBA_EXE.part" "https://github.com/mamba-org/micromamba-releases/releases/download/$MICROMAMBA_VERSION/micromamba-linux-64"
+  chmod +x "$MAMBA_EXE.part" && mv "$MAMBA_EXE.part" "$MAMBA_EXE"
+fi
+if ! .venv-hydra/bin/python -c 'import spark_dsg, hydra_python' 2>/dev/null; then
+  HYDRA_BUILD_JOBS=${HYDRA_BUILD_JOBS:-8} bash scripts/setup_native_hydra.sh
+fi
+
 # ---------------------------------------------------------------- HF model snapshots
 log "HF snapshots into $HF_HOME"
 .venv-sift/bin/python - "${SKIP_HF_MODELS:-0}" <<'PY'
@@ -241,5 +259,6 @@ if [ "${SKIP_CHECK:-0}" != 1 ]; then
   .venv-sift/bin/python scripts/check_eval_env.py sift
   .venv-m2t2/bin/python scripts/check_eval_env.py m2t2
   .venv-graspgenx/bin/python scripts/check_eval_env.py graspgenx
+  (source scripts/native_hydra_env.sh && .venv-hydra/bin/python -c 'import spark_dsg, hydra_python; print("PASS native Hydra bindings")')
 fi
 log "done"

@@ -54,7 +54,9 @@ It clones the external code at pinned commits and applies our patches (`patches/
 MolmoSpaces (robot models, controllers; our controller patch), cuRobo (arm motion planning, built
 from source at a pinned commit), M2T2, GraspGen-X, DAAAM/FastSAM, RoboCasa and RoboSuite. It
 installs Python 3.11.14 with `uv`, and builds three self-contained environments from pinned
-requirements (`.venv-sift` main runtime, `.venv-m2t2`, `.venv-graspgenx`). It also compiles M2T2's CUDA op,
+requirements (`.venv-sift` main runtime, `.venv-m2t2`, `.venv-graspgenx`), plus `.venv-hydra`: native
+Hydra, which maps cups and bowls when navigating to them (a conda lock installed with a pinned micromamba, and
+pinned MIT-SPARK sources compiled into `.tools/hydra_ws`). It also compiles M2T2's CUDA op,
 downloading a CUDA 12.6 compiler if no `nvcc` 12.x is found. Then it downloads the model weights at
 pinned revisions (Qwen3-VL-8B, Molmo2-4B, M2T2, GraspGen-X, FastSAM) and the MolmoSpaces resources
 (~13 GB) into `.venv-eval-cache/`, so offline compute nodes work. It writes `eval_env.sh` and ends with a
