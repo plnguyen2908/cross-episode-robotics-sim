@@ -2,9 +2,12 @@
 
 > **Status (2026-11-27):** the memory evaluation is released. The code (`MEMORY=1`, `prepare_eval_data.py --memory`)
 > is on main and the memory data is on Hugging Face (`memory/archives/`, 14 archives, checked against `MANIFEST.json`).
-> It was tested from a fresh clone and a fresh download: one same-layout set-table episode with the Qwen planner and memory
-> ran all 15 stages and opened no file outside the clone and `$DATA` (only per-user caches). That clean setup has not run
-> the GPT planner, which needs your `OPENAI_API_KEY`, or the memory-fallback fix (`62d7bb8`, tested on our machine).
+> It was tested from a fresh clone of main (`f3bf2c8`) and a fresh memory download, with the Qwen planner. Set table
+> (table-5r-000006) reached 4/4 goals in 17/17 calls. Clear and store (store-4r-000003) reached 3/6 goals before the
+> 45-min limit: one docking collision check, then "Fixture posture did not settle" twice. These are skill failures, not
+> setup errors. Project code and memory were read only from the clone and `$DATA`, plus per-user caches. Not run in
+> that clean setup: the GPT planner, which needs your `OPENAI_API_KEY`. The memory-fallback fix (`62d7bb8`) was not
+> triggered in these runs; it was tested on our machine with forced fallbacks.
 > Release notes: [docs/memory_eval_release.md](docs/memory_eval_release.md).
 
 

@@ -5,12 +5,19 @@ Hugging Face dataset `plnguyen2908/cross-episodic-sim` (`memory/archives/`, 14 a
 against `MANIFEST.json`, unpacked by `prepare_eval_data.py --memory`). To run it, follow the README section
 "Household evaluation on Slurm".
 
-What was checked from a fresh clone and a fresh download (the clean-room test, section 5): one same-layout
-set-table episode with `qwen_replan` and memory passed all 15 stages, and an strace showed no file opened outside
-the clone and `$DATA` except per-user caches, and no history scene recording. Not yet run in that clean setup:
-the GPT planner (needs an `OPENAI_API_KEY`) and `62d7bb8`, which hands the baseline the live state when a memory
-pick or place gives up (fixes "Checkpoint is not the current live state"; tested on our machine with forced
-fallbacks).
+What was checked from a fresh clone and a fresh download (the clean-room test, section 5), with `qwen_replan`
+and memory:
+- At `a504fa3`: set table, all 15 stages passed.
+- At `f3bf2c8`, with the memory downloaded again from Hugging Face (14 archives checked, 500 history episodes,
+  0 missing files): set table (table-5r-000006) reached 4/4 goals in 17/17 calls. Clear and store
+  (store-4r-000003) reached 3/6 goals before the 45-min limit: one docking collision check, then
+  "Fixture posture did not settle from arm proprioception" twice. These are skill failures, not setup errors.
+- An strace showed project code and memory read only from the clone and `$DATA` (plus per-user caches), and
+  no history scene recording opened.
+
+Not yet run in that clean setup: the GPT planner (needs an `OPENAI_API_KEY`). `62d7bb8`, which hands the
+baseline the live state when a memory pick or place gives up (fixes "Checkpoint is not the current live
+state"), was not triggered in these runs; it was tested on our machine with forced fallbacks.
 
 Sections 1–8 below are the checklist written before the release and are kept as the record of what was
 changed. Where they say something is missing from main or Hugging Face, it has since been added (see the
