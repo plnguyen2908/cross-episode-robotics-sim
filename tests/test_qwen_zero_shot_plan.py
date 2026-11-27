@@ -91,9 +91,9 @@ def test_replan_gets_public_feedback_and_state_and_is_checked_from_it():
     assert calls == fixed['calls'] and rec['requests'] == 2
     assert '<path>' in fake.prompts[0] and '/nobackup' not in fake.prompts[0] and '"held_target": "cup"' in fake.prompts[0]
     assert 'pick_requires_empty_hand' in fake.prompts[1] and 'progress' not in fake.prompts[0].lower().split('catalog')[0]
-    # explore again is refused by the audit; an empty plan means nothing left
-    calls, _ = qwen_replan('task', FakeQwen([json.dumps(dict(calls=[]))]), history, [], state)
-    assert calls == []
+    # an empty plan means nothing left: accepted when the hand is empty and no transfer remains
+    calls, rec = qwen_replan('task', FakeQwen([json.dumps(dict(calls=[]))]), history, [], dict(state, held_target=None))
+    assert calls == [] and rec['requests'] == 1
 
 
 def test_dynamic_executor_runs_the_rewritten_rest():

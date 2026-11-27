@@ -12,10 +12,14 @@ from cross_episode_sim.control.m2t2_policy import M2T2Policy, grasp_to_tcp
 from cross_episode_sim.control.observed_grasp_planner import observed_target_mask
 
 
-def focused_cloud(points, target):
+def focused_cloud(points, target, support_below_target=False):
     near=points[np.linalg.norm(points[:,:2]-target[:2],axis=1)<.2]
     levels,counts=np.unique(np.round(near[:,2]/.005),return_counts=True)
     support=float(levels[counts.argmax()]*.005)
+    if support_below_target:
+        # cookware: the surface the pot stands on (a raised burner grate), see observed_grasp_planner.cookware_support
+        from cross_episode_sim.control.observed_grasp_planner import cookware_support
+        support=cookware_support(points,target)
     mask=observed_target_mask(points,target,support)
     surface=points[mask]
     lo=surface.min(0)-.08;hi=surface.max(0)+.08

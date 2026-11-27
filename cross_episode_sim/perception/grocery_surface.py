@@ -3,11 +3,11 @@ import numpy as np
 from scipy.ndimage import binary_dilation, label
 
 
-def above_support_mask(camera, mask):
-    """Reject tabletop-only segments; retain top faces of boxes and bottle sides.
+def _support(camera, mask):
+    """Support-plane height around a proposed instance, with per-pixel base heights.
 
-    Estimate support from pixels surrounding the proposed instance, never a
-    stored table height. Keep only the connected foreground above that support.
+    Returns (support, height, valid) or None. Shared by the mask refinement and
+    the shape measurement so both read the same observed support plane.
     """
     mask = np.asarray(mask, bool)
     valid = camera.valid_depth & np.isfinite(camera.depth_m) & (camera.depth_m > 0)
@@ -36,7 +36,20 @@ def above_support_mask(camera, mask):
         if extent.max()>.25 and extent.min()>.10:
             planes.append(float(level*.005))
     if not planes:return None
-    support=max(planes)
+    return max(planes), height, valid
+
+
+def above_support_mask(camera, mask):
+    """Reject tabletop-only segments; retain top faces of boxes and bottle sides.
+
+    Estimate support from pixels surrounding the proposed instance, never a
+    stored table height. Keep only the connected foreground above that support.
+    """
+    mask = np.asarray(mask, bool)
+    found = _support(camera, mask)
+    if found is None:
+        return None
+    support, height, valid = found
     foreground = mask & valid & (height > support+.012)
     components, count = label(foreground)
     if not count:
@@ -45,3 +58,20 @@ def above_support_mask(camera, mask):
     if sizes.max() < 30:
         return None
     return components == sizes.argmax()
+
+
+def top_above_support(camera, mask):
+    """Measured height of an instance's visible top above its observed support (m).
+
+    Onboard metric depth only. Returns None when no support plane is visible
+    or too few valid pixels remain. The 95th percentile resists depth speckle.
+    """
+    mask = np.asarray(mask, bool)
+    found = _support(camera, mask)
+    if found is None:
+        return None
+    support, height, valid = found
+    values = height[mask & valid]
+    if len(values) < 30:
+        return None
+    return float(np.percentile(values, 95) - support)

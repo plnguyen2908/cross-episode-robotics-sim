@@ -122,6 +122,10 @@ def clean_target(args, notes=None):
     return drop_place_redock_target(a, notes if notes is not None else [])
 
 
+LAST_GIVEN = {}  # the planner's own arguments of the running call (memory navigation reads e.g. search_at='fridge')
+CALL_USE_MEMORY = [True]  # the planner's use_memory for the running call (omitted: True); read by the executor's memory points
+
+
 class ArgumentReading:
     """Interface wrapper: read the arguments as above, log any change, then run the call."""
     def __init__(self, interface, held):
@@ -131,6 +135,9 @@ class ArgumentReading:
     def execute_skill(self, name, arguments):
         import json
         args = dict(arguments);notes = []
+        LAST_GIVEN.clear(); LAST_GIVEN.update(skill=name, arguments=dict(arguments))
+        CALL_USE_MEMORY[0] = args.pop('use_memory', True) is not False
+        if 'use_memory' in arguments:notes.append(f"use_memory={CALL_USE_MEMORY[0]} (planner)")
         if name == 'navigate':
             args, transit, notes, error = interpret_navigate(args, self.held())
             if error is not None:
@@ -140,7 +147,7 @@ class ArgumentReading:
             if transit is not None:args.update(mode='transit', search_at=transit)
         elif name == 'place':args, notes = interpret_place(args)
         else:args = clean_target(args, notes)
-        if args != arguments:
+        if {k: v for k, v in args.items()} != {k: v for k, v in arguments.items() if k != 'use_memory'}:
             print('SKILL_ARGUMENTS_READ', json.dumps(dict(skill=name, given=arguments, executed=args, notes=notes)), flush=True)
         self.last_executed = dict(arguments=args, notes=notes)
         return self.interface.execute_skill(name, args)

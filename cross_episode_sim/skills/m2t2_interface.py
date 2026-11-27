@@ -137,7 +137,7 @@ class M2T2SkillInterface:
             if name=='rotate_knob':
                 description='From an empty-handed, docked pose, locate the named visible stove knob, use an M2T2 grasp, rotate about its observed axis, release and withdraw. Supports a visible vertical OFF indicator and a 60-degree ON position. No hidden navigation; completion is not a private appliance success score.'
             if name=='push_button':
-                description='From an empty-handed, docked pose, locate the named visible appliance button and press with a calibrated fingertip using observed RGB-D panel geometry. Uses geometric contact motion, not an M2T2 button policy. No hidden navigation; completion does not prove the appliance activated.'
+                description='From an empty-handed, docked pose, locate the named visible appliance button and press with a calibrated fingertip using observed RGB-D panel geometry. Uses geometric contact motion, not an M2T2 button policy. No hidden navigation; completion does not prove the appliance activated. The microwave has two separate buttons: target "microwave_start" starts heating and target "microwave_stop" stops it; name the one you mean, never a generic microwave button.'
             rows.append(dict(name=name,description=description,parameters=deepcopy(schema),available=name in self.handlers))
         return rows
 

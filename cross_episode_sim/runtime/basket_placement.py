@@ -197,7 +197,11 @@ def place_in_basket(pipeline, root, carry, receptacle, description, station, num
         # Arm-only reobservation can reveal a far interior. Move the base to
         # that newly measured floor before asking IK to reach it again.
         recovery=root/f'basket_recovery_{index}';recovery.mkdir(exist_ok=True)
-        source=refine_basket_dock(pipeline,recovery,source,receptacle,description,station,f'{number}_recovery_{index}')
+        try:source=refine_basket_dock(pipeline,recovery,source,receptacle,description,station,f'{number}_recovery_{index}')
+        except RuntimeError as exc:
+            # 2026-11-25 x13_grocery call 17: the raised arm showed 704 drop poses, the recentring redock found no route
+            # and the call ended without trying them. Try the place from where the robot stands (same as an aligned dock).
+            print('BASKET_RECOVERY_REDOCK_SKIPPED',json.dumps(dict(reason=str(exc)[:160])),flush=True)
         dock=source;docking=json.loads(artifacts.read_text(dock/'report.json'))
         # A long held item can itself hide the basket from the wrist camera once
         # the arm is tucked again. Try the place from the raised arm, which just

@@ -22,6 +22,16 @@ from ..recording.deferred import StateVideoRecorder
 LOOK_STEP=math.pi/3
 
 
+def verify_prompt(label):
+    """The point check for a receptacle approach. 2026-11-25 (x12_grocery call 13): the old wording ('the interior does
+    not need to be visible yet' next to the category list) got category "other" with the description 'The magenta point is
+    located on the orange basket, specifically on its rim or outer body, as requested', and the basket place failed."""
+    return ('Is the magenta point on the requested '+label+'? Any visible part counts: its rim, side, outer body or handle; '
+            'its interior does not need to be visible. Return JSON with "category" and "description". Set "category" to "'+label+
+            '" when the point is on the '+label+'; to "other" only when the point is on a different object or surface; '
+            'to "unknown" when you cannot tell.')
+
+
 def look_headings(yaw,step=LOOK_STEP):
     """Headings that finish one turn in place after the view at `yaw`."""
     return [yaw+k*step for k in range(1,int(math.ceil(2*math.pi/step-1e-9)))]
@@ -44,10 +54,7 @@ def approach_receptacle(runtime,label,output,tool_points,seconds=40.):
             for pixel in answer.get('points',[]):
                 marked=image.copy();draw=ImageDraw.Draw(marked);x,y=pixel
                 draw.ellipse((x-6,y-6,x+6,y+6),outline='magenta',width=3)
-                reply=verifier.label_with_prompt([image,marked],
-                    'Does the magenta point belong to the requested '+label+'? '
-                    'Accept its rim or outer body; the interior does not need to be visible yet. '
-                    'Return JSON category "'+label+'", "other" or "unknown", and description.',max_new_tokens=120)
+                reply=verifier.label_with_prompt([image,marked],verify_prompt(label),max_new_tokens=120)
                 try:accepted=parse_label(reply,(label,))['category']==label
                 except (ValueError,KeyError):accepted=False
                 observations.append(dict(view=len(looks),camera=camera.frame_id,pixel=pixel,response=reply,accepted=accepted))
@@ -104,8 +111,12 @@ def approach_receptacle(runtime,label,output,tool_points,seconds=40.):
             # A carry may stop facing the furniture beside the receptacle, or
             # with the carried object in front of it. Look around in place
             # before giving up; every turn is swept-checked with the payload.
-            T=estimate.T_map_base;pending=look_headings(math.atan2(T[1,0],T[0,0]));reversed_once=False
-            while pending and target is None:
+            T=estimate.T_map_base;yaw0=math.atan2(T[1,0],T[0,0]);pending=look_headings(yaw0);reversed_once=False
+            # then a second turn half a step off the first (2026-11-25 x16_grocery call 13: the orange basket only ever
+            # showed at the right edge of the fifth view, next to the purple one, and the point landed on the purple)
+            second=[yaw0+LOOK_STEP/2+k*LOOK_STEP for k in range(int(math.ceil(2*math.pi/LOOK_STEP-1e-9)))];second_used=False
+            while (pending or not second_used) and target is None:
+                if not pending:pending=list(second);second_used=True;reversed_once=False
                 heading=pending[0]
                 def turn(pose,packet):
                     if not plan_to_any_dock(docking,pose,packet.arm.position,[np.r_[pose[:2],heading]]):return None

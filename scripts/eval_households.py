@@ -110,7 +110,7 @@ def main():
     p.add_argument('--split', help='every episode of these dataset splits (comma list) from their manifests: '
                    'test (= test_same_map,test_new_map), test_same_map, test_new_map, dev_same_map, dev_new_map')
     p.add_argument('--dataset', type=Path, default=ROOT / 'runs/all_open_fixed_v4', help='dataset for --split')
-    p.add_argument('--tasks', default='set_table,warm_two_pots,unpack_and_sort_groceries', help='tasks taken from --split')
+    p.add_argument('--tasks', default='set_table,warm_two_pots,unpack_and_sort_groceries', help="tasks taken from --split; 'all' = the five tasks")
     p.add_argument('--gpus', default='2,5,6,7', help='comma-separated GPU ids, one run per GPU at a time')
     p.add_argument('--endpoints', help='comma-separated service endpoints files (scripts/start_eval_services.sh '
                    '--sets): the worker of --gpus entry i uses file i (cycled), so each episode slot has its own '
@@ -129,18 +129,47 @@ def main():
                         'qwen_replan (qwen_zero_shot plus a new rest-of-plan from Qwen after each failed call); '
                         'gpt_zero_shot / gpt_replan (the same with GPT through the OpenAI API: OPENAI_API_KEY, '
                         'PLANNER_MODEL default gpt-6.1-sol, PLANNER_EFFORT default high)')
+    p.add_argument('--memory', action='store_true', help='the memory setting, with any model planner: --text-memory auto, '
+                   '--memory-style procedure (text procedure + where to search from the house history; the planner writes its '
+                   'own plan), --memory-navigation --memory-skip-explore; limits default to --memory-limits. Memory is read '
+                   'from <dataset>/memory (MEMORY_ROOT overrides; scripts/prepare_eval_data.py --memory). New-layout '
+                   'episodes get the task procedure and other houses\' object starts only.')
+    p.add_argument('--qwen-memory', action='store_true', help='--memory, and --planner qwen_replan unless --planner is given (older name)')
+    p.add_argument('--memory-limits', action='store_true', help='the memory runs\' budgets: 45 wall min, 20 simulated min, 100 calls')
+    p.add_argument('--per-task', type=int, help='with --split: only the first N episodes of each task in each split (a quick check)')
+    p.add_argument('--memory-navigation', action='store_true', help='same-layout episodes: relocalize against the house memory and use remembered routes')
+    p.add_argument('--memory-skip-explore', action='store_true', help='with --memory-navigation: a confident relocalization replaces exploration')
+    p.add_argument('--memory-style', choices=('procedure', 'past_plan'), help='text memory form (TEXT_MEMORY_STYLE); runner default past_plan')
+    p.add_argument('--text-memory', help="'auto' (this episode's own history; none for new layouts) or a text memory root "
+                   "(task_language_memory_v4): the history procedure and the house's remembered object sources go into "
+                   "the Qwen plan and replan prompts; default none")
     p.add_argument('--into', type=Path, help='rerun into this existing batch folder: an episode folder there '
                    'without a report is renamed <name>_failedstart_<n> (kept) and replaced; one with a report is skipped')
     p.add_argument('--rescore', type=Path, help='rebuild summary.json and summary_by_rooms.json of a batch folder '
                    'from its episode reports (renamed *_failedstart_* folders excluded), print the tables and exit')
     a = p.parse_args()
+    if a.qwen_memory:
+        a.memory = True
+        if a.planner == 'recipe' and '--planner' not in sys.argv:a.planner = 'qwen_replan'
+    if a.memory:
+        a.text_memory = a.text_memory or 'auto';a.memory_style = a.memory_style or 'procedure'
+        a.memory_navigation = a.memory_skip_explore = True
+        if not a.gpt_limits:a.memory_limits = True
+    if a.gpt_limits and a.memory_limits:p.error('give --gpt-limits or --memory-limits, not both')
+    if a.memory_limits:a.wall_minutes, a.sim_minutes, a.max_calls = a.wall_minutes or 45., a.sim_minutes or 20., a.max_calls or 100
+    if a.tasks == 'all':a.tasks = 'set_table,clear_and_store,prepare_and_serve_meal,unpack_and_sort_groceries,warm_two_pots'
+    if a.text_memory and a.text_memory != 'auto':a.text_memory = str(Path(a.text_memory).resolve())
+    if a.memory_skip_explore and not a.memory_navigation:p.error('--memory-skip-explore needs --memory-navigation')
+    if a.text_memory and a.planner == 'recipe':p.error('--text-memory needs a model planner (qwen_* or gpt_*)')
     if a.planner.startswith('gpt_') and not a.list and not a.rescore:
-        # Fail in seconds, before any simulator starts, on a missing key or a wrong model ID.
+        # Fail in seconds, before any simulator starts, on a missing key or a wrong model ID. The episodes' own
+        # venv runs the check, so the launcher's python needs no openai package.
         if not os.environ.get('OPENAI_API_KEY'):p.error('--planner gpt_* needs OPENAI_API_KEY in the environment')
-        sys.path.insert(0, str(ROOT))
-        from cross_episode_sim.evaluation.gpt_planner import check_planner_model, PlannerServiceError
-        try:print('planner model:', check_planner_model() or os.environ.get('PLANNER_MODEL', 'gpt-6.1-sol') + ' (key cannot list models; not checked)', flush=True)
-        except PlannerServiceError as exc:p.error(str(exc))
+        check = subprocess.run([str(ROOT/'.venv-sift/bin/python'), '-c', 'import os\nfrom cross_episode_sim.evaluation.gpt_planner import check_planner_model\n'
+                                'print(check_planner_model() or os.environ.get("PLANNER_MODEL", "gpt-6.1-sol") + " (key cannot list models; not checked)")'],
+                               cwd=ROOT, env=dict(os.environ, PYTHONPATH=str(ROOT)), capture_output=True, text=True)
+        if check.returncode:p.error('planner check failed: ' + (check.stderr.strip().splitlines() or ['?'])[-1][:300])
+        print('planner model:', check.stdout.strip(), flush=True)
     if a.gpt_limits:a.wall_minutes, a.sim_minutes, a.max_calls = a.wall_minutes or 45., a.sim_minutes or 15., a.max_calls or 100
     if a.rescore:
         rescore(a.rescore)
@@ -153,11 +182,22 @@ def main():
         from cross_episode_sim.evaluation.test_sources import test_sources
         splits = [s for x in a.split.split(',') for s in (['test_same_map', 'test_new_map'] if x == 'test' else [x])]
         for split in splits:
-            for task in a.tasks.split(','):sources += test_sources(a.dataset, [split], task.strip())
-    sources += [e.resolve() for e in a.episodes]
+            # Listed paths (not resolved): same-layout episodes that link to v3 folders still find their memory.
+            for task in a.tasks.split(','):
+                found = test_sources(a.dataset, [split], task.strip(), resolve=False)
+                sources += found[:a.per_task] if a.per_task else found
+    sources += [e.absolute() for e in a.episodes]
     if not sources:p.error('give episode folders or --suite')
     for s in sources:
         if not (s / 'config.json').exists():p.error(f'not an episode folder: {s}')
+    if (a.memory_navigation or a.text_memory == 'auto') and not a.rescore:
+        # Stop before any simulator starts when the memory of a selected episode is not on disk.
+        sys.path.insert(0, str(ROOT))
+        from cross_episode_sim.evaluation.memory_paths import missing_memory
+        missing = sorted({m for s in sources for m in missing_memory(s, navigation=a.memory_navigation)})
+        if missing:
+            p.error('memory not found (run scripts/prepare_eval_data.py --root <dataset> --memory, or set MEMORY_ROOT):\n  '
+                    + '\n  '.join(missing[:20]) + (f'\n  ... and {len(missing) - 20} more' if len(missing) > 20 else ''))
     if a.list:
         for s in sources:print(label(s), s)
         print(len(sources), 'episodes');return
@@ -168,6 +208,13 @@ def main():
         if not out.is_dir():p.error(f'--into needs an existing batch folder: {out}')
         used = {json.loads(i.read_text()).get('planner', 'recipe') for i in out.glob('*/run_info.json')}
         if used - {a.planner}:p.error(f'{out.name} was run with planner {sorted(used)}; pass the same --planner')
+        memories = {json.loads(i.read_text()).get('text_memory') for i in out.glob('*/run_info.json')}
+        want_memory = a.text_memory or None
+        if memories - {want_memory}:p.error(f'{out.name} was run with text memory {sorted(map(str, memories))}; pass the same --text-memory')
+        setup = {(json.loads(i.read_text()).get('memory_navigation', False), json.loads(i.read_text()).get('memory_skip_explore', False),
+                  json.loads(i.read_text()).get('text_memory_style')) for i in out.glob('*/run_info.json')}
+        if setup - {(a.memory_navigation, a.memory_skip_explore, a.memory_style)}:
+            p.error(f'{out.name} was run with memory setup {sorted(setup, key=str)}; pass the same memory options')
         want = dict(wall_minutes=a.wall_minutes, sim_minutes=a.sim_minutes, max_calls=a.max_calls)
         for info in out.glob('*/run_info.json'):
             had = json.loads(info.read_text()).get('limits')
@@ -190,6 +237,8 @@ def main():
     else:
         out = a.output or ROOT / 'runs/household_eval' / ('batch_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                                                           + ('' if a.planner == 'recipe' else '_' + a.planner)
+                                                          + ('_textmem' if a.text_memory else '')
+                                                          + ('_memnav' if a.memory_navigation else '')
                                                           + ('_limited' if a.wall_minutes or a.sim_minutes or a.max_calls else ''))
         out.mkdir(parents=True, exist_ok=False)
     jobs = queue.Queue()
@@ -232,6 +281,10 @@ def main():
             name = names[source];folder = out / name
             command = ['bash', str(ROOT / 'scripts/eval_household.sh'), str(source), '--gpu', gpu, '--output', str(folder)]
             command += ['--planner', a.planner, '--planner-endpoint', a.planner_endpoint]
+            if a.text_memory:command += ['--text-memory', a.text_memory]
+            if a.memory_style:command += ['--memory-style', a.memory_style]
+            if a.memory_navigation:command.append('--memory-navigation')
+            if a.memory_skip_explore:command.append('--memory-skip-explore')
             for flag, value in (('--wall-minutes', a.wall_minutes), ('--sim-minutes', a.sim_minutes), ('--max-calls', a.max_calls)):
                 if value is not None:command += [flag, str(value)]
             if a.raw:command.append('--raw')
@@ -315,7 +368,9 @@ def main():
             for name, (t0, where) in list(last.items()):
                 say(name, f'... running {round((time.monotonic() - t0) / 60)} min, at {where}')
     threading.Thread(target=heartbeat, daemon=True).start()
-    say('eval', f'{len(sources)} episodes on GPUs {",".join(gpus)} -> {out} | planner {a.planner} | limits: wall '
+    say('eval', f'{len(sources)} episodes on GPUs {",".join(gpus)} -> {out} | planner {a.planner} | text memory {a.text_memory or "none"}'
+               f' ({a.memory_style or "default style"}) | memory navigation {"on" if a.memory_navigation else "off"}'
+               f'{" + skip explore" if a.memory_skip_explore else ""} | limits: wall '
                f'{a.wall_minutes or "none"} min, simulated {a.sim_minutes or "none"} min, calls {a.max_calls or "none"}')
     if endpoint_files:say('eval', 'service sets: ' + ', '.join(f'worker {i} (GPU {g}) -> {Path(endpoint_files[i % len(endpoint_files)]).parent.name}'
                                                            for i, g in enumerate(gpus)))

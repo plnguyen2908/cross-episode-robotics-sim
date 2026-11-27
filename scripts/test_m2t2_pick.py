@@ -2,6 +2,7 @@
 from cross_episode_sim.runtime import artifacts
 from cross_episode_sim.recording.deferred import StateVideoRecorder
 import argparse,json,time
+EMPTY_DRIVER_RAD=.80  # fingers closed past this = nothing between them (empty ~0.82-0.84; a thin box hold reads ~0.77)
 from pathlib import Path
 import numpy as np,mujoco
 from cross_episode_sim.control.observed_arm import robot_calibration
@@ -77,7 +78,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
       float(np.ptp(points[observed_target_mask(points,target,support_height),2]))<.10)
   boxes,world_stats=build_observed_boxes(g,T,points,target,support_height=support_height,local_resolution=.01 if shallow_confined else .025)
   print('OBSERVED_WORLD',world_stats,flush=True)
-  if pick_config.get('source_receptacle'):
+  if pick_config.get('source_receptacle'):  # inside an appliance: IK-only from the start (user rule 2026-11-18); elsewhere checks first, IK-only fallback below
    # User rule (2026-11-18): for a pick inside an appliance, a grasp the arm
    # can reach (IK found) is executed without the observed-world collision
    # check. The drink in the fridge was refused on every look by 0.4-1.5 cm
@@ -89,6 +90,7 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   artifacts.write_text(a.output/'observed_world.json',json.dumps([dict(name=b.name,pose=b.pose,dims=b.dims) for b in boxes],indent=2))
   # Target selection/cropping is upstream. Do not veto learned proposals
   # again with a hard contact-to-surface distance threshold before planning.
+  ObservedGraspPlanner.support_z=float(world_stats['support_z'])  # IK-only still keeps fingers out of the support top
   contact_mask=observed_target_mask(points,target,world_stats['support_z'])
   artifacts.write_text(a.output/'proposal_filter.json',json.dumps(dict(
       before=len(rows),after=len(rows),enabled=False,
@@ -191,100 +193,212 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
        blocked_confident=len(rows)-len(confident)-min(len(fallback),300),blocked_fallback_dropped=sum(bool(row.get('fallback')) for row in blocked))
    print('FALLBACK_ORDER',fallback_order,flush=True)
    artifacts.write_text(a.output/'fallback_order.json',json.dumps(fallback_order,indent=2))
+  import os as _os
+  if _os.environ.get('CUROBO_PICK'):
+   # TEST SWITCH (2026-11-23, user: "i believe in curobo"): cuRobo plans every arm motion of the pick with its own pose
+   # planner and collision model against the observed world; no IK-only switch, no hand-written rules. The approach
+   # planner's world includes the target object; the final descent's world leaves the target out (the fingers touch it).
+   ObservedGraspPlanner.ik_only=False
+   # cuRobo's world must hold every observed box plus the target's boxes (the approach world)
+   _cap=len(boxes)+len(target_boxes)+64
+   from cross_episode_sim.robot.arm_planner import RobotArmPlanner as _RAP
+   _gs=int(_os.environ.get('CUROBO_GOALSET','32'))
+   _opts={} if not a.household_grasp else dict(activation_distance=.012)
+   _arm=_RAP(None,{},kinematics=robot_calibration(m,d,a.output/'robot'),collision_cache={'cuboid':_cap,'mesh':2},max_goalset=_gs,**_opts)
+   planner.arm=_arm;approach_planner.arm=_arm;arm=_arm
+   print('CUROBO_WORLD_CAPACITY',_cap,flush=True)
+   from scipy.spatial.transform import Rotation as _Rot
+   def _curobo_plan(self_,q,position,rotation):
+    import time as _t
+    from cross_episode_sim.control.curobo_scene import load_observed_cuboids
+    t0=_t.monotonic();load_observed_cuboids(self_.arm.planner,self_.boxes)
+    quat=_Rot.from_matrix(rotation).as_quat(scalar_first=True)
+    raw=np.asarray(self_.arm.plan(np.asarray(q,float),np.r_[position,quat].tolist()))
+    old=np.arange(len(raw))*self_.arm.dt;times=np.arange(0,old[-1]+.019,.02)
+    path=np.column_stack([np.interp(times,old,raw[:,j]) for j in range(raw.shape[1])])
+    end=self_.geometry.fk(path[-1])[self_.geometry.tcp_body]@self_.geometry.tcp_local
+    self_.events.append(dict(method='curobo_plan_pose',wall_seconds=_t.monotonic()-t0,simulated_seconds=(len(path)-1)*.02,
+                             tcp_error_m=float(np.linalg.norm(end[:3,3]-np.asarray(position)))))
+    print('CUROBO_PLAN',json.dumps(self_.events[-1]),flush=True)
+    return path
+   import types as _types
+   planner.plan=_types.MethodType(_curobo_plan,planner);approach_planner.plan=_types.MethodType(_curobo_plan,approach_planner)
+   print('CUROBO_PICK_ON',flush=True)
   plan=planner.plan
   seen=[];chosen=None
-  for index,row in enumerate(rows):
-   tcp=np.array(row['tcp']);goal=tcp[:3,3];R=tcp[:3,:3]
-   if any(np.linalg.norm(goal-p)<.002 and np.linalg.norm(R-r)<.05 for p,r in seen):continue
-   seen.append((goal,R))
-   if a.max_candidates>0 and len(seen)>a.max_candidates:break
-   try:
-    planning_stage='approach'
-    if active_mode=='front_entry' and approach_options.front_wrist=='tilted_rim' and rim_ranker.blocked(tcp):
-     raise RuntimeError('Observed target blocks endpoint linkage')
-    if a.household_grasp or 'cookware' in requested_category:
-     planning_stage='contact_endpoint'
-     # Necessary endpoint check before six IK seeds and the free approach.
-     # The full insertion sweep is still checked at the solved robot poses.
-     if link_ranker.blocked(tcp):raise RuntimeError('Observed target blocks endpoint linkage')
-     if not planner.solve(measured(),goal,R):raise RuntimeError('No collision-clear contact endpoint')
-     planning_stage='approach'
-    if active_mode=='front_entry':
-     current=geo.tcp_pose(measured());envelope=gripper_points_tool(geo,measured(),current)
-     if a.align_only:
-      approach,waypoints=plan_front_alignment(approach_planner,measured(),current,tcp,envelope,anchor,normal,approach_options)
-      phase='alignment';run_path(approach,0.);alignment_completed=True
-      selected_tcp=tcp;frame()
-      break
-     approach,descend,_,waypoints=plan_front_entry(approach_planner,measured(),current,tcp,envelope,anchor,normal,approach_options,contact_planner=planner)
-     row=dict(row,approach_mode=active_mode,alignment_waypoints=[dict(phase=k,tcp=v.tolist()) for k,v in waypoints])
-    else:
-     pre=goal+(np.array([0.,0.,a.approach_offset]) if active_mode=='top_down' else -a.approach_offset*R[:,2])
-     approach=approach_planner.plan(measured(),pre,R)
-     planning_stage='grasp_pose'
-     descend=plan(approach[-1],goal,R)
-    insertion_clear,blocked_part=target_linkage_clearance(contact_geometry,descend,points[contact_mask])
-    if not insertion_clear:
-     raise RuntimeError('Observed target blocks open-gripper linkage: '+blocked_part)
-    planning_stage='lift'
-    from scipy.spatial.transform import Rotation
-    radial=-goal[:2]/np.linalg.norm(goal[:2])
-    clear_goal=goal+(np.array([0.,0.,.025]) if active_mode=='front_entry' else np.r_[radial*.06,.06])
-    if active_mode=='front_entry':
-     lift_pose=tcp.copy();lift_pose[:3,3]=clear_goal
-     first_lift=plan_aligned_translation(planner,descend[-1],lift_pose)
-    else:first_lift=plan(descend[-1],clear_goal,R)
-    from cross_episode_sim.control.observed_payload import ObservedPayload,payload_clearance
-    from cross_episode_sim.control.observed_grasp_planner import observed_target_mask
-    target_mask=observed_target_mask(points,target,world_stats['support_z'])
-    grasp_T=geo.fk(descend[-1])[geo.tcp_body]@geo.tcp_local
-    carried=ObservedPayload(geo,(points[target_mask]-grasp_T[:3,3])@grasp_T[:3,:3])
-    lift=None;lift_errors=[]
-    if active_mode=='front_entry':
-     shape=points[target_mask]-goal
-     retreat_distance=max(.10,approach_options.entry_clearance-float((clear_goal-anchor)@normal+(shape@normal).min()))
-     exit_goal=clear_goal+normal*retreat_distance
-     exit_pose=grasp_T.copy();exit_pose[:3,3]=exit_goal;exit_pose[:3,:3]=R
-     outward=plan_aligned_translation(planner,first_lift[-1],exit_pose)
-     lifted=plan(outward[-1],exit_goal+[0,0,.15],R)
-     lift=np.concatenate([first_lift,outward[1:],lifted[1:]])
-     from cross_episode_sim.control.manipulation_approach import support_break_clearance
-     if not support_break_clearance(carried,first_lift,points[~target_mask],world_stats['support_z']):
-      raise RuntimeError('Observed payload clearance during support break')
-     if not all(payload_clearance(carried,joints,points[~target_mask],padding=.015,surface_hull=True) for joints in np.concatenate([outward,lifted[1:]])):
-      raise RuntimeError('Observed payload clearance on confined withdrawal')
-     lift_offset=exit_goal+[0,0,.15]-goal;lift_R=R
-    for withdrawal,height,tilt in ([] if active_mode=='front_entry' else ((w,h,t) for w,h in ((.15,.24),(.25,.18),(.30,.12),(.25,.12),(.15,.18),(.15,.12),(.15,.08)) for t in (0.,-15.,-25.,-35.))):
-     lift_offset=np.r_[radial*withdrawal,height]
-     lift_R=Rotation.from_euler('y',tilt,degrees=True).as_matrix()@R
+  if _os.environ.get('CUROBO_PICK') and active_mode!='front_entry' and rows:
+   # cuRobo grasp planning over a GOAL SET of the top GraspGen-X grasps in one call (approach -> straight in with the
+   # finger links allowed to touch); the chosen grasp's approach and descent are then executed by the loop below
+   import torch,time as _t
+   from curobo.types import JointState
+   from curobo.types import GoalToolPose as _GTP, Pose as _Pose
+   from cross_episode_sim.control.curobo_scene import load_observed_cuboids
+   _top=rows[:int(_os.environ.get('CUROBO_GOALSET','32'))];_t0=_t.monotonic()
+   load_observed_cuboids(arm.planner,boxes+target_boxes)
+   _frame=arm.planner.tool_frames[0]
+   _P=np.array([np.asarray(r['tcp'])[:3,3] for r in _top]);_Q=np.array([_Rot.from_matrix(np.asarray(r['tcp'])[:3,:3]).as_quat(scalar_first=True) for r in _top])
+   _pose=_Pose(position=torch.tensor(_P,device='cuda',dtype=torch.float32),quaternion=torch.tensor(_Q,device='cuda',dtype=torch.float32),name=_frame)  # [goalset, 3]: cuRobo reads batch = rows // goalset
+   _goal=_GTP.from_poses({_frame:_pose},ordered_tool_frames=[_frame],num_goalset=len(_top))
+   _state=JointState.from_position(torch.tensor(measured()[None],device='cuda',dtype=torch.float32),joint_names=arm.names)
+   _links=[]
+   for _attr in ('link_names','all_link_names'):
+    _ln=getattr(arm.planner.kinematics,_attr,None) or getattr(getattr(arm.planner.kinematics,'config',None),_attr,None)
+    if _ln:_links=[n for n in _ln if any(k in n for k in ('finger','pad','follower','driver','coupler','spring','knuckle'))];break
+   _res=arm.planner.plan_grasp(_goal,_state,grasp_approach_offset=-float(a.approach_offset),plan_grasp_to_lift=False,disable_collision_links=_links or None)
+   def _traj(tr,last,succ):
+    pos=tr.position;b,sidx=(succ.nonzero(as_tuple=True) if succ.dim()==2 else (succ.nonzero(as_tuple=True)[0],None))
+    idx=[tr.joint_names.index(n) for n in arm.names]
+    if pos.dim()==4:raw=pos[b[0],sidx[0],:int(last[b[0],sidx[0]].item())][:,idx]
+    elif pos.dim()==3:raw=pos[b[0],:int((last[b[0]] if last.dim()==1 else last.reshape(-1)[0]).item())][:,idx]
+    else:raw=pos[:,idx]
+    raw=raw.cpu().numpy();old=np.arange(len(raw))*arm.dt;times=np.arange(0,old[-1]+.019,.02)
+    return np.column_stack([np.interp(times,old,raw[:,j]) for j in range(raw.shape[1])])
+   _ok=bool(_res is not None and _res.success is not None and _res.success.any())
+   print('CUROBO_GRASP',json.dumps(dict(goalset=len(_top),ok=_ok,status=str(getattr(_res,'status',None)),disabled_links=_links,
+         wall_seconds=round(_t.monotonic()-_t0,2),goalset_index=None if not _ok else int(_res.goalset_index.reshape(-1)[0].item()))),flush=True)
+   if _ok:
+    _gi=int(_res.goalset_index.reshape(-1)[0].item())
+    _app=_traj(_res.approach_interpolated_trajectory,_res.approach_interpolated_last_tstep,_res.approach_success if _res.approach_success is not None else _res.success)
+    _des=_traj(_res.grasp_interpolated_trajectory,_res.grasp_interpolated_last_tstep,_res.grasp_success if _res.grasp_success is not None else _res.success)
+    rows=[_top[_gi]]
+    _queue={'a':[_app],'d':[_des]}
+    approach_planner.plan=lambda q,p_,r_:_queue['a'].pop(0) if _queue['a'] else (_ for _ in ()).throw(RuntimeError('cuRobo goal set: no further approach'))
+    plan=lambda q,p_,r_:_queue['d'].pop(0) if _queue['d'] else (_ for _ in ()).throw(RuntimeError('cuRobo goal set: no further descent'))
+   else:
+    rows=[]
+  # one rule for every pick (user 2026-11-23: no per-object pick functions): the full checks first; only when they
+  # refuse EVERY candidate, the same candidates again with IK as the only gate (the dining-table middle bowl: all
+  # ~800 grasps refused by the checks, picked 4/4 IK-only; counter cups/bowls, food box, drinks pass the checks)
+  rows=list(rows)  # one-shot generators (iter_ranked): the IK-only fallback pass needs the candidates again
+  _ik0=bool(getattr(ObservedGraspPlanner,'ik_only',False))
+  # a checked grasp can still jam the arm against the object (store 2026-11-24: cup rim, 'Measured arm settling failed'
+  # in approach/grasp_pose with the gripper open): back out along the path just driven (physically, from where the arm
+  # is) and try the next accepted candidate, at most twice
+  _failed_exec=set();_exec_tries=0;_empty_tries=0
+  while True:
+   while True:
+    chosen=None
+    for _fallback,index,row in [(f_,i_,r_) for f_ in ((False,True) if not _ik0 else (True,)) for i_,r_ in enumerate(rows)]:
+     if chosen is not None:break
+     if index in _failed_exec:continue
+     if not _fallback and index>=300:continue  # bound the checked pass for cups/bowls: the store middle bowl refuses every grasp (~1.3 s each); 800 is for the food box (household contact pick)
+     if _fallback and not getattr(ObservedGraspPlanner,'ik_only',False):
+      ObservedGraspPlanner.ik_only=True;seen.clear();print('PICK_FALLBACK_IK_ONLY',json.dumps(dict(refused=len(failures))),flush=True)
+     tcp=np.array(row['tcp']);goal=tcp[:3,3];R=tcp[:3,:3]
+     if any(np.linalg.norm(goal-p)<.002 and np.linalg.norm(R-r)<.05 for p,r in seen):continue
+     seen.append((goal,R))
+     if a.max_candidates>0 and len(seen)>a.max_candidates:break
      try:
-      second_lift=plan(first_lift[-1],goal+lift_offset,lift_R)
-      if not payload_clearance(carried,second_lift[-1],points[~target_mask]):
-       raise RuntimeError('Observed held-object clearance at carry posture')
-      if not all(payload_clearance(carried,q,points[~target_mask],padding=.015,surface_hull=True) for q in second_lift):
-       raise RuntimeError('Observed held-object clearance along lift')
-      lift=np.concatenate([first_lift,second_lift[1:]])
-      break
-     except RuntimeError as e:lift_errors.append(str(e));continue
-    if lift is None:raise RuntimeError('No validated lift pose/path: '+str(lift_errors))
-    row=dict(row,lift_rotation=lift_R.tolist(),lift_offset=lift_offset.tolist())
-    chosen=(index,row,approach,descend,lift,lift_offset);break
-   except RuntimeError as e:failures.append(dict(candidate=index,stage=planning_stage,error=str(e)));print('rejected',index,planning_stage,str(e)[:300],flush=True)
-  if alignment_completed:raise StopIteration('alignment_only_completed')
-  if chosen is None:raise RuntimeError('No collision-checked reachable M2T2 candidate')
-  index,row,approach,descend,lift,lift_offset=chosen
-  selected_tcp=np.asarray(row['tcp'])
-  artifacts.write_text(a.output/'chosen.json',json.dumps(dict(index=index,**row),indent=2))
-  artifacts.save_archive(a.output/'validated_paths.npz',approach=approach,grasp=descend,lift=lift)
-  phase='approach';run_path(approach,0.)
-  phase='grasp_pose';run_path(descend,0.)
-  phase='close_gripper';q=measured();last=None;stable=0;gripstart=d.time
-  for _ in range(100):
-   execute(q,255.);angles=np.array([d.joint(n).qpos[0] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')]);stable=stable+1 if last is not None and np.max(np.abs(angles-last))<.0002 else 0;last=angles
-   if stable>=10:break
-  events.append(dict(phase=phase,seconds=float(d.time-gripstart),reason='sustained measured finger stability'))
-  if stable<10:raise RuntimeError('Gripper did not settle')
-  phase='lift';run_path(lift,255.)
+      planning_stage='approach'
+      if active_mode=='front_entry' and approach_options.front_wrist=='tilted_rim' and rim_ranker.blocked(tcp):
+       raise RuntimeError('Observed target blocks endpoint linkage')
+      if a.household_grasp or 'cookware' in requested_category:
+       planning_stage='contact_endpoint'
+       # Necessary endpoint check before six IK seeds and the free approach.
+       # The full insertion sweep is still checked at the solved robot poses.
+       if link_ranker.blocked(tcp):raise RuntimeError('Observed target blocks endpoint linkage')
+       if not planner.solve(measured(),goal,R):raise RuntimeError('No collision-clear contact endpoint')
+       planning_stage='approach'
+      if active_mode=='front_entry':
+       current=geo.tcp_pose(measured());envelope=gripper_points_tool(geo,measured(),current)
+       if a.align_only:
+        approach,waypoints=plan_front_alignment(approach_planner,measured(),current,tcp,envelope,anchor,normal,approach_options)
+        phase='alignment';run_path(approach,0.);alignment_completed=True
+        selected_tcp=tcp;frame()
+        break
+       approach,descend,_,waypoints=plan_front_entry(approach_planner,measured(),current,tcp,envelope,anchor,normal,approach_options,contact_planner=planner)
+       row=dict(row,approach_mode=active_mode,alignment_waypoints=[dict(phase=k,tcp=v.tolist()) for k,v in waypoints])
+      else:
+       pre=goal+(np.array([0.,0.,a.approach_offset]) if active_mode=='top_down' else -a.approach_offset*R[:,2])
+       approach=approach_planner.plan(measured(),pre,R)
+       planning_stage='grasp_pose'
+       descend=plan(approach[-1],goal,R)
+      insertion_clear,blocked_part=target_linkage_clearance(contact_geometry,descend,points[contact_mask])
+      if not insertion_clear and not getattr(ObservedGraspPlanner,'ik_only',False) and not _os.environ.get('CUROBO_PICK'):
+       raise RuntimeError('Observed target blocks open-gripper linkage: '+blocked_part)
+      planning_stage='lift'
+      from scipy.spatial.transform import Rotation
+      radial=-goal[:2]/np.linalg.norm(goal[:2])
+      clear_goal=goal+(np.array([0.,0.,.025]) if active_mode=='front_entry' else np.r_[radial*.06,.06])
+      if active_mode=='front_entry':
+       lift_pose=tcp.copy();lift_pose[:3,3]=clear_goal
+       first_lift=plan_aligned_translation(planner,descend[-1],lift_pose)
+      else:first_lift=plan(descend[-1],clear_goal,R)
+      from cross_episode_sim.control.observed_payload import ObservedPayload,payload_clearance
+      from cross_episode_sim.control.observed_grasp_planner import observed_target_mask
+      target_mask=observed_target_mask(points,target,world_stats['support_z'])
+      grasp_T=geo.fk(descend[-1])[geo.tcp_body]@geo.tcp_local
+      carried=ObservedPayload(geo,(points[target_mask]-grasp_T[:3,3])@grasp_T[:3,:3])
+      lift=None;lift_errors=[]
+      if active_mode=='front_entry':
+       shape=points[target_mask]-goal
+       retreat_distance=max(.10,approach_options.entry_clearance-float((clear_goal-anchor)@normal+(shape@normal).min()))
+       exit_goal=clear_goal+normal*retreat_distance
+       exit_pose=grasp_T.copy();exit_pose[:3,3]=exit_goal;exit_pose[:3,:3]=R
+       outward=plan_aligned_translation(planner,first_lift[-1],exit_pose)
+       lifted=plan(outward[-1],exit_goal+[0,0,.15],R)
+       lift=np.concatenate([first_lift,outward[1:],lifted[1:]])
+       from cross_episode_sim.control.manipulation_approach import support_break_clearance
+       if not support_break_clearance(carried,first_lift,points[~target_mask],world_stats['support_z']):
+        raise RuntimeError('Observed payload clearance during support break')
+       if not all(payload_clearance(carried,joints,points[~target_mask],padding=.015,surface_hull=True) for joints in np.concatenate([outward,lifted[1:]])):
+        raise RuntimeError('Observed payload clearance on confined withdrawal')
+       lift_offset=exit_goal+[0,0,.15]-goal;lift_R=R
+      for withdrawal,height,tilt in ([] if active_mode=='front_entry' else ((w,h,t) for w,h in ((.15,.24),(.25,.18),(.30,.12),(.25,.12),(.15,.18),(.15,.12),(.15,.08)) for t in (0.,-15.,-25.,-35.))):
+       lift_offset=np.r_[radial*withdrawal,height]
+       lift_R=Rotation.from_euler('y',tilt,degrees=True).as_matrix()@R
+       try:
+        second_lift=plan(first_lift[-1],goal+lift_offset,lift_R)
+        if not payload_clearance(carried,second_lift[-1],points[~target_mask]):
+         raise RuntimeError('Observed held-object clearance at carry posture')
+        if not all(payload_clearance(carried,q,points[~target_mask],padding=.015,surface_hull=True) for q in second_lift):
+         raise RuntimeError('Observed held-object clearance along lift')
+        lift=np.concatenate([first_lift,second_lift[1:]])
+        break
+       except RuntimeError as e:lift_errors.append(str(e));continue
+      if lift is None:raise RuntimeError('No validated lift pose/path: '+str(lift_errors))
+      row=dict(row,lift_rotation=lift_R.tolist(),lift_offset=lift_offset.tolist())
+      chosen=(index,row,approach,descend,lift,lift_offset);break
+     except RuntimeError as e:failures.append(dict(candidate=index,stage=planning_stage,error=str(e)));print('rejected',index,planning_stage,str(e)[:300],flush=True)
+    if alignment_completed:raise StopIteration('alignment_only_completed')
+    if chosen is None:raise RuntimeError('No collision-checked reachable M2T2 candidate')
+    index,row,approach,descend,lift,lift_offset=chosen
+    selected_tcp=np.asarray(row['tcp'])
+    artifacts.write_text(a.output/'chosen.json',json.dumps(dict(index=index,**row),indent=2))
+    artifacts.save_archive(a.output/'validated_paths.npz',approach=approach,grasp=descend,lift=lift)
+    try:
+     phase='approach';run_path(approach,0.)
+     phase='grasp_pose';run_path(descend,0.)
+     break
+    except RuntimeError as _e:
+     if 'settling failed' not in str(_e) or _exec_tries>=2:raise
+     _jam=phase;_exec_tries+=1;_failed_exec.add(index)
+     events.append(dict(phase=_jam,jammed=str(_e),retry=_exec_tries,candidate=index))  # not "error": a retry that then succeeds is a success
+     print('PICK_EXEC_RETRY',json.dumps(dict(jammed_in=_jam,candidate=index,retry=_exec_tries)),flush=True)
+     phase='back_out'
+     _back=[measured()[None]]+([descend[::-1]] if _jam=='grasp_pose' else [])+[approach[::-1]]
+     run_path(np.vstack(_back),0.)
+   phase='close_gripper';q=measured();last=None;stable=0;gripstart=d.time
+   for _ in range(100):
+    execute(q,255.);angles=np.array([d.joint(n).qpos[0] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')]);stable=stable+1 if last is not None and np.max(np.abs(angles-last))<.0002 else 0;last=angles
+    if stable>=10:break
+   events.append(dict(phase=phase,seconds=float(d.time-gripstart),reason='sustained measured finger stability'))
+   if stable<10:raise RuntimeError('Gripper did not settle')
+   phase='lift';run_path(lift,255.)
+   # an empty hand closes to ~0.82 rad (limit 0.9): the old 'limit - 0.01' test never saw an empty grasp (2026-11-25
+   # x18_table / r5_table: the fingers closed on nothing, the pick reported success and the robot carried an empty hand).
+   # Empty (> EMPTY_DRIVER_RAD, as the memory replays read it): open, back out along the path just driven and try the
+   # next candidate, at most twice.
+   _drv=np.array([d.joint(n).qpos[0] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')])
+   if bool(np.all(_drv>EMPTY_DRIVER_RAD)) and _empty_tries<2:
+    _empty_tries+=1;_failed_exec.add(index)
+    events.append(dict(phase='verify_hold',empty_grasp=True,retry=_empty_tries,candidate=index,finger_rad=[round(float(v),3) for v in _drv]))
+    print('PICK_EMPTY_RETRY',json.dumps(dict(candidate=index,retry=_empty_tries,finger_rad=[round(float(v),3) for v in _drv])),flush=True)
+    phase='back_out';q_=measured()
+    for _ in range(60):execute(q_,0.)
+    run_path(np.vstack([measured()[None],lift[::-1],descend[::-1],approach[::-1]]),0.)
+    continue
+   break
   phase='verify_hold';q=measured()
   padids=[m.body(n).id for n in ('robot_0/gripper/left_pad','robot_0/gripper/right_pad')]
   for _ in range(50):
@@ -304,7 +418,7 @@ diagnostic_grid.save(a.output);diagnostic_slam.save(a.output/'slam')
 # Public completion uses robot encoders, never private object/contact scoring.
 angles=np.array([d.joint(n).qpos[0] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')])
 closing_limits=np.array([m.jnt_range[m.joint(n).id,1] for n in ('robot_0/gripper/left_driver_joint','robot_0/gripper/right_driver_joint')])
-observed_grip=bool(np.all(angles<closing_limits-.01))
+observed_grip=bool(np.all(angles<np.minimum(closing_limits-.01,EMPTY_DRIVER_RAD)))  # an empty hand reads ~0.82 (limit 0.9)
 pad_gap=None
 if a.household_grasp:
  from cross_episode_sim.control.household_grasp import measured_pad_gap

@@ -42,11 +42,15 @@ def main(*, docking_factory=None, pointing_factory=None):
     p.add_argument('--ring-device',default='cuda:0')
     p.add_argument('--station-exploration',action='store_true',help='Explore using only cached kitchen and dining-table landmarks')
     p.add_argument('--no-cabinet-survey',action='store_true',help='Skip the whole-kitchen cabinet survey (door already opened by this robot)')
+    p.add_argument('--max-target-distance',type=float,default=None,help='Only targets within this distance (m) of where the search starts (default: any)')
     p.add_argument('--route-station',default=None,help='Semantic station for a successful local approach in the episode route graph')
     p.add_argument('--record-furniture-device',default=None,help='Label observed furniture during exploration using Molmo2 on this device')
     p.add_argument('--record-room-memory',action='store_true',help='Record visually confirmed room labels during empty-hand exploration')
     p.add_argument('--goal-room',default='kitchen',help='Visual room category; empty string skips room search for local tests')
     p.add_argument("--map-resolution",type=float,default=.10,help="Observed collision-map voxel size in metres")
+    p.add_argument('--memory-index',type=Path,default=None,help='With a confident visual memory (not log-only): build the semantic memory from this memory index and adopt the memory tour map, replacing exploration')
+    p.add_argument('--visual-memory-log-only',action='store_true',help='With --visual-memory: only log the relocalization and always explore fully. Default: when the first-turn relocalization is confident (fit <= MEMORY_FIT_GATE) exploration stops and hands over the memory map; otherwise it explores normally and the memory is not used.')
+    p.add_argument('--visual-memory',type=Path,default=None,help='Optional saved visual memory: a merged map folder (has graph.json) or a memory root with merged/<house12>_<task>. During the first full turn the robot matches its views against it and logs its pose in the memory frame; motion is unchanged. Default: none')
     a=p.parse_args()
     if a.navigation_mode=='hybrid' and (a.perception!='daaam' or a.vlm_url):
         p.error('Hybrid navigation requires DAAAM and local Qwen')
@@ -124,6 +128,7 @@ def main(*, docking_factory=None, pointing_factory=None):
         # margin does not establish actual object approach feasibility.
         readiness=ManipulationReadiness(distance_band=(.50,.72))
         motion_policy=HybridNavigator(policy,local,ObservedRoomMemory(vlm,remembered=memory['rooms']),readiness,a.goal_room,docking=docking)
+        motion_policy.max_target_distance=a.max_target_distance
         motion_policy.fixture_handle=a.target.startswith('handle on ')
         motion_policy.confined_target=a.target.endswith((' inside fridge',' inside microwave'))
     if a.pointing_device:
@@ -161,18 +166,41 @@ def main(*, docking_factory=None, pointing_factory=None):
     artifacts.write_text(a.output/'configuration.json',json.dumps(dict(station_exploration=a.station_exploration,dense_3d_reconstruction=False,navigation_representation='2d_occupancy_with_height_clearance',source=str(a.source),preserve_initial_state=a.preserve_initial_state,navigation_mode=a.navigation_mode,goal_room=a.goal_room,ring_checkpoint=str(a.ring_checkpoint) if a.ring_checkpoint else None,ring_device=a.ring_device,target=a.target,preferred_distance=a.preferred_distance,object_map=a.object_map,explorer=a.explorer,perception=a.perception,proposal_backend='molmo2_fastsam',vlm_model=a.vlm_model,vlm_device=a.vlm_device,seconds=a.seconds,initial_backoff=a.initial_backoff,initial_yaw_offset=a.initial_yaw_offset,doors_initialized_open=doors),indent=2))
     # Station exploration is qualified on matched keyframe poses; weak-match refinement resumes for later stages.
     keyframe_context=slam.matched_keyframes() if a.station_exploration and hasattr(slam,'matched_keyframes') else nullcontext()
+    relocalization=None;memory_localized=False;relocalization_attempts=[];RELOCALIZATION_ATTEMPTS=3
+    if a.visual_memory is not None:
+        from cross_episode_sim.navigation.visual_relocalization import ScanRelocalization,memory_directory
+        from cross_episode_sim.evaluation.text_memory import house_of
+        house_id,_=house_of(a.source);task=json.loads((a.source/'config.json').read_text()).get('task') if (a.source/'config.json').exists() else None
+        relocalization=ScanRelocalization(memory_directory(a.visual_memory,house_id,task))
     with keyframe_context,ring_context,mapper_context,planner_context,OnboardSensorInterface(model,data) as sensors,StateVideoRecorder(model,data,a.output/'state_recording') as recording,open(a.output/'progress.jsonl','w',buffering=1) as log:
         for tick in tqdm(range(round(a.seconds*50)+10),desc='Visual target navigation'):
             if tick%5==0:
                 packet=sensors.capture(include_robot_mask=False);tracking=slam.update(packet.cameras['navigation'],packet.timestamp)
-                if not a.fixed_map:
+                if relocalization is not None and not relocalization.done and relocalization.observe(packet.cameras['navigation'],tracking,float(packet.timestamp-start)):
+                    relocalization.save(a.output);tqdm.write(json.dumps(dict(visual_relocalization={k:relocalization.result.get(k) for k in ('status','decision','fine_fit_mean_capped_distance_m','position_in_memory','yaw_in_memory_degrees','views','wall_seconds')})))
+                    relocalization_attempts.append({k:relocalization.result.get(k) for k in ('status','decision','fine_fit_mean_capped_distance_m','views','trigger')})
+                    if relocalization.result.get('use_memory') and not a.visual_memory_log_only:
+                        memory_localized=True;break  # confident: the memory map replaces the rest of exploration
+                    if len(relocalization_attempts)<RELOCALIZATION_ATTEMPTS and not relocalization.result.get('use_memory'):
+                        # not confident: keep exploring and match the next full turn of views (station turns)
+                        relocalization=ScanRelocalization(relocalization.merged)
+                memory_scan=(relocalization is not None and not relocalization.done and not a.visual_memory_log_only
+                             and len(relocalization_attempts)<RELOCALIZATION_ATTEMPTS)
+                # during the memory scan the live map / room / furniture layers are not built: a confident match
+                # replaces them with the memory's map and semantics (they start only if the memory fails)
+                if not a.fixed_map and not memory_scan:
                     grid.update(packet.cameras['navigation'],tracking);grid.update_support(packet.cameras['wrist'],tracking)
-                if survey_rooms is not None:survey_rooms.update(packet,tracking,[])
-                if furniture is not None:furniture.observe(packet,tracking)
+                if survey_rooms is not None and not memory_scan:survey_rooms.update(packet,tracking,[])
+                if furniture is not None and not memory_scan:furniture.observe(packet,tracking)
             if survey is not None and not survey.done and tick%5==0:
                 command=survey.step(dict(status='cabinet_survey',forward=0.,yaw=0.),packet,tracking,float(data.time),motion_policy.pointing,motion_policy)
             elif survey is not None and not survey.done:
                 command=dict(command,forward=0.,yaw=survey.velocity)
+            elif relocalization is not None and not relocalization.done and not a.visual_memory_log_only and len(relocalization_attempts)<RELOCALIZATION_ATTEMPTS:
+                # memory first: turn in place and match the memory's views; the exploration engine (travel,
+                # planning) only starts if the memory cannot be matched confidently (run 20: the engine's travel
+                # during the scan cost ~95 s of a 2 min explore while matching itself took ~3 s)
+                command=dict(status='memory_relocalization_scan',forward=0.,yaw=.8)
             else:
                 command=motion_policy.step(packet,tracking,float(data.time))
             command=startup_look.step(command,packet,tracking,float(data.time))
@@ -187,27 +215,42 @@ def main(*, docking_factory=None, pointing_factory=None):
                 if command['status']!=last_status or tick%250==0:tqdm.write(json.dumps(row));last_status=command['status']
             base.step(command['forward'],command['yaw'],diagnostic_observer=audit.observe)
             if motion_policy.terminal and base.stationary():break
+    if relocalization is not None and not relocalization.done:
+        relocalization.finish('exploration_ended_before_full_turn');relocalization.save(a.output)
     # Private checkpoint for reproducible continuation, never a policy observation.
     import mujoco
     checkpoint=a.output/'private_checkpoint';checkpoint.mkdir()
     artifacts.save_model(model,str(checkpoint/'model.mjb'),None)
     spec=mujoco.mjtState.mjSTATE_INTEGRATION;state=np.empty(mujoco.mj_stateSize(model,spec))
     mujoco.mj_getState(model,data,state,spec);artifacts.save_array(checkpoint/'state.npy',state)
+    memory_world=None
+    if memory_localized and relocalization is not None:
+        # exploration replaced by memory: SLAM poses in the memory map frame, the tour map as the observed map
+        from cross_episode_sim.navigation.memory_navigation import adopt_memory_frame
+        memory_world=adopt_memory_frame(slam,relocalization.result['T_memory_from_slam'],grid,relocalization.merged)
+        print('MEMORY_FRAME_ADOPTED',json.dumps(memory_world),flush=True)
     grid.save(a.output);slam.save(a.output/'slam')
     if artifacts.owner(a.output) is None:plot_grid(a.output,'Partial sensor map and target navigation')
     if furniture is not None:
         memory['furniture']=furniture.landmarks
         artifacts.write_text(a.output/'furniture_observations.json',json.dumps(furniture.events,indent=2))
+    if memory_world is not None and a.memory_index is not None:
+        from cross_episode_sim.navigation.memory_navigation import memory_semantics
+        from cross_episode_sim.evaluation.text_memory import house_of
+        memory['tables'],memory['furniture']=memory_semantics(Path(a.memory_index)/f'{house_of(a.source)[0][:12]}.json')
     save_memory(a.output,memory,room_events=getattr(survey_rooms or getattr(motion_policy,'rooms',None),'events',()),targets=policy.targets.targets)
     artifacts.save_array(a.output/'diagnostic_positions.npy',truth)
     selected=getattr(motion_policy,'found_target',None) or policy.follower.target
     handoff=None if selected is None else dict(native_id=selected.native_id,label=selected.label,position=selected.position.tolist(),frame='estimated_slam_map',last_observed=selected.last_seen,grasp_ready=False)
-    report=dict(cabinet_survey=None if survey is None else survey.summary,startup_look=startup_look.summary(),pointing_events=getattr(getattr(motion_policy,'pointing',None),'events',[]),fixed_map_unchanged=map_digest(grid)==frozen_digest if a.fixed_map else None,exploration_request=command.get('exploration_request'),selected_object=handoff,status=motion_policy.terminal,target=a.target,object_map=a.object_map,simulated_seconds=float(data.time-start),wall_seconds=time.monotonic()-wall,
-        sensor_navigation_success=(motion_policy.terminal in {'target_reached','manipulation_ready','stations_explored','fixture_handle_found','confined_target_found'} or getattr(motion_policy,'docking_success',False)) and not audit.events,
+    report=dict(memory_handover=None if not memory_localized else dict(memory_directory=relocalization.result.get('memory_directory'),T_memory_from_slam=(np.eye(4).tolist() if memory_world is not None else relocalization.result.get('T_memory_from_slam')),frame_adopted=memory_world is not None,fit_m=relocalization.result.get('fine_fit_mean_capped_distance_m')),cabinet_survey=None if survey is None else survey.summary,startup_look=startup_look.summary(),pointing_events=getattr(getattr(motion_policy,'pointing',None),'events',[]),fixed_map_unchanged=map_digest(grid)==frozen_digest if a.fixed_map else None,exploration_request=command.get('exploration_request'),selected_object=handoff,status='memory_localized' if memory_localized else motion_policy.terminal,target=a.target,object_map=a.object_map,simulated_seconds=float(data.time-start),wall_seconds=time.monotonic()-wall,
+        memory_localized=memory_localized,
+        sensor_navigation_success=(memory_localized or motion_policy.terminal in {'target_reached','manipulation_ready','stations_explored','fixture_handle_found','confined_target_found'} or getattr(motion_policy,'docking_success',False)) and not audit.events,
         detection_wall_seconds=policy.detection_wall_seconds,detection_calls=policy.detection_calls,map_guided_proposals=getattr(detector,'guided_proposal_count',0),
         external_contact_events=list(audit.events.values()),routes=policy.follower.events,
         targets=[{**asdict(t),'position':t.position.tolist()} for t in policy.targets.targets],
         limitations='Navigation stand-off and visual confirmation only. Not a grasp-ready pose certificate or full set_table success. DAAAM uses predicted masks; point-mask mode uses Molmo2 points and FastSAM masks. Target identity and fresh confirmation still require validation.')
+    report['visual_relocalization_attempts']=relocalization_attempts
+    report['visual_relocalization']=None if relocalization is None else {k:v for k,v in relocalization.result.items() if k not in ('query_timestamps',)}
     if a.station_exploration:
         from cross_episode_sim.navigation.route_memory import record_exploration
         report['route_graph_seed']=record_exploration(

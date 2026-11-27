@@ -1,4 +1,5 @@
 """RGB-only Molmo2 pointing proposals; points never authorize robot motion."""
+import json
 import re
 import time
 
@@ -140,3 +141,21 @@ class PointingSupervisor:
             self.targets.update(camera,detections,tracking,packet.timestamp)
             ignored=self.drop_own_placements()
             self.events.append(dict(timestamp=packet.timestamp,camera=camera.frame_id,raw=result['raw'],wall_seconds=result['wall_seconds'],category_verification=result.get('category_verification',[])+checked,masks=len(detections),ignored_own_placements=ignored,targets=[dict(id=t.track_id,position=t.position.tolist(),last_seen=t.last_seen,observations=t.observations) for t in self.targets.targets]))
+
+
+def point_cookware_on_burner(pointer, image, label):
+    """Pointing for 'cookware on front left/right stove burner' that does not hinge on Molmo reading the burner row.
+    2026-11-24 warm_two_pots_000033: from the pick stand the pot on the front-right burner looks like it sits on the far
+    row; the full label found it in one render and nothing in another render 1 mm away. When the full label returns no
+    point: point 'cookware'; one point is taken; several are told apart by the named side in the robot's view (the
+    rightmost in the image for 'right', the leftmost for 'left'). Other labels: the plain pointer."""
+    result = pointer.point(image, label)
+    text = str(label).lower()
+    if result.get('points') or not (text.startswith('cookware on') and 'stove burner' in text and ('left' in text or 'right' in text)):
+        return result
+    plain = pointer.point(image, 'cookware')
+    points = [p for p in plain.get('points', []) if len(p) == 2]
+    if not points:return result
+    pick = max(points, key=lambda p: p[0]) if 'right' in text else min(points, key=lambda p: p[0])
+    print('COOKWARE_BURNER_SIDE_FALLBACK', json.dumps(dict(label=label, candidates=len(points), chosen=[round(float(v), 1) for v in pick])), flush=True)
+    return dict(plain, points=[pick], fallback='cookware by named side')

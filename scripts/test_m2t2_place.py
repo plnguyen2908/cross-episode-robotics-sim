@@ -1,6 +1,8 @@
 """M2T2 placement at a sensor-detected dock; scene truth is private scoring only."""
 from cross_episode_sim.runtime import artifacts
 import argparse,json,os,subprocess,time,sys
+DRAWER_WALL_GAP_M=.03  # a drawer place keeps the object this far off the side wall (leaning mugs jammed the drawer)
+TABLE_ITEM_RADIUS_M=.09  # a bowl's/cup's footprint radius around a spot this robot already used on the table
 from pathlib import Path
 import numpy as np,mujoco
 from scipy.spatial import cKDTree
@@ -247,7 +249,14 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    from cross_episode_sim.perception.drawer_support import drawer_frame
    _h,_n,_t=drawer_frame(json.loads(artifacts.read_text(a.observed_drawer)))
    _mid=float(np.median((surface-_h)@_t))
-   rows.sort(key=lambda row:-round(abs(float((np.asarray(row['contact'])-_h)@_t)-_mid),2))
+   # ...but not against the wall: 2026-11-25 x13_store / f8_store a mug released (held tilted) touching the side wall
+   # leaned on it; its rim caught the cabinet frame as the drawer closed and jammed it. Aim DRAWER_WALL_GAP_M off the
+   # wall (the reachable side spot nearest that), still to the side; which candidates exist is unchanged.
+   _across=(surface-_h)@_t;_half=float(np.percentile(_across,98)-np.percentile(_across,2))/2
+   _radius=float(np.linalg.norm(held_xy-center,axis=1).max())
+   _aim=max(0.,_half-_radius-DRAWER_WALL_GAP_M)
+   rows.sort(key=lambda row:round(abs(abs(float((np.asarray(row['contact'])-_h)@_t)-_mid)-_aim),2))
+   print('DRAWER_WALL_GAP',json.dumps(dict(half_width_m=round(_half,3),held_radius_m=round(_radius,3),aim_offset_m=round(_aim,3))),flush=True)
    print('DRAWER_SIDE_FIRST',json.dumps(dict(candidates=len(rows),first_offset_from_middle_m=round(abs(float((np.asarray(rows[0]['contact'])-_h)@_t)-_mid),3))),flush=True)
   artifacts.write_text(a.output/'support_filter.json',json.dumps(dict(radius_m=support_radius,edge_margin_m=edge_margin,retained=len(rows)),indent=2))
   print('INTERIOR_PLACE_CANDIDATES',len(rows),'support radius',support_radius,flush=True)
@@ -270,6 +279,22 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    print('SMALL_TABLE_DROP_CANDIDATES',len(release_candidates),flush=True)
   # Try distinct contacts/orientations before revisiting millimeter-offset
   # copies of the same pose. Retain every existing candidate and clearance.
+  # Spots this robot already used on the table (opt-in: TABLE_OCCUPIED_MAP, map frame, set by the household pipeline).
+  # 2026-11-25 r5_table: the cup's drop spot was 11.6 cm from a bowl this robot had placed; the camera did not show the
+  # bowl in the candidate check and the cup tipped into it (not counted as on the table).
+  import os as _os
+  if _os.environ.get('TABLE_OCCUPIED_MAP') and artifacts.exists(a.dock/'slam/estimated_base_poses.npy'):
+   try:
+    _spots=np.asarray(json.loads(_os.environ['TABLE_OCCUPIED_MAP']),float).reshape(-1,3)
+    _mp=json.loads(artifacts.read_text(a.dock/'slam/mapper.json')) if artifacts.exists(a.dock/'slam/mapper.json') else {}
+    _T=np.asarray(_mp.get('global_anchor',np.eye(4)),float)@artifacts.load_array(a.dock/'slam/estimated_base_poses.npy')[-1]
+    _Ti=np.linalg.inv(_T);_local=_spots@_Ti[:3,:3].T+_Ti[:3,3]
+    _hc=(held[:,:2].min(0)+held[:,:2].max(0))/2;_keep_out=float(np.linalg.norm(held[:,:2]-_hc,axis=1).max())+TABLE_ITEM_RADIUS_M
+    _free=lambda row:bool(np.all(np.linalg.norm(_local[:,:2]-np.asarray(row['contact'])[:2],axis=1)>_keep_out))
+    _n0,_n1=len(diverse),len(release_candidates)
+    diverse=[row for row in diverse if _free(row)];release_candidates=[row for row in release_candidates if _free(row)]
+    print('TABLE_OCCUPIED_EXCLUDED',json.dumps(dict(spots=len(_spots),keep_out_m=round(_keep_out,3),candidates=[_n0,len(diverse)],drops=[_n1,len(release_candidates)])),flush=True)
+   except Exception as _exc:print('TABLE_OCCUPIED_UNAVAILABLE',str(_exc)[:160],flush=True)
   for clearance in (.03,.05,.015,0.,.005,.01,.02,.04):
    for row in diverse[:40]:
     candidate=dict(row);goal=np.array(row['tcp']);goal[2,3]+=clearance

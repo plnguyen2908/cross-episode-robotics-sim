@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 
 
-def test_sources(dataset, splits, task):
+def test_sources(dataset, splits, task, resolve=True):
+    """resolve=False keeps the listed path (a link stays a link): the memory index
+    (memory/episode_memory.json) is found from the listed v4 path, not its v3 target."""
     sources = []
     for split in splits:
         root = (Path(dataset) / split).resolve()
@@ -18,7 +20,7 @@ def test_sources(dataset, splits, task):
             listed = Path(os.path.normpath(root / row['folder']))
             if not listed.is_relative_to(root):
                 raise ValueError(f'Manifest path escapes split: {listed}')
-            source = listed.resolve()
+            source = listed.resolve() if resolve else listed
             if source in sources:
                 raise ValueError(f'Duplicate test episode: {source}')
             sources.append(source)

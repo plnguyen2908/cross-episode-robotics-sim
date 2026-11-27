@@ -33,6 +33,15 @@ class PipelineRedocking:
         p=self.pipeline;ctx=self.context
         if purpose=='pick' and ctx.get('held') is not None:
             return dict(success=False,reason='placement_pending_retained_grasp')
+        # a pick that memory replays from INSIDE a fixture too (2026-11-25 x18_meal / f_meal call 18: this redock drove the
+        # tucked arm into the open microwave door; the remembered take-out then could not align)
+        mem_pick=purpose=='pick' and ctx.get('memory_pick_location') is not None
+        if (purpose=='handle' or mem_pick) and ctx.get('memory_approach') and getattr(p,'memory_nav',None) is not None:
+            # At a remembered start of this knob/fixture (navigation's memory approach): the memory replay aligns itself
+            # to the past robot's view. A fresh redock from this close stand pointed at the robot itself and turned
+            # away to look around (2026-11-24 pots8_a call 8). A failed replay redocks before its live fallback.
+            print('QWEN_PIPELINE_REDOCK_SKIPPED_MEMORY_APPROACH',purpose,target,flush=True)
+            return dict(success=True,reason='memory_approach_kept')
         previous=ctx.get('continuation')
         if previous is None:raise RuntimeError('No live navigation handoff for Qwen docking')
         self.calls+=1;root=p.output/f'qwen_redock_{self.calls:03d}'

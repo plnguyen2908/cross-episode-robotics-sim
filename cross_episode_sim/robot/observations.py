@@ -36,3 +36,16 @@ def render_onboard_observations(renderer,data,profile,scene_option=None):
     finally:renderer.disable_depth_rendering()
     return dict(navigation_rgb=rgb,navigation_depth_m=depth,wrist_rgb=wrist_rgb,
                 wrist_depth_m=wrist_depth,simulation_time=float(data.time))
+
+
+def onboard_scene_option():
+    """Hide coincident RoboCasa collision proxies, without changing physics.
+
+    Saved composite models already move visible robot group-0 meshes into
+    visible groups during construction. Match the demonstrator's render options.
+    """
+    import mujoco
+    option = mujoco.MjvOption()
+    option.geomgroup[0] = 0
+    option.sitegroup[:] = 0
+    return option

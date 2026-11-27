@@ -159,6 +159,9 @@ class SensorRedocking:
                 # grasp took the left door the survey had rejected (fix70).
                 from ..navigation.cabinet_survey import SURVEY_PROMPT
                 result = pointer.remote.call(image=np.asarray(camera.rgb),target=SURVEY_PROMPT) if getattr(pointer,'remote',None) is not None else pointer.point(Image.fromarray(camera.rgb),SURVEY_PROMPT)
+            elif str(target).lower().startswith('cookware on') and 'stove burner' in str(target).lower():
+                from ..perception.molmo_pointing import point_cookware_on_burner
+                result = point_cookware_on_burner(pointer, Image.fromarray(camera.rgb), target)
             else:
                 result = pointer.point(Image.fromarray(camera.rgb), target)
             if target=='handle on fridge':

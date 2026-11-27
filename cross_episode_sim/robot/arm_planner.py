@@ -28,6 +28,7 @@ class RobotArmPlanner:
         unlock: tuple[str, ...] = (),
         activation_distance: float = 0.005,
         kinematics=None,
+        max_goalset: int = 1,
     ):
         if kinematics is not None:
             kin = kinematics
@@ -73,6 +74,7 @@ class RobotArmPlanner:
                 # a collision), so at the default 5 mm a plan can sit flush with the
                 # real surface and the gripper grazes it.
                 optimizer_collision_activation_distance=activation_distance,
+                max_goalset=max_goalset,  # >1 only for goal-set grasp planning (cuRobo plan_grasp test, 2026-11-23)
             )
         )
         self.planner.clear_scene_cache()

@@ -103,3 +103,40 @@ fixtures/rooms map to their station; underscores are spaces; `region`
 inside/default into a container is interior; a room or the table as
 `redock_target` uses the catalog default. Changed calls are logged as
 `SKILL_ARGUMENTS_READ`.
+
+## Text memory (`--text-memory DIR`) — November 21, 2026
+
+Optional for `qwen_zero_shot`, `qwen_zero_shot_pure` and `qwen_replan` (default none:
+prompts byte-identical to before). `evaluation/text_memory.py` reads the memory
+worktree's `task_language_memory_v4` (history split only) and adds to the plan
+prompt and to every replan prompt:
+
+- `procedure`: the most-supported procedure of the Gemini task skill tree built
+  from the exact recorded skill logs (numbered roles to categories, room waypoints,
+  docks and regions dropped), with how many of the 100 histories follow it.
+- `object_start_locations_in_this_house`: Gemini video observations of where task
+  objects were at the start of history episodes in the same house and task,
+  distinct-episode counts, places seen in only one episode dropped. The house comes
+  from the split manifest listing the episode folder (frozen v4 memory rule). An
+  episode in no manifest (new house) gets the procedure only.
+- `MEMORY_RULES`: remembered sources are search hypotheses for `search_at`; not
+  found -> another remembered source (approach container, open, approach object);
+  navigation failure is not absence; failed grasp -> same object again first.
+
+The planning contract (`PLANNING_RULES`), the symbolic audit, the 2 repair requests
+(plan and every replan), `MAX_REPLANS` and the public feedback are unchanged. No
+simulator truth, current scene config, maps or action memory enter the prompt.
+`qwen_plan.json` keeps the memory text and its audit (paths, SHA-256, house);
+`report.json` `planner.history` is `text_memory`. Batch folders get `_textmem`.
+
+```bash
+M=/nobackup/le/cross-episode-qwen-capx/runs/task_language_memory_v4
+bash scripts/eval_household.sh <episode> --gpu 2 --planner qwen_replan --text-memory $M
+python3 scripts/eval_households.py --split test --tasks set_table --gpus 2,5 --planner qwen_replan --text-memory $M --gpt-limits
+```
+
+Known limits: the household backend reports no explicit `target_found`, so
+"not found" is read from the failure reason text; Gemini labels are free text
+(`cup on kitchen counter` / `cup on countertop` are separate lines); the Gemini video
+location pass is missing for all 100 warm-two-pots histories (25/25 missing in every
+house), so that task gets the procedure only.

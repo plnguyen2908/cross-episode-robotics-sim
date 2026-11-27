@@ -17,6 +17,17 @@ from cross_episode_sim.navigation.map_continuation import restore_observed_map
 from cross_episode_sim.slam import create_mapper
 import torch
 torch.cuda.set_per_process_memory_fraction(.22)
+# User rule (2026-11-18, repeated 2026-11-23 for every pick): a grasp the arm reaches (IK found) is executed without the
+# observed-world collision check or the open-finger-vs-target check; IK, self collision, physics and the hold/lift
+# verification are unchanged.
+# 2026-11-23 evening: NOT for this generic/cookware/food pick. With IK-only the food box on the counter was grasped by
+# the first reachable proposal and failed twice (finger into the counter; then a wide grasp that did not hold), while
+# the full checks picked it every time in meal runs 2-6 ("it used to not have this problem"). Cups/bowls
+# (scripts/test_m2t2_pick.py, incl. picks inside appliances) keep IK-only; this file is back to its original checks.
+# cookware checked-grasp pass capped at 100 (2026-11-25, 10 N pots: 300 refused checks cost ~7 min per pick and pushed
+# the run past the 45-min limit; the IK-only grasps that follow held every time at 10 N)
+COOKWARE_CHECKED_CAP=100
+ObservedGraspPlanner.ik_only=False  # checks first; the candidate loop falls back to IK-only when every grasp is refused
 p=argparse.ArgumentParser();p.add_argument('--source',type=Path,required=True);p.add_argument('--input',type=Path,required=True);p.add_argument('--predictions',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--approach-offset',type=float,default=.06);p.add_argument('--max-candidates',type=int,default=0,help='Distinct grasp planning attempts; 0 tries all predicted candidates');p.add_argument('--household-grasp',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 m,d=load_checkpoint(a.source)
 controller=MolmoSpacesController(m,d);hold={n:controller.robot_view.get_move_group(n).noop_ctrl.copy() for n in ('base','arm','gripper')};geo=RobotGeometry(m);start=d.time;steps=0;phase='planning';events=[];failures=[];planner=None;world_stats={}
@@ -56,18 +67,25 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   stable=0;waitstart=d.time
   for _ in range(100):
    execute(path[-1],grip)
-   error=np.max(np.abs(measured()-path[-1]));vel=np.max(np.abs([d.joint(n).qvel[0] for n in geo.joint_names]));stable=stable+1 if error<.015 and vel<.04 else 0
+   error=np.max(np.abs(measured()-path[-1]));vel=np.max(np.abs([d.joint(n).qvel[0] for n in geo.joint_names]))
+   # holding: a heavy object sags the arm under gravity (2026-11-24 warm_two_pots pots5: 2.73 kg pot lifted and held,
+   # joint 6 0.076 rad below its target, at rest) -> a still arm within 0.10 rad counts as settled
+   stable=stable+1 if (error<.015 and vel<.04) or (grip>0 and error<.10 and vel<.02) else 0
    if stable>=5:break
   events.append(dict(phase=phase,simulated_time=float(d.time-start),settling_seconds=float(d.time-waitstart),joint_error_rad=float(error),max_joint_velocity_rad_s=float(vel),reason='measured joint error and velocity'))
   if stable<5:raise RuntimeError('Measured arm settling failed')
  frame()
  try:
   if not rows:raise RuntimeError('M2T2 proposed no grasps near the observed target; no arm path attempted')
-  boxes,world_stats=build_observed_boxes(g,T,points,target)
+  from cross_episode_sim.control.observed_grasp_planner import cookware_support
+  # cookware: the same support rule as its proposals (a pot on a burner stands on the grate, not the stovetop)
+  boxes,world_stats=build_observed_boxes(g,T,points,target,target_speckle_m=.015,
+      support_height=cookware_support(points,target) if 'cookware' in requested_category else None)  # grocery snack 2026-11-24: one stray depth point 1.2 cm off the box became a 2.8 cm obstacle on its side and refused every grasp
   print('OBSERVED_WORLD',world_stats,flush=True)
   artifacts.write_text(a.output/'observed_world.json',json.dumps([dict(name=b.name,pose=b.pose,dims=b.dims) for b in boxes],indent=2))
   # Target selection/cropping is upstream. Do not veto learned proposals
   # again with a hard contact-to-surface distance threshold before planning.
+  ObservedGraspPlanner.support_z=float(world_stats['support_z'])  # IK-only still keeps fingers out of the support top
   contact_mask=observed_target_mask(points,target,world_stats['support_z'])
   artifacts.write_text(a.output/'proposal_filter.json',json.dumps(dict(
       before=len(rows),after=len(rows),enabled=False,
@@ -124,65 +142,95 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
    rows=link_ranker.iter_ranked(outward_rim_contacts(rows))
   plan=planner.plan
   seen=[];chosen=None
-  for index,row in enumerate(rows):
-   tcp=np.array(row['tcp']);goal=tcp[:3,3];R=tcp[:3,:3]
-   if any(np.linalg.norm(goal-p)<.002 and np.linalg.norm(R-r)<.05 for p,r in seen):continue
-   seen.append((goal,R))
-   if a.max_candidates>0 and len(seen)>a.max_candidates:break
-   try:
-    planning_stage='approach'
-    if a.household_grasp or ('cookware' in requested_category or requested_category.startswith('food container')):
-     planning_stage='contact_endpoint'
-     # Necessary endpoint check before six IK seeds and the free approach.
-     # The full insertion sweep is still checked at the solved robot poses.
-     if link_ranker.blocked(tcp):raise RuntimeError('Observed target blocks endpoint linkage')
-     if pad_enclosure is not None and pad_enclosure.blocked(tcp):raise RuntimeError('Support-completed target blocks open finger pad')
-     if pad_enclosure is not None:
-      skew=pad_enclosure.face_skew(tcp)
-      if skew is not None and skew>MAX_FACE_SKEW_DEG:raise RuntimeError(f'Support-completed target faces skewed {skew:.0f} deg to finger pads')
-     if not planner.solve(measured(),goal,R):raise RuntimeError('No collision-clear contact endpoint')
+  # one rule for every pick (user 2026-11-23: no per-object pick functions): the full checks first; only when they
+  # refuse EVERY candidate, the same candidates again with IK as the only gate (the dining-table middle bowl: all
+  # ~800 grasps refused by the checks, picked 4/4 IK-only; counter cups/bowls, food box, drinks pass the checks)
+  rows=list(rows)  # the ranked candidates can be a one-shot generator: the IK-only fallback pass needs them again (meal 2026-11-23: 300 refused, fallback saw nothing)
+  _ik0=bool(getattr(ObservedGraspPlanner,'ik_only',False))
+  # a checked grasp can still jam the arm (2026-11-24 warm_two_pots pot 2: joint 7 at its limit, link 7 against link 5,
+  # 'Measured arm settling failed' in approach): back out along the path just driven and try the next accepted
+  # candidate, at most twice (same as the cup/bowl pick, scripts/test_m2t2_pick.py)
+  _failed_exec=set();_exec_tries=0
+  while True:
+   chosen=None
+   for _fallback,index,row in [(f_,i_,r_) for f_ in ((False,True) if not _ik0 else (True,)) for i_,r_ in enumerate(rows)]:
+    if chosen is not None:break
+    if index in _failed_exec:continue
+    if not _fallback and index>=(COOKWARE_CHECKED_CAP if 'cookware' in requested_category else 800):continue  # cookware: 300 (every successful checked cookware grasp so far came well before it; 800 cost ~15 min, pots9)  # bound the checked pass (user 2026-11-24: 300 -> 800; the food box's first acceptable grasp can lie past 300, and IK-only jams it)
+    if _fallback and not getattr(ObservedGraspPlanner,'ik_only',False):
+     ObservedGraspPlanner.ik_only=True;seen.clear();print('PICK_FALLBACK_IK_ONLY',json.dumps(dict(refused=len(failures))),flush=True)
+    tcp=np.array(row['tcp']);goal=tcp[:3,3];R=tcp[:3,:3]
+    if any(np.linalg.norm(goal-p)<.002 and np.linalg.norm(R-r)<.05 for p,r in seen):continue
+    seen.append((goal,R))
+    if a.max_candidates>0 and len(seen)>a.max_candidates:break
+    try:
      planning_stage='approach'
-    pre=goal-a.approach_offset*R[:,2]
-    approach=approach_planner.plan(measured(),pre,R)
-    planning_stage='grasp_pose'
-    descend=plan(approach[-1],goal,R)
-    insertion_clear,blocked_part=target_linkage_clearance(contact_geometry,descend,points[contact_mask])
-    if not insertion_clear:
-     raise RuntimeError('Observed target blocks open-gripper linkage: '+blocked_part)
-    planning_stage='lift'
-    from scipy.spatial.transform import Rotation
-    radial=-goal[:2]/np.linalg.norm(goal[:2])
-    clear_goal=goal+np.r_[radial*.06,.06]
-    first_lift=plan(descend[-1],clear_goal,R)
-    from cross_episode_sim.control.observed_payload import ObservedPayload,payload_clearance
-    from cross_episode_sim.control.observed_grasp_planner import observed_target_mask
-    target_mask=observed_target_mask(points,target,world_stats['support_z'])
-    grasp_T=geo.fk(descend[-1])[geo.tcp_body]@geo.tcp_local
-    carried=ObservedPayload(geo,(points[target_mask]-grasp_T[:3,3])@grasp_T[:3,:3])
-    lift=None;lift_errors=[]
-    for withdrawal,height,tilt in ((w,h,t) for w,h in ((.15,.24),(.25,.18),(.30,.12),(.25,.12),(.15,.18),(.15,.12),(.15,.08)) for t in (0.,-15.,-25.,-35.)):
-     lift_offset=np.r_[radial*withdrawal,height]
-     lift_R=Rotation.from_euler('y',tilt,degrees=True).as_matrix()@R
-     try:
-      second_lift=plan(first_lift[-1],goal+lift_offset,lift_R)
-      if not payload_clearance(carried,second_lift[-1],points[~target_mask]):
-       raise RuntimeError('Observed held-object clearance at carry posture')
-      if not all(payload_clearance(carried,q,points[~target_mask],padding=.015,surface_hull=True) for q in second_lift):
-       raise RuntimeError('Observed held-object clearance along lift')
-      lift=np.concatenate([first_lift,second_lift[1:]])
-      break
-     except RuntimeError as e:lift_errors.append(str(e));continue
-    if lift is None:raise RuntimeError('No validated lift pose/path: '+str(lift_errors))
-    row=dict(row,lift_rotation=lift_R.tolist(),lift_offset=lift_offset.tolist())
-    chosen=(index,row,approach,descend,lift,lift_offset);break
-   except RuntimeError as e:failures.append(dict(candidate=index,stage=planning_stage,error=str(e)));print('rejected',index,planning_stage,str(e)[:300],flush=True)
-  if chosen is None:raise RuntimeError('No collision-checked reachable M2T2 candidate')
-  index,row,approach,descend,lift,lift_offset=chosen
-  selected_tcp=np.asarray(row['tcp'])
-  artifacts.write_text(a.output/'chosen.json',json.dumps(dict(index=index,**row),indent=2))
-  artifacts.save_archive(a.output/'validated_paths.npz',approach=approach,grasp=descend,lift=lift)
-  phase='approach';run_path(approach,0.)
-  phase='grasp_pose';run_path(descend,0.)
+     if a.household_grasp or ('cookware' in requested_category or requested_category.startswith('food container')):
+      planning_stage='contact_endpoint'
+      # Necessary endpoint check before six IK seeds and the free approach.
+      # The full insertion sweep is still checked at the solved robot poses.
+      # IK-only fallback: IK is the only gate (user rule), no observed-target linkage veto (2026-11-24 pot on burner)
+      if not getattr(ObservedGraspPlanner,'ik_only',False) and link_ranker.blocked(tcp):raise RuntimeError('Observed target blocks endpoint linkage')
+      if pad_enclosure is not None and pad_enclosure.blocked(tcp):raise RuntimeError('Support-completed target blocks open finger pad')
+      if pad_enclosure is not None:
+       skew=pad_enclosure.face_skew(tcp)
+       if skew is not None and skew>MAX_FACE_SKEW_DEG:raise RuntimeError(f'Support-completed target faces skewed {skew:.0f} deg to finger pads')
+      if not planner.solve(measured(),goal,R):raise RuntimeError('No collision-clear contact endpoint')
+      planning_stage='approach'
+     pre=goal-a.approach_offset*R[:,2]
+     approach=approach_planner.plan(measured(),pre,R)
+     planning_stage='grasp_pose'
+     descend=plan(approach[-1],goal,R)
+     insertion_clear,blocked_part=target_linkage_clearance(contact_geometry,descend,points[contact_mask])
+     if not insertion_clear and not getattr(ObservedGraspPlanner,'ik_only',False):
+      raise RuntimeError('Observed target blocks open-gripper linkage: '+blocked_part)
+     planning_stage='lift'
+     from scipy.spatial.transform import Rotation
+     radial=-goal[:2]/np.linalg.norm(goal[:2])
+     clear_goal=goal+np.r_[radial*.06,.06]
+     first_lift=plan(descend[-1],clear_goal,R)
+     from cross_episode_sim.control.observed_payload import ObservedPayload,payload_clearance
+     from cross_episode_sim.control.observed_grasp_planner import observed_target_mask
+     target_mask=observed_target_mask(points,target,world_stats['support_z'])
+     grasp_T=geo.fk(descend[-1])[geo.tcp_body]@geo.tcp_local
+     carried=ObservedPayload(geo,(points[target_mask]-grasp_T[:3,3])@grasp_T[:3,:3])
+     lift=None;lift_errors=[]
+     for withdrawal,height,tilt in ((w,h,t) for w,h in ((.15,.24),(.25,.18),(.30,.12),(.25,.12),(.15,.18),(.15,.12),(.15,.08)) for t in (0.,-15.,-25.,-35.)):
+      lift_offset=np.r_[radial*withdrawal,height]
+      lift_R=Rotation.from_euler('y',tilt,degrees=True).as_matrix()@R
+      try:
+       second_lift=plan(first_lift[-1],goal+lift_offset,lift_R)
+       # IK-only fallback: no observed held-object clearance veto (user rule: IK is enough); 2026-11-24 warm_two_pots
+       # call 21: the pot lifted off its burner was refused at every carry posture although IK existed
+       ik_only_now=getattr(ObservedGraspPlanner,'ik_only',False)
+       if not ik_only_now and not payload_clearance(carried,second_lift[-1],points[~target_mask]):
+        raise RuntimeError('Observed held-object clearance at carry posture')
+       if not ik_only_now and not all(payload_clearance(carried,q,points[~target_mask],padding=.015,surface_hull=True) for q in second_lift):
+        raise RuntimeError('Observed held-object clearance along lift')
+       lift=np.concatenate([first_lift,second_lift[1:]])
+       break
+      except RuntimeError as e:lift_errors.append(str(e));continue
+     if lift is None:raise RuntimeError('No validated lift pose/path: '+str(lift_errors))
+     row=dict(row,lift_rotation=lift_R.tolist(),lift_offset=lift_offset.tolist())
+     chosen=(index,row,approach,descend,lift,lift_offset);break
+    except RuntimeError as e:failures.append(dict(candidate=index,stage=planning_stage,error=str(e)));print('rejected',index,planning_stage,str(e)[:300],json.dumps(getattr(planner,'last_rejection',None),default=str)[:200] if 'No collision-clear' in str(e) else '',flush=True)
+   if chosen is None:raise RuntimeError('No collision-checked reachable M2T2 candidate')
+   index,row,approach,descend,lift,lift_offset=chosen
+   selected_tcp=np.asarray(row['tcp'])
+   artifacts.write_text(a.output/'chosen.json',json.dumps(dict(index=index,**row),indent=2))
+   artifacts.save_archive(a.output/'validated_paths.npz',approach=approach,grasp=descend,lift=lift)
+   try:
+    phase='approach';run_path(approach,0.)
+    phase='grasp_pose';run_path(descend,0.)
+    break
+   except RuntimeError as _e:
+    if 'settling failed' not in str(_e) or _exec_tries>=2:raise
+    _jam=phase;_exec_tries+=1;_failed_exec.add(index)
+    events.append(dict(phase=_jam,jammed=str(_e),retry=_exec_tries,candidate=index))  # not "error": a retry that then succeeds is a success
+    print('PICK_EXEC_RETRY',json.dumps(dict(jammed_in=_jam,candidate=index,retry=_exec_tries)),flush=True)
+    phase='back_out'
+    _back=[measured()[None]]+([descend[::-1]] if _jam=='grasp_pose' else [])+[approach[::-1]]
+    run_path(np.vstack(_back),0.)
   from cross_episode_sim.control.gripper_readiness import FingerStabilityWindow
   phase='close_gripper';q=measured();readiness=FingerStabilityWindow();settled=False;gripstart=d.time
   for _ in range(100):

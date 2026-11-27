@@ -73,7 +73,24 @@ class ObservedGraspPlanner:
     def world_clear(self,spheres,margin=.005):
         # Set only by the pick script for picks inside an appliance (user rule:
         # reachable by IK is enough there). Self collision is still checked.
-        if getattr(self,'ik_only',False):return True
+        if getattr(self,'ik_only',False):
+            # User rule: IK found is enough, EXCEPT the surface the object stands on (meal run 7, 2026-11-23: an IK-only
+            # food-box grasp drove a finger into the counter top and the pick failed). Only the observed boxes forming
+            # that support top (top face within 3 cm below .. 1 cm above support_z) are checked; neighbours, edges and
+            # the target stay unchecked.
+            sz=getattr(self,'support_z',None)
+            if sz is None or not len(self.boxes):return True
+            top=self.centers[:,2]+self.half[:,2]
+            sup=(top>=sz-.03)&(top<=sz+.01)
+            if not sup.any():return True
+            flat=spheres.reshape(-1,4);flat=flat[flat[:,3]>0]
+            c=self.centers[sup];h=self.half[sup]
+            d=np.abs(flat[:,None,:3]-c[None])-h[None]
+            dist=np.linalg.norm(np.maximum(d,0),axis=2)+np.minimum(d.max(axis=2),0)-flat[:,None,3]
+            i,j=np.unravel_index(int(dist.argmin()),dist.shape)
+            if dist[i,j]<0.:  # penetration into the support top only (no margin)
+                self.last_rejection={'kind':'support_surface','gap':float(dist[i,j]),'sphere':flat[i].tolist()};return False
+            return True
         # No static boxes says nothing about self collision or the moving panel;
         # those are checked independently by clear()/ObservedHingedPlanner.
         if not len(self.boxes):return True
@@ -270,6 +287,23 @@ class ObservedGraspPlanner:
         return self._graph_joint_goal(q,solutions[0],start)
 
 
+def cookware_support(points,target):
+    """Support height under cookware from observed depth near the target (2026-11-24 warm_two_pots, pot on a burner):
+    the stove spreads over separate surfaces (stovetop 0.875-0.89, grate 0.905-0.91) and the pot rim plane (1.07-1.075)
+    can be the most common height; the pointed target can lie on the rim. Look only within 10 cm above the lowest
+    well-populated level (the stovetop / counter); the most common level there, or a well-populated level 1.5-5 cm
+    above it (a raised burner grate) that the pot stands on. Counter: one surface, so its level, as before."""
+    near=points[np.linalg.norm(points[:,:2]-target[:2],axis=1)<.2]
+    levels,counts=np.unique(np.round(near[:,2]/.005),return_counts=True);z=levels*.005
+    if not len(z) or counts.max()<20:return float(z[counts.argmax()]) if len(z) else float(target[2])
+    populated=counts>=.25*counts.max()
+    base=float(z[populated].min())
+    window=(z>=base-.005)&(z<=base+.10)
+    zw,cw=z[window],counts[window];mode=float(zw[cw.argmax()])
+    raised=zw[(cw>=.25*cw.max())&(zw>=mode+.015)&(zw<=mode+.05)]
+    return float(raised.max()) if len(raised) else mode
+
+
 def observed_target_mask(points,target,support):
     """Refine a semantic map target to its connected depth surface above support.
 
@@ -296,8 +330,15 @@ def observed_target_mask(points,target,support):
     return mask
 
 
-def build_observed_boxes(grid,T_map_base,points,target,*,support_height=None,local_resolution=.025):
-    """Compress sensor occupancy exactly; retain support and non-target surfaces."""
+def build_observed_boxes(grid,T_map_base,points,target,*,support_height=None,local_resolution=.025,target_speckle_m=None):
+    """Compress sensor occupancy exactly; retain support and non-target surfaces.
+
+    target_speckle_m (opt-in): a non-target point within this distance of the
+    target surface with fewer than 3 non-target neighbours inside 1.25 cm is
+    depth speckle at the target's edge, not an obstacle. Each such point would
+    otherwise become a whole local voxel against the target's side. Any real
+    neighbouring surface has many points and is retained.
+    """
     from curobo._src.geom.types import Cuboid
     R=T_map_base[:3,:3];indices=np.argwhere(grid.evidence>=2)
     step=np.array([grid.config.resolution,grid.config.resolution,grid.config.height_resolution])
@@ -314,10 +355,20 @@ def build_observed_boxes(grid,T_map_base,points,target,*,support_height=None,loc
     levels,counts=np.unique(np.round(near[:,2]/.005),return_counts=True);support=float(levels[counts.argmax()]*.005) if support_height is None else float(support_height)
     contact=observed_target_mask(points,target,support)
     if not np.isfinite(local_resolution) or local_resolution<=0:raise ValueError('Positive local voxel resolution required')
-    vox=np.unique(np.floor(points[~contact]/local_resolution).astype(int),axis=0)
+    obstacle=~contact
+    speckle=0
+    if target_speckle_m is not None and contact.any() and obstacle.any():
+        others=points[obstacle]
+        near_target=cKDTree(points[contact]).query(others,distance_upper_bound=target_speckle_m)[0]<=target_speckle_m
+        candidates=np.flatnonzero(near_target)
+        if len(candidates):
+            counts=np.array([len(v)-1 for v in cKDTree(others).query_ball_point(others[candidates],.0125)])
+            drop=candidates[counts<3];speckle=len(drop)
+            obstacle[np.flatnonzero(obstacle)[drop]]=False
+    vox=np.unique(np.floor(points[obstacle]/local_resolution).astype(int),axis=0)
     for i,(lo,hi) in enumerate(merge_voxels(vox)):
         boxes.append(Cuboid(name=f'depth_{i}',pose=((lo+hi+1)*local_resolution/2).tolist()+[1.,0.,0.,0.],dims=((hi-lo+1)*local_resolution+.003).tolist()))
-    return boxes,dict(local_resolution_m=local_resolution,fine_voxels=len(vox),coarse_voxels=int(keep.sum()),merged_boxes=len(boxes),support_z=support,target_surface_points=int(contact.sum()),target_surface_bounds=[points[contact].min(0).tolist(),points[contact].max(0).tolist()])
+    return boxes,dict(local_resolution_m=local_resolution,fine_voxels=len(vox),target_speckle_points=speckle,coarse_voxels=int(keep.sum()),merged_boxes=len(boxes),support_z=support,target_surface_points=int(contact.sum()),target_surface_bounds=[points[contact].min(0).tolist(),points[contact].max(0).tolist()])
 
 
 def target_linkage_clearance(geometry, path, target_surface, margin=.003):

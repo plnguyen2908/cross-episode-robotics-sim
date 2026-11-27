@@ -36,8 +36,12 @@ def run_stage_command(command, log):
         if previous is not None:signal.signal(signal.SIGTERM,previous)
 
 
+MEMORY_STATION_TARGET_M = 3.  # 2026-11-25 grocery x15/x18: a drink 7 m from the dining table was chosen
+
 class SensorSetTablePipeline:
-    def __init__(self, source, output, *, navigation_seconds=180, exploration_seconds=None, pointing_device=None, furniture_device=None,persistent_runtime=True,initial_doors='saved',single_left_leaf=False,expected_task='set_table'):
+    def __init__(self, source, output, *, navigation_seconds=180, exploration_seconds=None, pointing_device=None, furniture_device=None,persistent_runtime=True,initial_doors='saved',single_left_leaf=False,expected_task='set_table',visual_memory=None):
+        # Optional visual memory: the first exploration turn also relocalizes against it (log only).
+        self.visual_memory=visual_memory
         from cross_episode_sim.runtime.episode import EpisodeRuntime
         self.runtime=EpisodeRuntime(artifact_root=output) if persistent_runtime else None
         self.source=Path(source).resolve();self.output=Path(output).resolve()
@@ -83,8 +87,15 @@ class SensorSetTablePipeline:
         if not ok:raise RuntimeError(f'{name} failed; see {report} and {name}.log')
         return result
 
-    def explore(self, python):
-        """Keep the qualified run-57 station exploration for open-door tasks."""
+    def explore(self, python, visual_memory=None):
+        """Keep the qualified run-57 station exploration for open-door tasks.
+
+        visual_memory: optional memory root or merged map folder (default none).
+        If given, the first full turn matches onboard views against it. A confident
+        match (fit <= MEMORY_FIT_GATE, 3 cm) stops exploration and hands over the
+        memory map (report.json memory_handover); otherwise the memory is dropped and
+        exploration continues unchanged.
+        """
         if self.initial_doors=='closed':
             return self.explore_closed_rooms(python)
         destination=self.output/'exploration'
@@ -95,10 +106,21 @@ class SensorSetTablePipeline:
             '--station-exploration','--navigation-mode','semantic','--object-map','visual','--perception','daaam',
             '--explorer','frontier','--map-resolution','.05','--goal-room','',
             '--vlm-device','cuda:1','--seconds',str(self.exploration_seconds),
-            '--record-furniture-device',self.furniture_device or self.pointing_device or 'cuda:2'
+            '--record-furniture-device',self.furniture_device or self.pointing_device or 'cuda:2',
+            *(['--visual-memory',str(visual_memory)] if visual_memory is not None else []),
+            *(['--visual-memory-log-only'] if visual_memory is not None and not getattr(self,'memory_skip_explore',False) else []),
+            *(['--memory-index',str(self.memory_index)] if visual_memory is not None and getattr(self,'memory_skip_explore',False) and getattr(self,'memory_index',None) else [])
         ],destination/'report.json','sensor_navigation_success')
+        if visual_memory is not None and self.memory_handover(destination) is not None:
+            return destination  # confident relocalization: the memory map replaces exploration
         self.require_destination_memory(destination)
         return destination
+
+    @staticmethod
+    def memory_handover(directory):
+        """The visual-memory handover of a confidently relocalized exploration, else None (explored normally)."""
+        report=json.loads(artifacts.read_text(Path(directory)/'report.json'))
+        return report.get('memory_handover') if report.get('memory_localized') else None
 
     def explore_closed_rooms(self, python):
         """Separate closed-door development path; never used by all-open tasks."""
@@ -151,16 +173,19 @@ class SensorSetTablePipeline:
         finally:
             if artifacts.exists(self.output):artifacts.write_text(self.output/'runtime_metrics.json',json.dumps(self.runtime.metrics,indent=2))
 
-    def _navigate_to_object(self, number, category, root, continuation, *, search_at='kitchen'):
+    def _navigate_to_object(self, number, category, root, continuation, *, search_at='kitchen', skip_transit=False):
         python=sys.executable;nav=root/'navigation'
-        transit=root/'kitchen_transit'
-        self.stage(f'{number}_transit_kitchen',[
-            python,'scripts/test_fixed_map_transit.py','--start',str(continuation),
-            '--output',str(transit),'--room',search_at,'--seconds',str(self.navigation_seconds)
-        ] + ['--receptacle',search_at],transit/'report.json')
-        continuation=transit
+        if not skip_transit:  # skipped after a confident memory move already brought the robot there
+            transit=root/'kitchen_transit'
+            self.stage(f'{number}_transit_kitchen',[
+                python,'scripts/test_fixed_map_transit.py','--start',str(continuation),
+                '--output',str(transit),'--room',search_at,'--seconds',str(self.navigation_seconds)
+            ] + ['--receptacle',search_at],transit/'report.json')
+            continuation=transit
         command=[python,'scripts/demo_semantic_navigation.py','--source',str(self.source),'--output',str(nav),'--preserve-initial-state','--target',category,'--map-resolution','.05','--fixed-map','--navigation-mode','hybrid','--object-map','hydra','--perception','daaam','--explorer','frontier','--goal-room','','--vlm-device','cuda:1','--seconds',str(self.navigation_seconds),'--ring-checkpoint','/nobackup2/le/.cache/hub/models--AinazEftekhar--OneRING/snapshots/adf715b75c11ca789a033c9f157360f50c48a6e0/ring_model_step_40356421.ckpt']
         command+=['--route-station',search_at]
+        # a confident memory move already brought the robot to this station: look for the target here, not metres away
+        if skip_transit:command+=['--max-target-distance',str(MEMORY_STATION_TARGET_M)]
         if category not in ('cup','bowl'):
             command[command.index('--object-map')+1]='visual'
         if self.pointing_device:command+=['--pointing-device',self.pointing_device]
@@ -241,11 +266,11 @@ class SensorSetTablePipeline:
                     ctx['place_dock'],ctx['place_output']=self._navigate_with_object(ctx['number'],target,ctx['root'],ctx['pick'])
                     progress('carry_observe_place_dock','completed')
                 return SkillOutcome(True)
-            def explore_skill(*,target=None,progress):
+            def explore_skill(*,target=None,visual_memory=None,progress):
                 if target not in (None,'dining table'):return SkillOutcome(False,'exploration_target_not_migrated')
                 if navigation_context.get('explored'):return SkillOutcome(False,'exploration_resume_not_migrated')
                 progress('exploration','running')
-                navigation_context['exploration']=self.explore(python)
+                navigation_context['exploration']=self.explore(python,visual_memory=self.visual_memory if visual_memory is None else visual_memory)
                 navigation_context['explored']=True
                 progress('exploration','completed')
                 return SkillOutcome(True)

@@ -17,7 +17,8 @@ from cross_episode_sim.navigation.dock_follower import DockFollower
 from cross_episode_sim.navigation.placement_docks import placement_docks,plan_to_any_dock
 from scripts.demo_local_scan import ContactAudit
 from cross_episode_sim.evaluation.grasp_contact import contact_root_lookup
-p=argparse.ArgumentParser();p.add_argument('--start',type=Path,required=True);p.add_argument('--perception',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--observed-map',type=Path);p.add_argument('--continuation-map',type=Path);p.add_argument('--interior-view-approach',action='store_true');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
+p=argparse.ArgumentParser();p.add_argument('--start',type=Path,required=True);p.add_argument('--perception',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--observed-map',type=Path);p.add_argument('--continuation-map',type=Path);p.add_argument('--interior-view-approach',action='store_true')
+p.add_argument('--heading-correct',action='store_true',help='Drawer/cabinet places: after a clean dock that missed the facing tolerance by a little, turn in place and measure again');a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
 m,d=load_checkpoint(a.start)
 audit=ContactAudit(m)
 roots=[int(m.jnt_bodyid[j]) for j in range(m.njnt) if m.jnt_type[j]==mujoco.mjtJoint.mjJNT_FREE]
@@ -180,6 +181,23 @@ with OnboardSensorInterface(m,d) as sensors,StateVideoRecorder(m,d,a.output/'sta
   try:base.step(speed,yaw,diagnostic_observer=audit.observe)
   except RuntimeError as e:error=str(e);break
  else:error=f'Dock time budget of {budget/50:.0f} s exhausted'
+ if a.heading_correct and success and error is None:
+  # 2026-11-25 f15b_store call 19: the drawer dock completed 0.0529 rad from facing (tolerance 0.05) and the place was
+  # refused. Only a dock that missed by a little (0.05-0.15 rad) turns in place under SLAM feedback; the unchanged
+  # tolerance check below still decides.
+  h=None;h0=None
+  for tick in range(250):
+   if tick%5==0:
+    raw=sensors.capture();packet=payload.filter_packet(raw);tracking=slam.update(packet.cameras['navigation'],packet.timestamp)
+    recording.record_map(grid,tracking,'placement_heading_correct')
+    if tracking.accepted:
+     tb=np.linalg.inv(tracking.T_map_base)@np.r_[target,1.];h=float(np.arctan2(tb[1],tb[0]))
+     if h0 is None:h0=h
+     if not .02<=abs(h)<=.15 or (tick==0 and abs(h)<.05):break
+   if h is None:break
+   base.step(0.,float(np.clip(1.5*h,-.25,.25)),diagnostic_observer=audit.observe)
+  for _ in range(25):base.step(0.,0.,diagnostic_observer=audit.observe)
+  print('PLACE_DOCK_HEADING_CORRECT',json.dumps(dict(before_rad=None if h0 is None else round(h0,4),after_rad=None if h is None else round(h,4))),flush=True)
 
 cp=a.output/'private_checkpoint';cp.mkdir();artifacts.save_model(m,str(cp/'model.mjb'),None);spec=mujoco.mjtState.mjSTATE_INTEGRATION;state=np.empty(mujoco.mj_stateSize(m,spec));mujoco.mj_getState(m,d,state,spec);artifacts.save_array(cp/'state.npy',state);artifacts.save_array(a.output/'observed_payload_tool.npy',tool)
 grid.save(a.output);slam.save(a.output/'slam')

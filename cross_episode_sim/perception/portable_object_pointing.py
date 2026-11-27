@@ -46,10 +46,36 @@ def household_pointing_supervisor(pointer, segmenter, label):
     return PointingSupervisor(pointer, segmenter, label)
 
 
+# Drinks here are upright bottles/cans/cartons (about 15 cm); snack props are
+# low boxes (about 9 cm). Measured onboard: bottles 0.13-0.16 m, boxes 0.08-0.09 m.
+GROCERY_SHAPE_SPLIT_M = .115
+
+
 class GroceryPointingSupervisor(PointingSupervisor):
     def refine_mask(self, camera, mask):
         from .grocery_surface import above_support_mask
         return above_support_mask(camera, mask)
+
+    def verify_mask(self, camera, mask, tracking):
+        """Shape check beside the RGB category answer: measured top above support.
+
+        Colors and the drawn marker can mislead the RGB classifier; height above
+        the observed support comes from onboard depth. No measurement means no
+        veto. A mask touching the image top may hide a drink's top, so it is
+        never rejected as too short.
+        """
+        import numpy as np
+        from .grocery_surface import top_above_support
+        top = top_above_support(camera, mask)
+        if top is None:
+            return None
+        cut = bool(np.asarray(mask, bool)[0].any())
+        if self.label == 'packaged drink':
+            accepted = top >= GROCERY_SHAPE_SPLIT_M or cut
+        else:
+            accepted = top < GROCERY_SHAPE_SPLIT_M
+        return dict(requested=self.label, shape_top_m=round(top, 3), top_cut=cut, accepted=accepted,
+                    source='measured top above observed support')
 
 
 class GroceryPointer:

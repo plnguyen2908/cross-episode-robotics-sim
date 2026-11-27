@@ -39,6 +39,10 @@ def observed_open_panel_points(points,aperture):
         else:low,high=.04,np.inf
         radial=np.linalg.norm(points[:,:2]-hinge,axis=1)
         swing=(radial<=length+.05)&((points[:,:2]-hinge)@outward>.02)&(points[:,2]>=low)&(points[:,2]<=high)
+    if 'closed_handle' in aperture:
+        # the remembered-line points take the door's height band too: floor returns 4-6 cm up under the leaf's line
+        # beside the robot counted as door inside its own base and refused every dock route (runs 21, 23, 2026-11-23)
+        zc=float(np.asarray(aperture['closed_handle'])[2]);remembered&=(points[:,2]>=zc-.35)&(points[:,2]<=zc+.35)
     return points[(remembered|swing)&(points[:,2]>.04)]
 
 

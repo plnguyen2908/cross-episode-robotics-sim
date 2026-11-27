@@ -203,6 +203,13 @@ class HybridNavigator:
             # rather than switching to whichever handle is nearest.
             return preferred
         candidates=[t for t in (self.semantic.targets.targets+getattr(getattr(getattr(self,'pointing',None),'targets',None),'targets',[])) if t.label==self.semantic.target_label and t.observations>=2 and 0<=now-t.last_seen<=self.readiness.max_age]
+        limit=getattr(self,'max_target_distance',None)
+        if limit is not None:
+            # opt-in (the memory layer passes it when memory already stands at the requested station): only targets near
+            # where this search started (2026-11-25 grocery x15/x18 call 2: at the dining table it confirmed a drink 7 m
+            # away and drove off; the docking back at the table then timed out)
+            if getattr(self,'search_start_xy',None) is None:self.search_start_xy=np.asarray(xy,float).copy()
+            candidates=[t for t in candidates if np.linalg.norm(t.position[:2]-self.search_start_xy)<=limit]
         return min(candidates,key=lambda t:np.linalg.norm(t.position[:2]-xy)) if candidates else None
 
     def _reuse_docking_target(self):

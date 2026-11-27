@@ -30,7 +30,7 @@ def main():
     p.add_argument('--output',type=Path,required=True);a=p.parse_args()
     x=artifacts.load_array(a.input);start=time.monotonic()
     from scripts.household_grasp_proposals import focused_cloud
-    crop,surface=focused_cloud(x['points'],x['target'])
+    crop,surface=focused_cloud(x['points'],x['target'],support_below_target=True)
     from cross_episode_sim.perception.rpc import configured_client
     graspgenx=configured_client('graspgenx')
     if graspgenx is not None:
