@@ -113,10 +113,14 @@ echo "== text memory: ${text_memory:-none}  style ${memory_style:-past_plan (def
 cd "$ROOT"
 set +e
 style_env=();[ -n "$memory_style" ] && style_env=(TEXT_MEMORY_STYLE="$memory_style")
-env -u HOUSEHOLD_PLAN_COUNTS -u HOUSEHOLD_PLAN_CALLS -u TEXT_MEMORY_STYLE "${style_env[@]}" CUDA_VISIBLE_DEVICES="$gpu" MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID="$gpu" \
+# OPEN_TRACE=1: record every file the episode opens (strace, openat only) in $output/opened_files.txt
+trace=();[ "${OPEN_TRACE:-0}" = 1 ] && trace=(strace -f --seccomp-bpf -qq -e trace=openat,open -o "$output/opened_files.txt")
+# NVIDIA EGL only when its vendor file exists (no Mesa fallback: EGL_BAD_DISPLAY failures on one GPU, 2026-11-26)
+egl=();nv_egl=/usr/share/glvnd/egl_vendor.d/10_nvidia.json;[ -f "$nv_egl" ] && egl=(__EGL_VENDOR_LIBRARY_FILENAMES="$nv_egl")
+env -u HOUSEHOLD_PLAN_COUNTS -u HOUSEHOLD_PLAN_CALLS -u TEXT_MEMORY_STYLE "${style_env[@]}" CUDA_VISIBLE_DEVICES="$gpu" MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID="$gpu" "${egl[@]}" \
   OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 TZ=America/New_York \
   PYTHONPATH="$ROOT:$ROOT/external/DAAAM/src:$ROOT/external/molmospaces" SENSOR_MODEL_ENDPOINTS="$endpoints" \
-  "$py" -u "$runner" --source "$source_dir" --output "$output/episode" --skip-video-render --planner "$planner" "${limit_args[@]}" 2>&1 \
+  "${trace[@]}" "$py" -u "$runner" --source "$source_dir" --output "$output/episode" --skip-video-render --planner "$planner" "${limit_args[@]}" 2>&1 \
   | tee "$output/live.log" \
   | if [ "$raw" = 1 ]; then cat; else grep --line-buffered -aE 'STAGE [0-9]+|PUBLIC CALL|QWEN|GPT|TASK_PROGRESS|EPISODE_LIMIT|Traceback|Error|FAILED'; fi
 code=${PIPESTATUS[0]}

@@ -9,6 +9,7 @@ One folder, ``<dataset>/memory`` (README "Household evaluation"; filled by
       visual_tour_root/                         links: episodes -> ../visual/episodes, merged -> ../visual/merged_tour
       actions/<episode>/                        recorded commands of the history episodes (memory.json, commands.npz)
       history_streams/                          their onboard RGB-D streams (streams/), trajectories (episodes/), plan.json
+      wrist_memory/<episode>.h5                 recorded wrist RGB-D frames of the 70 tracked history episodes
       text/                                     text memory: trees/<task>/skill_tree.json, language/<house12>_<task>/
     <dataset>/fine_tuning/batches/<batch>/<episode>/   skill_calls.json, instruction.txt, config.json of the
                                                        history episodes (the paths the memory lists name)
@@ -17,7 +18,8 @@ memory_root(source): $MEMORY_ROOT, else the ``memory/`` folder above the episode
 found earlier in this process (runners call ``use_episode(source)`` first), else
 ``<repo>/runs/all_open_fixed_v4/memory``. The dataset-relative paths inside the memory metadata
 (``fine_tuning/...``, ``memory/...``) resolve against ``memory_root().parent``.
-Single folders can be overridden: MEMORY_ACTIONS_ROOT, MEMORY_HISTORY_ROOT, MEMORY_TEXT_ROOT.
+Single folders can be overridden: MEMORY_ACTIONS_ROOT, MEMORY_HISTORY_ROOT, MEMORY_TEXT_ROOT, WRIST_MEMORY_ROOT.
+The memory never reads a history episode's simulator scene (action_recording/: object poses, contacts).
 """
 import json
 import os
@@ -77,6 +79,10 @@ def history_streams_root(source=None):
     return Path(os.environ.get('MEMORY_HISTORY_ROOT') or memory_root(source)/'history_streams')
 
 
+def wrist_root(source=None):
+    return Path(os.environ.get('WRIST_MEMORY_ROOT') or memory_root(source)/'wrist_memory')
+
+
 def text_root(source=None):
     return Path(os.environ.get('MEMORY_TEXT_ROOT') or memory_root(source)/'text')
 
@@ -129,9 +135,9 @@ def missing_memory(source, navigation=True):
         plan = history_streams_root(source)/'plan.json'
         need(plan, 'history streams')
         if plan.is_file():
-            # The tracked history episodes of this house: streams and the recorded scene (action_recording).
+            # The tracked history episodes of this house: their navigation streams and recorded wrist frames.
             for e in history_plan(source).values():
                 if str(e.get('house_id', ''))[:12] != house:continue
                 need(history_streams_root(source)/'streams'/e['id']/'sensors.h5', 'history stream')
-                if e.get('source'):need(Path(e['source'])/'action_recording'/'model.mjb', 'history recording')
+                need(wrist_root(source)/f"{e['id']}.h5", 'recorded wrist frames')
     return missing

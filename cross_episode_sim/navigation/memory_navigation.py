@@ -422,16 +422,17 @@ def _fixture_replay(navigator, skill, location, state=None):
         navigator.last_place[location] = dict(tgt=tgt, dxy=log.get('object_shift'), wrist=wrist_offset, **rel_store)  # a later pick here reverses it
     if skill == 'pick' and lp is not None:navigator.last_place.pop(location, None)
     if log['ok'] and skill == 'pick' and shift_fn is not None and hasattr(shift_fn, '__dict__'):
-        # after a REMEMBERED pick the object sits in our hand as it sat in the past robot's hand at the end of that pick
-        # the next remembered place shifts by the difference to ITS past hold
+        # after a REMEMBERED pick the object sits in our hand as it sat in the past robot's hand (the pre-grasp shift
+        # moved our hand onto the object as the past hand was): our in-hand = that past pick's measured hold (its
+        # recorded pre-grasp wrist frame + commanded-joint FK; 2026-11-27, no past object pose)
         try:
-            from scripts.test_constrained_replay import PastEpisode, body_of, pose
-            pe = PastEpisode(tgt['episode']); key = seg['arguments'].get('target'); pd = pe.at(float(pe.ctime[seg['action_range'][1]-1]))
-            h = (np.linalg.inv(pose(pd, pe.m.body('robot_0/gripper/base').id))@np.r_[pd.xpos[body_of(pe.m, key)], 1.])[:3]
-            # (the pre-grasp shift already moved our hand onto the object as the past hand was: same hold)
             target = getattr(shift_fn, 'in_hand_target', shift_fn)
+            h = target.past_hold(dict(episode=tgt['episode'], segment=tgt['segment']))
             target.in_hand = h; log['in_hand_after_memory_pick'] = np.round(h, 3).tolist()
-        except Exception as exc:log['in_hand_error'] = f'{type(exc).__name__}: {exc}'[:160]
+        except Exception as exc:
+            log['in_hand_error'] = f'{type(exc).__name__}: {exc}'[:160]
+            try:getattr(shift_fn, 'in_hand_target', shift_fn).in_hand = None
+            except Exception:pass
     if log['ok'] and skill.startswith('open') and P0 is not None:
         try:
             geo_, q_ = arc_geometry(skill, held, flat(P0)@np.linalg.inv(E0), m); log['arc_fit'] = q_

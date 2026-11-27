@@ -5,8 +5,9 @@ differently in the hand, the base shifts by that difference first (memory_naviga
 not the hand - lands where the past object landed.
 
 Live side: the onboard wrist camera (depth + the robot-geometry mask from encoder FK). Past side: the past robot's
-wrist view at the same moment of its segment, re-rendered from its own recorded state through the same onboard
-sensor model (the history streams kept only the navigation camera). No simulator truth of the current episode is used.
+recorded wrist RGB-D frames (memory/wrist_memory) and its recorded commands (forward kinematics of the commanded
+arm joints). Never a past episode's simulator scene (object poses, shapes, contacts); no simulator truth of the
+current episode either.
 """
 import json
 from pathlib import Path
@@ -75,28 +76,133 @@ def held_centroid(cam):
     return np.median(P, axis=0), int(len(P))
 
 
-class PastWrist:
-    """The past episode's robot at a recorded time, seen through the onboard sensor model."""
-    def __init__(self, episode):
+class PastRobot:
+    """The past robot from its own ACTION LOG only (2026-11-27, user: never read the past episode's scene, object
+    poses/shapes or contacts): its recorded commands (commands.npz: base, arm, gripper) and skill segments
+    (memory.json), forward kinematics of those commanded arm joints on OUR robot model (a scratch MjData, robot joints
+    only), its saved navigation-camera keyframes and its own SLAM poses (visual memory streams). No past scene file."""
+    def __init__(self, episode, model):
         import mujoco
-        from scripts.test_location_matrix import PLAN
-        src = Path(PLAN[episode]['source'])/'action_recording'
-        self.m = mujoco.MjModel.from_binary_path(str(src/'model.mjb')); self.d = mujoco.MjData(self.m)
-        a = np.load(src/'actions.npz'); self.t, self.q = a['time'], a['qpos']
+        from scripts.test_nav_replay import ACTIONS
+        self.ep, self.m = episode, model; self.d = mujoco.MjData(model)
+        self.mem = json.loads((ACTIONS/episode/'memory.json').read_text()); names = self.mem['recording']['actuator_names']
+        with np.load(ACTIONS/episode/'commands.npz') as z:self.ctime = z['time'].copy(); self.ctrl = z['ctrl'].copy()
+        self.gi = names.index('robot_0/gripper/fingers_actuator')
+        self.arm = [names.index(f'robot_0/fr3_joint{i}') for i in range(1, 8)]
+        self.base = [names.index(f'robot_0/{n}_act') for n in ('base_x', 'base_y', 'base_theta')]
+        self.qa = [model.joint(f'robot_0/fr3_joint{i}').qposadr[0] for i in range(1, 8)]
+        self.qb = [model.joint(f'robot_0/{n}').qposadr[0] for n in ('base_x', 'base_y', 'base_theta')]
+        self.b = model.body('robot_0/base').id; self.g = model.body('robot_0/gripper/base').id
+        self.pads = (model.body('robot_0/gripper/left_pad').id, model.body('robot_0/gripper/right_pad').id)
+        self.site = model.site('robot_0/gripper/grasp_site').id  # the fingertips' centre (robot geometry)
 
-    def camera(self, t, key='wrist'):
-        import mujoco
-        from cross_episode_sim.sensors.onboard import OnboardSensorInterface
-        self.d.qpos[:] = self.q[min(np.searchsorted(self.t, t), len(self.t)-1)]; mujoco.mj_forward(self.m, self.d)
-        with OnboardSensorInterface(self.m, self.d) as s:return s.capture(camera_keys=(key,)).cameras[key]
+    def _pose(self, b):
+        T = np.eye(4); T[:3, :3] = self.d.xmat[b].reshape(3, 3); T[:3, 3] = self.d.xpos[b]; return T
 
-    def pads_in_base(self, t):
-        """the past fingers' midpoint at time t in its base frame (its own arm FK)"""
+    def hand(self, k):
+        """(T_base_gripper, pads midpoint) in the base frame at command k: FK of the commanded arm joints"""
         import mujoco
-        self.d.qpos[:] = self.q[min(np.searchsorted(self.t, t), len(self.t)-1)]; mujoco.mj_kinematics(self.m, self.d)
-        b = self.m.body('robot_0/base').id; Rb = self.d.xmat[b].reshape(3, 3)
-        mid = .5*(self.d.xpos[self.m.body('robot_0/gripper/left_pad').id]+self.d.xpos[self.m.body('robot_0/gripper/right_pad').id])
-        return Rb.T@(mid-self.d.xpos[b])
+        self.d.qpos[self.qb] = 0.; self.d.qpos[self.qa] = self.ctrl[k, self.arm]; mujoco.mj_kinematics(self.m, self.d)
+        Tb = self._pose(self.b); Ti = np.linalg.inv(Tb)
+        mid = .5*(self.d.xpos[self.pads[0]]+self.d.xpos[self.pads[1]])
+        return Ti@self._pose(self.g), (Ti@np.r_[mid, 1.])[:3]
+
+    def tcp(self, k):
+        """the fingertips' centre (grasp site) in the base frame at command k: FK of the commanded arm joints"""
+        self.hand(k); Ti = np.linalg.inv(self._pose(self.b)); return (Ti@np.r_[self.d.site_xpos[self.site], 1.])[:3]
+
+    def base_rel(self, k0, k):
+        """base pose at command k in the base frame at command k0 (the recorded base commands, odometry frame)"""
+        from scripts.test_nav_replay import planar
+        return np.linalg.inv(planar(*self.ctrl[k0, self.base]))@planar(*self.ctrl[k, self.base])
+
+    def closed_k(self, seg):
+        """first command (absolute index) in the segment where the gripper is commanded closed after open"""
+        a, b = seg['action_range']; g = self.ctrl[a:b, self.gi] > 127
+        idx = np.flatnonzero(np.diff(g.astype(int)) == 1)
+        return None if not len(idx) else a+int(idx[0])+1
+
+    def opened_k(self, seg):
+        a, b = seg['action_range']; g = self.ctrl[a:b, self.gi] > 127
+        idx = np.flatnonzero(np.diff(g.astype(int)) == -1)
+        return None if not len(idx) else a+int(idx[0])+1
+
+    def pick_before(self, seg):
+        """the past robot's pick segment of the object it carries into place segment `seg` (its last pick before)"""
+        picks = [s for s in self.mem['skills'] if s['skill'] == 'pick' and s['action_range'][0] < seg['action_range'][0]]
+        return picks[-1] if picks else None
+
+    def pregrasp_hold(self, pick_seg, wrist):
+        """where the past object sat in the past gripper frame after its pick, measured like our own in_hand_from_pick:
+        the perceived object's bounds centre just before the grasp, in the gripper frame at the close. Here from every
+        RECORDED wrist RGB-D frame in the pre-grasp window (object above its support, blob grown from the fingertips'
+        point at the close; commanded-joint FK), median over the frames; None when seen in fewer than HOLD_MIN_VIEWS
+        frames or the frames disagree by more than HOLD_MAX_SPREAD_M. Then the per-object-type offset between that
+        visible-bounds centre and the object's own centre (HOLD_OFFSET_GRIPPER, calibrated offline once)."""
+        kc = self.closed_k(pick_seg)
+        if kc is None:return None
+        t_close = float(self.ctime[kc]); T_c = self.tcp(kc); Tg, _ = self.hand(kc); est = []
+        for i in np.flatnonzero((wrist.t >= t_close+HOLD_WINDOW_S[0]-.01) & (wrist.t <= t_close+HOLD_WINDOW_S[1]+.01)):
+            cam = wrist.camera(float(wrist.t[i]))
+            kf = int(min(np.searchsorted(self.ctime, cam.time), len(self.ctime)-1)); T_f_c = self.base_rel(kf, kc)
+            P = _cloud3d(np.asarray(cam.depth_m, float), cam.robot_mask, np.asarray(cam.K), np.asarray(cam.T_base_optical), step=1, near=.05)
+            O = object_points(P, (T_f_c@np.r_[T_c, 1.])[:3])
+            if O is None:continue
+            est.append((np.linalg.inv(T_f_c@Tg)@np.r_[.5*(O.min(0)+O.max(0)), 1.])[:3])
+        if len(est) < HOLD_MIN_VIEWS:return None
+        E = np.asarray(est); h = np.median(E, axis=0)
+        if float(np.median(np.linalg.norm(E-h, axis=1))) > HOLD_MAX_SPREAD_M:return None
+        off = HOLD_OFFSET_GRIPPER.get(pick_seg['arguments'].get('target', '').rsplit('_', 1)[0], {})
+        h = h-np.asarray(off.get('+' if h[0] >= 0 else '-', (0., 0., 0.)))  # the side of the hand the object is on
+        return h if float(np.linalg.norm(h)) < .30 else None
+
+
+KF_MIN_POINTS = 60
+HOLD_WINDOW_S = (-1.2, -.4)   # the recorded pre-grasp wrist frames (memory/wrist_memory, recorded once offline 2026-11-27)
+HOLD_MIN_VIEWS, HOLD_MAX_SPREAD_M = 3, .02
+# visible-bounds centre minus the object's own centre, gripper frame, per object type: calibrated ONCE offline on the 70
+# history episodes on 2026-11-27 (the calibration script is not part of the eval code; held-out half residual medians
+# 0.1-2 cm). A fixed constant per
+# object type, like a sensor calibration; never computed from the past scene at test time.
+HOLD_OFFSET_GRIPPER = {"bowl": {"+": [0.0068, -0.0125, -0.0004], "-": [0.0576, -0.0296, -0.0026]}, "cup": {"+": [-0.0098, -0.0135, 0.0228], "-": [0.0348, -0.0078, 0.0219]}, "drink_bottle": {"+": [0.0006, -0.0134, 0.0263], "-": [-0.0001, -0.0127, 0.0257]}, "food_container": {"+": [-0.0043, -0.0011, 0.0148], "-": [0.0155, 0.015, -0.007]}, "pot": {"+": [0.0772, -0.0349, -0.029], "-": [-0.1045, -0.0097, 0.0049]}, "snack_box": {"+": [-0.0001, -0.0342, -0.0288], "-": [-0.0004, -0.0355, -0.0285]}}  # per object type, per side of the hand (sign of the hold's gripper-x)
+OBJ_R_M, OBJ_BELOW_M, OBJ_ABOVE_M, OBJ_LINK_M, OBJ_MAX_EXTENT_M = .18, .30, .12, .015, .40
+
+
+def object_points(P, grasp):
+    """the object at a grasp point in a depth cloud (base frame): the support plane under it (the most common height
+    among the points around), the points above that plane, and of those the connected blob (1.5 cm links) that comes
+    nearest the grasp point in the plane. Fingers close on a rim / handle / side, so the blob is grown from the grasp,
+    not cropped around it. None when nothing is there."""
+    from scipy.spatial import cKDTree
+    near = P[(np.linalg.norm(P[:, :2]-grasp[:2], axis=1) < OBJ_R_M) & (P[:, 2] > grasp[2]-OBJ_BELOW_M) & (P[:, 2] < grasp[2]+OBJ_ABOVE_M)]
+    if len(near) < KF_MIN_POINTS:return None
+    h, e = np.histogram(near[:, 2], bins=np.arange(near[:, 2].min(), near[:, 2].max()+.01, .01))
+    support = float(e[int(np.argmax(h))]+.005)
+    above = near[near[:, 2] > support+.012]
+    if len(above) < KF_MIN_POINTS:return None
+    tree = cKDTree(above); dxy = np.linalg.norm(above[:, :2]-grasp[:2], axis=1)
+    seeds = [int(i) for i in np.argsort(dxy)[:400] if dxy[i] <= .05]
+    if not seeds:return None  # nothing within 5 cm of where the fingers closed
+    taken = np.zeros(len(above), bool); O = None
+    for seed in seeds:  # the nearest point can be a lone speck (finger edge, depth noise): first blob big enough
+        if taken[seed]:continue
+        seen = np.zeros(len(above), bool); seen[seed] = True; front = [seed]
+        while front:
+            nb = {j for i in front for j in tree.query_ball_point(above[i], OBJ_LINK_M) if not seen[j]}
+            front = list(nb); seen[front] = True
+        taken |= seen
+        if seen.sum() >= KF_MIN_POINTS:O = above[seen]; break
+    if O is None or float(np.ptp(O[:, :2], axis=0).max()) > OBJ_MAX_EXTENT_M:return None  # not one object
+    return O
+
+
+def _cloud3d(depth, mask, K, T_base_opt, step=2, near=.2):
+    v = np.isfinite(depth) & (depth > near) & (depth < 3.)
+    if mask is not None:v &= ~np.asarray(mask, bool)
+    s = np.zeros_like(v); s[::step, ::step] = True; v &= s
+    yy, xx = np.nonzero(v); z = depth[yy, xx]
+    pc = np.column_stack(((xx-K[0, 2])*z/K[0, 0], (yy-K[1, 2])*z/K[1, 1], z))
+    return pc@np.asarray(T_base_opt)[:3, :3].T+np.asarray(T_base_opt)[:3, 3]
 
 
 def base_cloud(cam):
@@ -123,98 +229,115 @@ def object_offset(now, past, grasp, r=.07, z_lo=-.05, z_hi=.10, iters=4):
     return dxy, len(Pp), n
 
 
+# <dataset>/memory/wrist_memory/<episode>.h5 (WRIST_MEMORY_ROOT overrides; evaluation/memory_paths.py)
+WRIST_FRAME_TOL_S = .06
+
+
+class RecordedWrist:
+    """The past robot's RECORDED wrist RGB-D frames (memory/wrist_memory: recorded once offline, like the navigation
+    visual memory). camera(t) returns the recorded frame nearest t (within WRIST_FRAME_TOL_S) or raises LookupError."""
+    def __init__(self, episode):
+        import h5py
+        from ..evaluation.memory_paths import wrist_root
+        self.path = wrist_root()/f'{episode}.h5'
+        with h5py.File(self.path) as f:self.t = np.asarray(f['time']); self.K = np.asarray(f['K']); self.Tbo = np.asarray(f['T_base_optical'])
+        self._c = {}
+
+    def camera(self, t, key='wrist'):
+        import h5py
+        from types import SimpleNamespace
+        if key != 'wrist':raise LookupError('only the wrist camera is recorded here (navigation: the visual memory keyframes)')
+        i = int(np.argmin(np.abs(self.t-t)))
+        if abs(float(self.t[i])-t) > WRIST_FRAME_TOL_S:raise LookupError(f'no recorded wrist frame within {WRIST_FRAME_TOL_S} s of {t:.2f}')
+        if i not in self._c:
+            with h5py.File(self.path) as f:
+                self._c[i] = SimpleNamespace(rgb=np.asarray(f['rgb'][i]), depth_m=np.asarray(f['depth_m'][i], float), robot_mask=np.asarray(f['robot_mask'][i]),
+                                             K=self.K, T_base_optical=self.Tbo[i], time=float(self.t[i]))
+        return self._c[i]
+
+
+def _T_base_gripper(model, data):
+    """our gripper in our base frame (our own arm joints, forward kinematics of the live robot)"""
+    def T(b):
+        M = np.eye(4); M[:3, :3] = data.xmat[b].reshape(3, 3); M[:3, 3] = data.xpos[b]; return M
+    return np.linalg.inv(T(model.body('robot_0/base').id))@T(model.body('robot_0/gripper/base').id)
+
+
+def hold_in_gripper(cam, T_base_gripper):
+    """the held object's visible points next to the hand (wrist RGB-D, robot pixels masked), their centroid in the
+    gripper frame; (centroid, n) or (None, n)"""
+    c, n = held_centroid(cam)
+    if c is None:return None, n
+    pb = np.asarray(cam.T_base_optical)@np.r_[c, 1.]
+    return (np.linalg.inv(T_base_gripper)@pb)[:3], n
+
+
 class WristObjectMatch:
-    """navigator.object_shift hook: base-frame (dx, dy) that moves OUR held object onto the past one at the release."""
+    """navigator.object_shift hook: base-frame (dx, dy) that moves OUR held object onto the past one at the release.
+    Reads only our live sensors/joints and the past robot's recorded data: its commands (PastRobot), its recorded wrist
+    RGB-D frames (RecordedWrist) - never the past scene (user decision 2026-11-27)."""
     def __init__(self, runtime, log=None):
         self.rt, self.cache, self.log = runtime, {}, log if log is not None else []
 
+    def _past(self, ep):
+        return self.cache.get(('robot', ep)) or self.cache.setdefault(('robot', ep), PastRobot(ep, self.rt.model))
+
+    def _wrist(self, ep):
+        return self.cache.get(('wrist', ep)) or self.cache.setdefault(('wrist', ep), RecordedWrist(ep))
+
     def __call__(self, skill, location, tgt, seg):
-        from scripts.test_nav_replay import ACTIONS
-        ep = tgt['episode']; past = self.cache.get(ep) or self.cache.setdefault(ep, PastWrist(ep))
-        mem = json.loads((ACTIONS/ep/'memory.json').read_text())
-        gi = mem['recording']['actuator_names'].index('robot_0/gripper/fingers_actuator')
-        with np.load(ACTIONS/ep/'commands.npz') as z:ct = z['time']; g = z['ctrl'][:, gi]
-        a, b = seg['action_range']
-        if skill == 'pick' and not PICK_NAV_VIEW:return None  # picks: corrected at the pre-grasp wrist check instead
-        if skill == 'pick':
-            # the object where the past fingers closed: its points around that spot in the past navigation view (at
-            # the segment start, before the arm moved) vs in our live navigation view from the aligned pose
-            closed = np.flatnonzero(np.diff((g[a:b] > 127).astype(int)) == 1)
-            if not len(closed):return None
-            t_start, t_grasp = float(ct[a]), float(ct[a+int(closed[0])+1])
-            grasp = past.pads_in_base(t_grasp)
-            now = base_cloud(self.rt.sensors.capture(camera_keys=('navigation',)).cameras['navigation'])
-            then = base_cloud(past.camera(t_start+.1, 'navigation'))
-            dxy, n_past, n_now = object_offset(now, then, grasp)
-            row = dict(skill=skill, location=location, memory=f"{ep}/{seg.get('segment_id')}", grasp_base_m=np.round(grasp, 3).tolist(),
-                       points_past=n_past, points_now=n_now, result='measured' if dxy is not None else 'object not seen at the remembered grasp')
-            if dxy is not None:row['shift_m'] = np.round(dxy, 3).tolist()
-            self.log.append(row); return dxy
-        opened = np.flatnonzero(np.diff((g[a:b] > 127).astype(int)) == -1)
-        if getattr(self, 'in_hand', None) is not None and len(opened):
-            # our in-hand pose from our own pick vs the past robot's object in its hand at the start of this place
-            from scripts.test_constrained_replay import PastEpisode, body_of, pose
-            pe = self.cache.get(('rec', ep)) or self.cache.setdefault(('rec', ep), PastEpisode(ep))
-            key = pe.held_key(seg); pd = pe.at(float(ct[a])+.1)
-            Tg = pose(pd, pe.m.body('robot_0/gripper/base').id); h_past = (np.linalg.inv(Tg)@np.r_[pd.xpos[body_of(pe.m, key)], 1.])[:3]
-            pd = pe.at(float(ct[a+int(opened[0])+1])-.05)
-            Rbg = (np.linalg.inv(pose(pd, pe.m.body('robot_0/base').id))@pose(pd, pe.m.body('robot_0/gripper/base').id))[:3, :3]
-            h_now = np.asarray(self.in_hand, float); self.flip = False
-            if h_now[0]*h_past[0] < 0 and min(abs(h_now[0]), abs(h_past[0])) > FLIP_MIN_X_M and location in FLIP_LOCATIONS:
-                # round object (bowl/cup) gripped on the other side of its rim: a 180 deg turn about the hand axis makes
-                # our hold match the past one; the replay turns the wrist by the same amount
-                h_now = h_now*np.array([-1., -1., 1.]); self.flip = True
-            d3 = Rbg@(h_past-h_now); dxy = d3[:2]
-            # our object at the release = past object - d3: d3_z > 0 means ours is LOWER (hits the shelf/rim);
-            # higher is harmless (it drops a few cm: the drink into the microwave, isolated runs)
-            if float(d3[2]) > PLACE_MAX_DZ_M and location in PLACE_DZ_GATED:
-                # the hold differs vertically at the release: a base shift cannot fix that (store run 6: bowl 2 released
-                # 8 cm below the shelf, hit its edge and fell out) -> refuse, the baseline place follows
-                self.log.append(dict(skill=skill, location=location, result='our object would be released lower than the past one', dz_m=round(float(d3[2]), 3)))
-                return np.array([9., 9.])  # beyond OBJECT_SHIFT_MAX: memory refuses this place
-            self.log.append(dict(skill=skill, location=location, memory=f"{ep}/{seg.get('segment_id')}", result='measured from our pick', wrist_flip=self.flip,
-                                 in_hand_now_m=np.round(self.in_hand, 3).tolist(), in_hand_past_m=np.round(h_past, 3).tolist(), shift_m=np.round(dxy, 3).tolist()))
-            return dxy
-        if not len(opened):return None
-        t_start, t_release = float(ct[a]), float(ct[a+int(opened[0])+1])
-        cam_now = self.rt.sensors.capture(camera_keys=('wrist',)).cameras['wrist']
-        h_now, n_now = held_centroid(cam_now)
-        cam_past = past.camera(t_start+.1); h_past, n_past = held_centroid(cam_past)
-        row = dict(skill=skill, location=location, memory=f"{ep}/{seg.get('segment_id')}", points_now=n_now, points_past=n_past)
-        if h_now is None or h_past is None:row['result'] = 'held object not seen'; self.log.append(row); return None
-        R_base_hand = np.asarray(past.camera(t_release-.05).T_base_optical)[:3, :3]  # the past hand at its release
-        dxy = (R_base_hand@(h_past-h_now))[:2]
-        row.update(result='measured' if PLACE_SHIFT else 'measured (logged only)', in_hand_now_m=np.round(h_now, 3).tolist(), in_hand_past_m=np.round(h_past, 3).tolist(),
-                   shift_m=np.round(dxy, 3).tolist()); self.log.append(row)
-        return dxy if PLACE_SHIFT else None
+        ep = tgt['episode']
+        if skill == 'pick':return None  # picks: corrected at the pre-grasp wrist check (pregrasp)
+        pr = self._past(ep); ko = pr.opened_k(seg)
+        if ko is None or getattr(self, 'in_hand', None) is None:return None
+        # our in-hand pose from our own pick vs the past robot's, both measured the same way (perceived object bounds
+        # centre before the grasp, in the gripper frame at the close); the past one from its recorded wrist frame
+        try:h_past = self.past_hold(dict(episode=ep, segment=seg['segment_id']))
+        except LookupError as exc:self.log.append(dict(skill=skill, location=location, result=f'past hold not measured: {exc}'[:120]));return None
+        Rbg = pr.hand(ko)[0][:3, :3]  # the past hand at its release (its commanded joints)
+        h_now = np.asarray(self.in_hand, float); self.flip = False
+        if h_now[0]*h_past[0] < 0 and min(abs(h_now[0]), abs(h_past[0])) > FLIP_MIN_X_M and location in FLIP_LOCATIONS:
+            # round object (bowl/cup) gripped on the other side of its rim: a 180 deg turn about the hand axis makes
+            # our hold match the past one; the replay turns the wrist by the same amount
+            h_now = h_now*np.array([-1., -1., 1.]); self.flip = True
+        d3 = Rbg@(h_past-h_now); dxy = d3[:2]
+        # our object at the release = past object - d3: d3_z > 0 means ours is LOWER (hits the shelf/rim);
+        # higher is harmless (it drops a few cm: the drink into the microwave, isolated runs)
+        if float(d3[2]) > PLACE_MAX_DZ_M and location in PLACE_DZ_GATED:
+            self.log.append(dict(skill=skill, location=location, result='our object would be released lower than the past one', dz_m=round(float(d3[2]), 3)))
+            return np.array([9., 9.])  # beyond OBJECT_SHIFT_MAX: memory refuses this place
+        self.log.append(dict(skill=skill, location=location, memory=f"{ep}/{seg.get('segment_id')}", result='measured from our pick', wrist_flip=self.flip,
+                             in_hand_now_m=np.round(self.in_hand, 3).tolist(), in_hand_past_m=np.round(h_past, 3).tolist(), shift_m=np.round(dxy, 3).tolist()))
+        return dxy
 
     def past_hold(self, row):
-        """Where the past robot's object sat in its hand at the start of remembered place `row` (its recording)."""
-        key = (row['episode'], row['segment'])
+        """the past robot's hold of the object it carries into remembered place `row` (episode, segment): measured at
+        its pick before that place (pregrasp_hold), cached; LookupError when not measurable"""
+        key = ('hold', row['episode'], row['segment'])
         if key not in self.cache:
-            from scripts.test_constrained_replay import PastEpisode, body_of, pose
-            pe = self.cache.get(('rec', row['episode'])) or self.cache.setdefault(('rec', row['episode']), PastEpisode(row['episode']))
-            seg = next(x for x in pe.mem['skills'] if x['segment_id'] == row['segment'])
-            pd = pe.at(float(pe.ctime[seg['action_range'][0]])+.1); k = pe.held_key(seg)
-            self.cache[key] = (np.linalg.inv(pose(pd, pe.m.body('robot_0/gripper/base').id))@np.r_[pd.xpos[body_of(pe.m, k)], 1.])[:3]
+            pr = self._past(row['episode']); seg = next(x for x in pr.mem['skills'] if x['segment_id'] == row['segment'])
+            pk = seg if seg['skill'] == 'pick' else pr.pick_before(seg)
+            h = None if pk is None else pr.pregrasp_hold(pk, self._wrist(row['episode']))
+            self.cache[key] = h
+        if self.cache[key] is None:raise LookupError('past held object not seen in its recorded pre-grasp wrist frame')
         return self.cache[key]
 
     def press(self, tgt, seg, button):
-        return PressCheck(self.rt, tgt, seg, button, self.log)
+        return PressCheck(self.rt, tgt, seg, button, self.log, self._past(tgt['episode']), self._wrist(tgt['episode']))
 
     def pregrasp(self, tgt, seg, reverse=False):
         """replay hook for a remembered pick: at recorded command k (just before the fingers close) compare our wrist
-        view with the past robot's at the same command; returns the base-frame (dx, dy) that puts our hand where the
-        object is relative to the hand in the past (None = not measured)"""
-        from scripts.test_nav_replay import ACTIONS
-        ep = tgt['episode']; past = self.cache.get(ep) or self.cache.setdefault(ep, PastWrist(ep))
-        with np.load(ACTIONS/ep/'commands.npz') as z:ct = z['time'].copy()
+        view with the past robot's RECORDED wrist view at the same command; returns the base-frame (dx, dy) that puts
+        our hand where the object is relative to the hand in the past (None = not measured)"""
+        ep = tgt['episode']; pr = self._past(ep); wrist = self._wrist(ep); ct = pr.ctime
         a, b = seg['action_range']
 
         def hook(k):
             if reverse:k = (b-a)-1-k  # reversed replay: command k is the past segment's command from the end
             cam_now = self.rt.sensors.capture(camera_keys=('wrist',)).cameras['wrist']
-            p_now, n_now = nearest_object(cam_now); p_past, n_past = nearest_object(past.camera(float(ct[a+k])))
+            p_now, n_now = nearest_object(cam_now)
+            try:p_past, n_past = nearest_object(wrist.camera(float(ct[a+k])))
+            except LookupError as exc:p_past, n_past = None, str(exc)[:80]
             row = dict(skill='pregrasp', memory=f"{ep}/{seg.get('segment_id')}", points_now=n_now, points_past=n_past)
             if p_now is None or p_past is None:row['result'] = 'object not seen by the wrist camera'; self.log.append(row); return None
             dxy = (p_now-p_past)[:2]  # both in their own base frames: the object moved this much relative to the hand path
@@ -254,18 +377,17 @@ def in_hand_from_pick(pick_dir, stage_log):
     return h if float(np.linalg.norm(h)) < .30 else None  # an object 30+ cm from the hand is not a hold estimate
 
 
-def press_event_k(past, seg, button):
-    """Command index (from the segment start) where the past robot's gripper first touched `button` (its own recording)."""
-    import mujoco
-    a, b = seg['action_range']; gid = past.m.geom(f'microwave_main_group_{button}_button').id
-    grip = {i for i in range(past.m.nbody) if past.m.body(i).name.startswith('robot_0/gripper/')}
-    for k in range(0, b-a, 25):
-        d = past.at(float(past.ctime[a+k])); mujoco.mj_forward(past.m, d)
-        for c in d.contact[:d.ncon]:
-            if gid in (c.geom1, c.geom2) and past.m.geom_bodyid[c.geom2 if c.geom1 == gid else c.geom1] in grip:return k
-    return None
+def press_touch_k(pr, seg):
+    """absolute command index of the past arm's farthest reach in a press segment (its own commanded joints, FK)
+    = the touch (offline check against the recordings: within 0.15 s of the first finger-button contact)"""
+    a, b = seg['action_range']; P0 = pr.hand(a)[1]; best = (-1., a)
+    for k in range(a, b, 25):
+        p = (pr.base_rel(a, k)@np.r_[pr.hand(k)[1], 1.])[:3]; d = float(np.linalg.norm(p-P0))
+        if d > best[0]:best = (d, k)
+    return best[1]
 
 
+PRESS_REACH_TO_TOUCH_K = 55  # commands (2 ms): 0.11 s, offline check against the recordings 2026-11-27
 PRESS_EXTRA_M = .008  # extra press depth along the wrist camera's view direction (base plane)
 
 
@@ -275,13 +397,12 @@ class PressCheck:
     shift, so the fingertip reaches the button (a press is a few mm deep: meal run 5 stopped 0.5 cm short)."""
     max_m = .04
 
-    def __init__(self, runtime, tgt, seg, button, log):
-        from scripts.test_constrained_replay import PastEpisode
-        from scripts.test_nav_replay import ACTIONS
+    def __init__(self, runtime, tgt, seg, button, log, past_robot, wrist):
         self.rt, self.log = runtime, log; self.ep = tgt['episode']; self.seg = seg
-        self.past = PastEpisode(self.ep); self.wrist = PastWrist(self.ep); self.a = seg['action_range'][0]
-        with np.load(ACTIONS/self.ep/'commands.npz') as z:self.ct = z['time'].copy()
-        self.event_k = press_event_k(self.past, seg, button)
+        self.wrist = wrist; self.a = seg['action_range'][0]; self.ct = past_robot.ctime
+        # from the segment start (the replay's command index); the farthest commanded reach comes 0.11 s (max 0.13 s, all
+        # 28 recorded presses) before the finger meets the button: the arm still closes the last millimetres
+        self.event_k = press_touch_k(past_robot, seg)-self.a+PRESS_REACH_TO_TOUCH_K
 
     def __call__(self, k):
         import cv2

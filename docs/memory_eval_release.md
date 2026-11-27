@@ -159,8 +159,15 @@ Expect several hours, mostly the environment build and the ~36 GB model download
 ## 7. Interface the README already documents (must exist when the branch lands)
 
 **Implemented on main (2026-11-27)**: all rows below, plus `--memory-only` and `--revision` for
-`prepare_eval_data.py`, and the history recordings (`action_recording/` of the 70 tracked history
-episodes) in the download and check. Paths: `cross_episode_sim/evaluation/memory_paths.py`.
+`prepare_eval_data.py`, and the recorded wrist RGB-D frames of the 70 tracked history episodes
+(`memory/wrist_memory/`, `WRIST_MEMORY_ROOT` overrides) in the download and check. Paths:
+`cross_episode_sim/evaluation/memory_paths.py`.
+
+**Changed 2026-11-27 (user rule):** the memory never reads a history episode's simulator scene
+(`action_recording/model.mjb`, `actions.npz`: object poses, shapes, contacts). The earlier version on
+main re-rendered the past wrist camera and read the past held object from that scene; it was
+replaced by the recorded wrist frames, and the 70 history scene recordings are not part of the
+Hugging Face release. `scripts/test_constrained_replay.py` (the scene reader) was removed.
 
 The README's eval section describes the memory setting as it will work after the merge. The
 branch has to provide exactly these, and the clean-room test (section 5) has to use them:
@@ -192,6 +199,7 @@ Checked 2026-11-27 in the GPT tree. Today the memory is spread over **three plac
 | Fixture-transfer index | `fixture_transfer.py` | absolute `INDEX_DIR` | **broken** | same folder, derived from the root |
 | Recorded commands | `memory_navigation.py`, `memory_object_match.py`, `fixture_transfer.py` via `scripts/test_nav_replay.ACTIONS` | absolute, `cross-episode-qwen-capx/runs/history_language_action_v4/actions` | **broken** | `$DATA/memory/actions` |
 | History streams | `memory_navigation.py` via `test_nav_replay.HISTORY_ROOT` | absolute, `cross-episode-qwen-capx/runs/visual_memory_balanced_v4` (`MEMORY_HISTORY_ROOT` overrides) | **broken** unless the variable is set | `$DATA/memory/history_streams` |
+| Recorded wrist RGB-D (70 episodes) | `memory_object_match.RecordedWrist` | absolute `WRIST_MEMORY_ROOT`, `cross-episode-qwen-capx/runs/wrist_memory_v4` | **broken** | `$DATA/memory/wrist_memory/<episode>.h5` |
 | Text memory (`trees/` 1.7 MB, `language/` 2.0 MB) | `text_memory.py`, `episode_memory.resolve` | absolute `DEFAULT_ROOT`, `cross-episode-qwen-capx/runs/task_language_memory_v4` | **broken** | `$DATA/memory/text` |
 | `test_nav_replay.MEM` | `test_nav_replay.py` (`visual_tour_root`) | absolute | **broken** | `$DATA/memory` |
 

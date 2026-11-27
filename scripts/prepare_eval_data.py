@@ -14,9 +14,10 @@ scene.xml files refer to assets by absolute paths on the machine that generated
 them; those paths are rewritten to <root>/assets. A sample of scenes is then
 compiled in MuJoCo as a check. Re-running skips finished steps.
 
---memory also downloads the memory of the memory setting (~60 GB of archives) into
-<root>/memory and <root>/fine_tuning (the history episodes' skill logs and, for the
-70 tracked history episodes, their recorded scenes): memory/{episode_memory.json,
+--memory also downloads the memory of the memory setting (~15 GB of archives, ~21 GB
+unpacked) into <root>/memory and <root>/fine_tuning (the history episodes' skill logs;
+for the 70 tracked history episodes, their navigation streams and recorded wrist
+RGB-D frames; no history simulator scenes): memory/{episode_memory.json,
 index.json, FROZEN.json, README.md, lists/} as files and memory/archives/*.tar.zst
 (checked against memory/archives/MANIFEST.json, then unpacked into <root>). It
 recreates the memory/visual_tour_root links and checks that every file the memory
@@ -102,7 +103,7 @@ def unpack_memory(root, delete_archives):
 
 
 def check_memory(root):
-    """Every file the memory metadata names is on disk (the history logs, maps, index, commands, streams, recordings)."""
+    """Every file the memory metadata names is on disk (the history logs, maps, index, commands, streams, wrist frames)."""
     memory = root / 'memory';missing = []
     def need(path):
         if not Path(path).exists():missing.append(str(path))
@@ -125,8 +126,7 @@ def check_memory(root):
         for e in json.loads(plan.read_text())['episodes']:
             need(memory / 'history_streams' / 'streams' / e['id'] / 'sensors.h5')
             need(memory / 'history_streams' / 'episodes' / e['id'] / 'trajectory.npz')
-            source = Path(e['source']);source = source if source.is_absolute() else root / source
-            need(source / 'action_recording' / 'model.mjb');need(source / 'action_recording' / 'actions.npz')
+            need(memory / 'wrist_memory' / f"{e['id']}.h5")
     print(f'memory check: {len(ids)} history episodes, {len(houses)} houses, {len(missing)} missing files', flush=True)
     for row in missing[:10]:print('   missing', row)
     if missing:raise SystemExit('memory check failed; re-run with --memory')
