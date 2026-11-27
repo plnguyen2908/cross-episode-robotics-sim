@@ -163,7 +163,7 @@ branch has to provide exactly these, and the clean-room test (section 5) has to 
 
 | README promise | Implementation needed |
 |---|---|
-| `prepare_eval_data.py --root $DATA --memory` | download `memory/` (`lists/`, `episode_memory.json`, `history/`, `actions/`, `streams/`, `visual/`, `text/`), recreate the `visual_tour_root/` links, check every file; never fetch the fine-tuning shards |
+| `prepare_eval_data.py --root $DATA --memory` | download the layout of section 8, recreate the `visual_tour_root/` links, check every file; never fetch the fine-tuning shards |
 | `eval_households.py --memory` | today's `--qwen-memory` preset (text memory auto, procedure style, memory navigation + skip explore) without forcing the planner: works with `--planner gpt_replan` and `qwen_replan` (keep `--qwen-memory` as an alias) |
 | `--memory-limits` | 45 min wall, 20 simulated min, 100 calls |
 | `eval_household.sh <episode> --memory` | the same options for one episode, using main's endpoints file (no fixed ports) |
@@ -172,3 +172,29 @@ branch has to provide exactly these, and the clean-room test (section 5) has to 
 | launcher stops with "memory not found" | check each same-layout episode's history list and the memory folders before starting |
 | batch remembers its setting | already true (`run_info.json` check in `eval_households.py`) |
 | log tags `TEXT_MEMORY`, `MEMORY_HANDOVER`, `MEMORY_MOVE`, `MEMORY_FIXTURE`, `MEMORY_PICK`, `MEMORY_PLACE`, `MEMORY_*_FALLBACK`, `MEMORY_INDEX_MISSING` | already printed by the eval tree |
+
+## 8. Where the memory code reads each file: today vs. after the fix
+
+Checked 2026-11-27 in the GPT tree. Today the memory is spread over **three places**: the dataset's
+`memory/` folder, the dataset's `fine_tuning/` folder, and two run folders of another worktree
+(`cross-episode-qwen-capx/runs/...`). Only the first is found from `--dataset`.
+
+| Data | Read by | How the code finds it today | Collaborator today | After the fix (README layout) |
+|---|---|---|---|---|
+| `episode_memory.json`, `lists/` | `episode_memory.py`, `search_places.py`, `memory_plan.py` | walks up from the episode folder to `<root>/memory/` | works, if `memory/` is downloaded (already on HF; `prepare_eval_data.py` does not fetch it yet) | `$DATA/memory/` |
+| History `skill_calls.json`, `instruction.txt` (500 episodes; 180 are `round_v3_import`, 141 of their folders are links to v3) | `search_places.history_starts` (every memory episode: this house's history, or all houses' history on a new layout), `memory_plan.py` | `<root>/` + the relative path in the list (`fine_tuning/batches/...`) | **crash** (`FileNotFoundError`, no fallback): only inside the 183 GB fine-tuning shards | `$DATA/fine_tuning/batches/...` from a small pack (links dereferenced); no code change |
+| Visual map | `run_sensor_household.py` → `episode_memory.resolve` | the path named in `episode_memory.json` (`memory/visual/merged/<house>_<task>`) **does not exist even here**; falls back to absolute `VISUAL_ROOT/../visual_tour_root` | **broken** | `$DATA/memory/visual_tour_root/merged/<house12>`; fix the names in `episode_memory.json` |
+| Memory index | `run_sensor_household.py` | absolute `VISUAL_ROOT/memory_index_dev2` | **broken** | `$DATA/memory/visual/memory_index_dev2` |
+| Fixture-transfer index | `fixture_transfer.py` | absolute `INDEX_DIR` | **broken** | same folder, derived from the root |
+| Recorded commands | `memory_navigation.py`, `memory_object_match.py`, `fixture_transfer.py` via `scripts/test_nav_replay.ACTIONS` | absolute, `cross-episode-qwen-capx/runs/history_language_action_v4/actions` | **broken** | `$DATA/memory/actions` |
+| History streams | `memory_navigation.py` via `test_nav_replay.HISTORY_ROOT` | absolute, `cross-episode-qwen-capx/runs/visual_memory_balanced_v4` (`MEMORY_HISTORY_ROOT` overrides) | **broken** unless the variable is set | `$DATA/memory/history_streams` |
+| Text memory (`trees/` 1.7 MB, `language/` 2.0 MB) | `text_memory.py`, `episode_memory.resolve` | absolute `DEFAULT_ROOT`, `cross-episode-qwen-capx/runs/task_language_memory_v4` | **broken** | `$DATA/memory/text` |
+| `test_nav_replay.MEM` | `test_nav_replay.py` (`visual_tour_root`) | absolute | **broken** | `$DATA/memory` |
+
+Already fine: the HF test shards store the 83 v3-linked test episodes as real folders under
+`test_same_map/batches/round_v3_import/`, so `episode_memory.json` matches them (all 200 test
+entries are in the manifest).
+
+Fix: one function, `memory_root(source)` = the `memory/` folder found from the episode (or
+`MEMORY_ROOT`), and every constant above becomes a subfolder of it. Then the clean-room test
+(section 5) must show no file opened outside the clone and `$DATA`.

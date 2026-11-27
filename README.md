@@ -83,13 +83,21 @@ scenes as a check. It ends with `ready: --dataset $DATA`. Re-running resumes.
 HF_HUB_OFFLINE=0 .venv-sift/bin/python scripts/prepare_eval_data.py --root $DATA --memory
 ```
 
-This adds `$DATA/memory/`: the frozen list of history episodes for each (house, task)
-(`lists/`, `episode_memory.json`), the history episodes' skill logs and instructions
-(`history/`), their recorded commands (`actions/`), their onboard RGB-D streams (`streams/`), the
-visual memory maps and index of each house (`visual/`), and the text memory (`text/`). It
-recreates the `visual_tour_root/` links and checks every file. It does not download the 183 GB
-fine-tuning split. Every memory path in the code is relative to `--dataset`; `MEMORY_ROOT=<dir>`
-points it at a different folder.
+This puts everything the memory reads under the same `$DATA`:
+
+```
+$DATA/memory/
+  episode_memory.json, lists/, index.json   which history episodes each test episode may use (frozen)
+  visual/                                   visual memory map and memory index of each house
+  visual_tour_root/                         links into visual/ (recreated by the script)
+  actions/                                  recorded robot commands of the 500 history episodes
+  history_streams/                          their onboard RGB-D streams and SLAM trajectories (~15 GB)
+  text/                                     text memory: task procedures and where objects were found
+$DATA/fine_tuning/batches/<batch>/<episode>/  skill_calls.json, instruction.txt, config.json of the
+                                              500 history episodes only (a few MB, not the 183 GB split)
+```
+
+The code finds all of it from `--dataset` (`MEMORY_ROOT=<dir>` overrides `$DATA/memory`).
 
 ### 3. Run on Slurm
 
