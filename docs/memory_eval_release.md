@@ -155,3 +155,20 @@ Expect several hours, mostly the environment build and the ~36 GB model download
 - Should the past-plan fallback (`MEMORY_PLAN_FALLBACK`) get a switch to turn it off? The handoff eval uses `TEXT_MEMORY_STYLE=procedure`, not `past_plan`.
 - Do the ~150 unrelated tree-only files (VLA/LeRobot/datagen/reports) go to main separately, or stay local?
 - Should the 13 GB history streams be one HF folder or per-house shards? Per-house shards would let a collaborator fetch only the test houses they run.
+
+## 7. Interface the README already documents (must exist when the branch lands)
+
+The README's eval section describes the memory setting as it will work after the merge. The
+branch has to provide exactly these, and the clean-room test (section 5) has to use them:
+
+| README promise | Implementation needed |
+|---|---|
+| `prepare_eval_data.py --root $DATA --memory` | download `memory/` (`lists/`, `episode_memory.json`, `history/`, `actions/`, `streams/`, `visual/`, `text/`), recreate the `visual_tour_root/` links, check every file; never fetch the fine-tuning shards |
+| `eval_households.py --memory` | today's `--qwen-memory` preset (text memory auto, procedure style, memory navigation + skip explore) without forcing the planner: works with `--planner gpt_replan` and `qwen_replan` (keep `--qwen-memory` as an alias) |
+| `--memory-limits` | 45 min wall, 20 simulated min, 100 calls |
+| `eval_household.sh <episode> --memory` | the same options for one episode, using main's endpoints file (no fixed ports) |
+| sbatch `MEMORY=1`, `PER_TASK=N` | pass `--memory` (+ `--memory-limits` unless `LIMITS` is set) and a first-N-per-task selection |
+| every memory path relative to `--dataset`, `MEMORY_ROOT` override | replaces `DEFAULT_ROOT`, `VISUAL_ROOT`, `INDEX_DIR`, `ACTIONS`, `HISTORY_ROOT` (section 4.2) |
+| launcher stops with "memory not found" | check each same-layout episode's history list and the memory folders before starting |
+| batch remembers its setting | already true (`run_info.json` check in `eval_households.py`) |
+| log tags `TEXT_MEMORY`, `MEMORY_HANDOVER`, `MEMORY_MOVE`, `MEMORY_FIXTURE`, `MEMORY_PICK`, `MEMORY_PLACE`, `MEMORY_*_FALLBACK`, `MEMORY_INDEX_MISSING` | already printed by the eval tree |

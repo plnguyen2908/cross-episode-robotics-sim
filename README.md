@@ -1,11 +1,11 @@
 # Cross-Episode Robotics Sim
 
-> **Memory evaluation (GPT / Qwen planner + memory of past episodes in the same house): not runnable from main yet.**
-> What exists, what is still missing for a collaborator, and the release plan for GitHub and Hugging Face:
-> [docs/memory_eval_release.md](docs/memory_eval_release.md).
+> **Status (2026-11-27):** the memory evaluation below (`MEMORY=1`, `prepare_eval_data.py --memory`) is being
+> merged into main and its data uploaded to Hugging Face; until that lands, only the zero-shot evaluation runs from
+> main. Progress and the release checklist: [docs/memory_eval_release.md](docs/memory_eval_release.md).
 
 
-## Household evaluation on Slurm (zero-shot planner; start here to run the eval)
+## Household evaluation on Slurm (GPT / Qwen planner, with or without memory; start here to run the eval)
 
 This runs our household evaluation: **300 test episodes** of five long-horizon tasks
 (`set_table`, `clear_and_store`, `prepare_and_serve_meal`, `unpack_and_sort_groceries`,
@@ -16,13 +16,24 @@ GPT-6.1 through the OpenAI API; `qwen_replan` uses a local Qwen3-VL-8B instead).
 executes every call with onboard sensors only (SLAM, pointing, grasping, navigation); the
 private task scorer gives success and a progress rate. Details: [docs/qwen_zero_shot_open_loop.md](docs/qwen_zero_shot_open_loop.md).
 
+Two settings, same robot, skills, planner and scorer:
+
+| Setting | What the planner and robot get | Run with |
+|---|---|---|
+| **Zero-shot** | the task instruction and the skill catalog only; the robot explores the house live | default |
+| **With memory** | also what happened in this house before: the 500 recorded *history* episodes (same house, same task) give the planner a text procedure and where objects were found, and give the robot a visual map of the house to relocalize in, remembered routes, and remembered fixture motions. Every memory step falls back to the zero-shot skill if it does not apply | `MEMORY=1` (data: `prepare_eval_data.py --memory`) |
+
+Memory never contains simulator truth (no true poses, maps or object identities): only the history
+episodes' onboard camera streams, the robot's own recorded commands and skill logs, and text
+summaries of them. See [What the memory does](#what-the-memory-does) below.
+
 ### What you need
 
 | | |
 |---|---|
 | GPUs (80 GB A100/H100, one node) — choose a layout | **A. Own services per episode (recommended): 8 GPUs.** `SERVICE_SETS=8`: each GPU runs one full copy of the model services (~41 GB) and one episode that uses only that copy, so episodes never wait for each other's model requests. 300 episodes ≈ 30 h ≈ 240 GPU-hours (`EPISODES_PER_SET=2`: 16 episodes at once, ≈ 15 h ≈ 120 GPU-hours, two episodes share a copy). <br>**B. Shared services: 2 GPUs** (the default). One GPU runs one copy of the services for all episodes, the other runs up to 8 episodes (~1.2 GB each); cheaper (≈ 30 h ≈ 60 GPU-hours) but episodes queue for the shared models. |
 | CPU / RAM | ~10 cores and ~6 GB RAM per running episode + ~10 GB per service copy (8 episodes: **96 cores, 128 GB**; 16 episodes: 192 cores, 256 GB) |
-| Disk | ~200 GB data + ~110 GB download (deleted after unpacking with `--delete-shards`) + ~150–300 GB results |
+| Disk | ~200 GB data + ~110 GB download (deleted after unpacking with `--delete-shards`) + ~150–300 GB results; memory adds ~17 GB |
 | Software | Linux x86-64, NVIDIA driver for CUDA 12.x, CUDA toolkit 12.x `nvcc` for M2T2's CUDA op (optional: the setup downloads a CUDA 12.6 compiler if none is found; cuRobo needs none), gcc, `git`, `zstd`, EGL/libGL for headless MuJoCo rendering, internet on the setup node |
 | API | `OPENAI_API_KEY` for `--planner gpt_*` (not needed for `qwen_*`) |
 
@@ -66,6 +77,20 @@ scenes as a check. It ends with `ready: --dataset $DATA`. Re-running resumes.
 
 (`eval_env.sh` sets `HF_HUB_OFFLINE=1` so jobs never download; data preparation needs it off.)
 
+**For the memory setting**, also download the memory (~17 GB, into the same `$DATA`):
+
+```bash
+HF_HUB_OFFLINE=0 .venv-sift/bin/python scripts/prepare_eval_data.py --root $DATA --memory
+```
+
+This adds `$DATA/memory/`: the frozen list of history episodes for each (house, task)
+(`lists/`, `episode_memory.json`), the history episodes' skill logs and instructions
+(`history/`), their recorded commands (`actions/`), their onboard RGB-D streams (`streams/`), the
+visual memory maps and index of each house (`visual/`), and the text memory (`text/`). It
+recreates the `visual_tour_root/` links and checks every file. It does not download the 183 GB
+fine-tuning split. Every memory path in the code is relative to `--dataset`; `MEMORY_ROOT=<dir>`
+points it at a different folder.
+
 ### 3. Run on Slurm
 
 ```bash
@@ -74,6 +99,10 @@ export OPENAI_API_KEY=...            # only for gpt_* planners; inherited by the
 DATA=$DATA SERVICE_SETS=8 sbatch --gres=gpu:8 --cpus-per-task=96 --mem=160G scripts/slurm/household_eval.sbatch
 # B. shared services (cheaper): 2 GPUs, 8 episodes at once
 DATA=$DATA sbatch scripts/slurm/household_eval.sbatch
+# With memory (GPT planner): add MEMORY=1 to either layout
+DATA=$DATA MEMORY=1 SERVICE_SETS=8 sbatch --gres=gpu:8 --cpus-per-task=96 --mem=160G scripts/slurm/household_eval.sbatch
+# Quick check first: one episode per task, same layout, with memory
+DATA=$DATA MEMORY=1 SPLITS=test_same_map PER_TASK=1 sbatch scripts/slurm/household_eval.sbatch
 tail -f household-eval-<jobid>.out   # one line per event; "finished: success=... progress=..." per episode
 ```
 
@@ -86,10 +115,12 @@ the summaries. Settings
 |---|---|---|
 | `PLANNER` | `gpt_replan` | `gpt_replan`, `gpt_zero_shot` (no replanning), `qwen_replan`, `qwen_zero_shot`, `recipe` (fixed oracle-style recipe) |
 | `PLANNER_MODEL` / `PLANNER_EFFORT` | `gpt-6.1-sol` / `high` | OpenAI model and reasoning effort for `gpt_*` |
-| `LIMITS` | `--gpt-limits` | per episode: 45 min wall, 15 simulated min, 100 skill calls (same budget as our GPT-as-policy baseline); e.g. `"--sim-minutes 15 --max-calls 100"` drops the wall cap |
+| `MEMORY` | `0` | `1`: the memory setting (`eval_households.py --memory`): text memory of this house and task in the planner prompt, visual relocalization, memory navigation (a confident relocalization replaces exploration), remembered fixture motions. Works with `gpt_replan` and `qwen_replan`. Needs `prepare_eval_data.py --memory` |
+| `LIMITS` | `--gpt-limits`; with `MEMORY=1`: `--memory-limits` | per episode: 45 min wall, 15 simulated min, 100 skill calls (same budget as our GPT-as-policy baseline); `--memory-limits` is 45 min wall, **20** simulated min, 100 calls (the budget of our memory runs; pass `LIMITS=--gpt-limits` to compare at 15 min); e.g. `"--sim-minutes 15 --max-calls 100"` drops the wall cap |
 | `EPISODES_PER_GPU` | `8` | parallel episodes per episode GPU (CPU is usually the limit) |
 | `SERVICE_SETS` / `EPISODES_PER_SET` | `1` / `1` | `SERVICE_SETS=N`: N copies of the model services, one per GPU (~41 GB each), and each episode uses only its own copy, so episodes never wait for each other's model requests; request N GPUs (`--gres=gpu:N`). E.g. `SERVICE_SETS=8` on 8 × 80 GB GPUs runs 8 episodes, each with its own services (~4× the GPU-hours of the default 2-GPU layout) |
 | `SPLITS` / `TASKS` | `test` / all five | e.g. `SPLITS=test_same_map TASKS=set_table` |
+| `PER_TASK` | all | run only the first N episodes of each task (a quick check) |
 | `OUT` | `runs/household_eval/slurm_<jobid>` | re-submit with the same `OUT=` to resume an interrupted batch (finished episodes are kept) |
 
 Without Slurm, the same steps by hand on one machine:
@@ -100,7 +131,41 @@ export SERVICE_ENDPOINTS_FILE=runs/services/endpoints.json
 PYTHONPATH=$PWD .venv-sift/bin/python scripts/eval_households.py --dataset $DATA --split test --tasks set_table,clear_and_store,prepare_and_serve_meal,unpack_and_sort_groceries,warm_two_pots \
     --gpus 1,1,1,1,1,1,1,1 --planner gpt_replan --gpt-limits --output runs/household_eval/my_batch
 bash scripts/eval_household.sh $DATA/test_same_map/batches/round_continuous/set_table_000024 --gpu 1 --planner gpt_replan --gpt-limits  # one episode, live log
+# with memory: add --memory (and --memory-limits in place of --gpt-limits)
+PYTHONPATH=$PWD .venv-sift/bin/python scripts/eval_households.py --dataset $DATA --split test --tasks all \
+    --gpus 1,1,1,1,1,1,1,1 --planner gpt_replan --memory --memory-limits --output runs/household_eval/my_memory_batch
+bash scripts/eval_household.sh $DATA/test_same_map/batches/round_continuous/set_table_000024 --gpu 1 --planner gpt_replan --memory --memory-limits
 ```
+
+`--into <batch>` continues an existing batch (episodes with a report are kept; a folder without
+one is renamed `*_failedstart_<n>` and rerun). A batch remembers its setting: continuing a memory
+batch without `--memory` (or the reverse) stops with an error.
+
+### What the memory does
+
+**Same-layout test houses** (`test_same_map`, 200 episodes; the house has history episodes):
+- **Planner:** the prompt adds a text procedure for this task in this house (written by Gemini
+  from the history episodes) and *where to search*: where the needed objects were found in this
+  house's past pickups. The planner still writes its own plan and replans after failed calls; a
+  call can ask to use memory.
+- **Relocalization:** at the start the robot matches its first onboard RGB-D scan against the
+  house's visual memory map. If the fit is good (≤ 3.0 cm, or ≤ 3.5 cm with ≥ 95% of the scan
+  within 15 cm of the map) it skips live exploration; otherwise it explores as in zero-shot.
+- **Navigation and manipulation:** remembered routes between rooms (A* on the memory map),
+  remembered fixture open/close and button presses, and constrained pick/place near remembered
+  spots. Each step falls back to the zero-shot skill when it does not apply.
+
+**New-layout test houses** (`test_new_map`, 100 episodes; never seen in history):
+- **Planner:** the text memory comes from *other* houses: the task's most common procedure and
+  where objects usually started ("N of M past pickups in other houses …").
+- **Robot:** live exploration as in zero-shot. Later trips between rooms replay the robot's own
+  exploration path. Fixture motions (microwave, fridge, drawer open/close and placing inside;
+  microwave Start/Stop) are replayed relative to the observed handle from a history robot's
+  motion on the same kind of fixture.
+
+Code: `cross_episode_sim/evaluation/{text_memory,episode_memory,search_places}.py` (planner
+memory), `navigation/{visual_relocalization,memory_navigation,live_route_memory,fixture_transfer}.py`
+(robot memory), `mapping/{history_localization,history_routes,action_memory}.py`.
 
 ### 4. Results
 
@@ -120,6 +185,14 @@ token usage per request), `episode/semantic_plan.json`. Batch files: `summary.js
 and task × rooms, and how episodes ended), `planner_usage.json` (API tokens and cost for `gpt_*`).
 `python3 scripts/eval_households.py --rescore <batch>` rebuilds the summaries.
 
+With memory, `run_info.json` in each episode folder records the setting (text memory, style,
+memory navigation), `episode/qwen_plan.json` holds the prompt with the memory text, and
+`live.log` shows each memory decision: `TEXT_MEMORY` (what went into the prompt),
+`MEMORY_HANDOVER` (relocalization fit in m; `null` = refused, the episode explores live),
+`MEMORY_MOVE` / `MEMORY_FIXTURE` / `MEMORY_PICK` / `MEMORY_PLACE` (each remembered motion and
+its result) and `MEMORY_*_FALLBACK` (a fall back to the zero-shot skill, with the cause).
+Compare a memory batch with a zero-shot batch of the same splits: `summary_by_rooms.json` of each.
+
 ### Time and cost (estimate for all 300 episodes)
 
 - **Wall time:** almost every episode uses its full 45-minute budget, so 300 episodes at 8 in
@@ -137,6 +210,9 @@ and task × rooms, and how episodes ended), `planner_usage.json` (API tokens and
   replans after failures expect **~$0.02–0.10 per episode, ≈ $6–30 for 300 episodes** (hard upper bound with all 10 replans and repairs in every episode ≈ $300). For comparison, GPT
   *controlling the robot directly* (one request per action, two camera images each, 100 calls)
   used 393 M input tokens for 95 episodes, ≈ $0.68 per episode. `planner_usage.json` gives the real total.
+- **With memory:** the prompt is longer (the memory text); measured **≈ $0.045 per episode**
+  (≈ $14 for 300). Same-layout episodes that skip exploration usually finish well before 45 min,
+  so wall time is somewhat lower than zero-shot.
 
 ### Troubleshooting
 
@@ -148,6 +224,11 @@ and task × rooms, and how episodes ended), `planner_usage.json` (API tokens and
 - **`--planner gpt_*` stops at launch:** the launcher checks `OPENAI_API_KEY` and the model ID first.
 - **Episodes "ended without a report":** usually a service or disk problem at start; the launcher
   retries each such episode once and keeps the failed folder as `<name>_failedstart_<n>`.
+- **`MEMORY=1` stops at launch with "memory not found":** run `prepare_eval_data.py --root $DATA --memory`
+  (or set `MEMORY_ROOT`). The launcher checks every same-layout episode's history list before starting.
+- **Memory episodes always explore:** `live.log` shows `MEMORY_HANDOVER null`: the relocalization
+  fit was refused and that episode explores as in zero-shot, which is the intended fallback, not an
+  error. `MEMORY_INDEX_MISSING` means the house's memory index was not downloaded.
 
 ## Sensor pipeline SLAM default
 
