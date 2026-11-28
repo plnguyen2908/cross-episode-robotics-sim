@@ -8,6 +8,10 @@
 > setup errors. Project code and memory were read only from the clone and `$DATA`, plus per-user caches. Not run in
 > that clean setup: the GPT planner, which needs your `OPENAI_API_KEY`. The memory-fallback fix (`62d7bb8`) was not
 > triggered in these runs; it was tested on our machine with forced fallbacks.
+> Later on main, `c132b97` (memory path only, from gptmem-eval8 / qwenmem-eval10) fixes a microwave door read as
+> closed while open, tightens the remembered close, and re-acquires tracking after a memory motion. It was tested on
+> our machine (meal-2r-000027 5/5 with forced tracking loss; meal-5r-000024 door shut, food heated, 3/5), not in the
+> clean setup.
 > Release notes: [docs/memory_eval_release.md](docs/memory_eval_release.md).
 
 

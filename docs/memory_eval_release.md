@@ -19,6 +19,15 @@ Not yet run in that clean setup: the GPT planner (needs an `OPENAI_API_KEY`). `6
 baseline the live state when a memory pick or place gives up (fixes "Checkpoint is not the current live
 state"), was not triggered in these runs; it was tested on our machine with forced fallbacks.
 
+Added after the clean-room test: `c132b97` (memory path only, from gptmem-eval8 / qwenmem-eval10, same change
+for GPT and Qwen). The door check also looks for the door leaf in its swing area (a microwave door left ~85 deg
+open had read as closed, so the food was never heated). The second close replays a different past episode. Remembered
+closes first try the 1 cm view alignment, with 3 cm only as the fallback. After a memory motion, a rejected tracking
+update is retried by standing still and turning slightly in place (`MEMORY_TRACKING_REACQUIRE`); before, it made
+every later call fail with "Tracker lost". Tested on our machine: meal-2r-000027 5/5 with forced tracking loss;
+meal-5r-000024 door shut on the first try, food heated, 3/5 (the drink carry got stuck at the open fridge door).
+Not run in the clean setup.
+
 Sections 1–8 below are the checklist written before the release and are kept as the record of what was
 changed. Where they say something is missing from main or Hugging Face, it has since been added (see the
 "Implemented on main" and "Added" notes in section 3).
