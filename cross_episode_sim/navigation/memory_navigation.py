@@ -27,6 +27,7 @@ _KEYWORDS = [
 OPEN_CLOSE = {'open_door', 'open_drawer', 'close_door', 'close_drawer'}
 STANDOFF_M = .6
 MEMORY_BUDGET_S = 60.  # user, 2026-11-23: no confident replay within this (move + dock + view match) -> hand over to the live skill quickly
+CLOSE_ALIGN_FIRST_TIGHT = True  # 2026-11-27: closes try the 1 cm alignment first, CLOSE_ALIGN_M only as the fallback
 CLOSE_ALIGN_M = .03  # a remembered close pushes the leaf shut: 3 cm alignment is enough (meal 2026-11-24: microwave close oscillated 2-5 cm, refused, and the live skill cannot close a door memory opened)
 MEMORY_BUDGET_CLOSE_S = 120.  # closing a door/drawer memory opened: the live skill cannot (no closed-panel reference), so handing over is a sure failure (meal fridge close 63.7 s, 2026-11-24)
 PRIVATE_POSE_PROBE = None  # diagnostics hook set only by test harnesses (simulator truth never reaches the policy)
@@ -34,6 +35,7 @@ OPEN_SURFACES = ('kitchen_counter', 'dining_table')
 HOLD_DRIVER_MAX = .80
 DOOR_CLOSED_CHECK = False  # 2026-11-23: false 'not closed' on shut doors (0 pts / 11.5 deg on 0.0-rad doors, meal 13-14) cost a failing 10-min baseline close each time; the blocking cause (food placed short) is fixed by the hold shift + wrist turn
 DOOR_CLOSED_DEG = 6.  # observed door direction within this of the closed direction = closed
+DOOR_SWING_MIN_DEG = 20.  # door_closed_seen: leaf points past this angle in the door's swing area = door open (2026-11-27)
 REVERSE_LOOK = True  # reach-direction only, deeper only (0-8 cm): a released object slides in (meal run 12: 3.7 cm); sideways was unreliable (pickback5)
 OBJECT_SHIFT_MAX = .15  # larger object offsets: not the remembered condition -> baseline  # gripper driver joint closes to ~0.8-0.9 rad on nothing; an object stops it earlier
 OPEN_SURFACE_STANDOFF_M = 1.3  # stop where a room transit would: the pipeline's approach + search take it from there
@@ -221,13 +223,13 @@ class PipelineMemoryNavigator:
         self.events.append(log); return log
 
 
-def fixture_replay(navigator, skill, location, state=None):
+def fixture_replay(navigator, skill, location, state=None, exclude=None):
     rec = navigator.recording(f'{skill}_{location}') if hasattr(navigator, 'recording') else None
-    if rec is None:return _fixture_replay(navigator, skill, location, state)
-    with rec:return _fixture_replay(navigator, skill, location, state)
+    if rec is None:return _fixture_replay(navigator, skill, location, state, exclude)
+    with rec:return _fixture_replay(navigator, skill, location, state, exclude)
 
 
-def _fixture_replay(navigator, skill, location, state=None):
+def _fixture_replay(navigator, skill, location, state=None, exclude=None):
     """Remembered fixture manipulation (open/close door/drawer) on the live robot, gated at every step:
     memory move to a confident remembered start of exactly this skill -> map redock -> local view alignment against
     that past robot's own view (must match tightly) -> replay anchored at the current pose -> remembered tuck ->
@@ -273,7 +275,10 @@ def _fixture_replay(navigator, skill, location, state=None):
             def prefer(r):
                 try:return float(np.linalg.norm(om_.past_hold(r)-ih))
                 except Exception:return 9.
-        go = mn.go(location, {skill}, prefer=prefer); tgt = go.pop('target_row', None)
+        # exclude: a past episode whose replay of this skill already failed here (2026-11-27 meal-5r-000024: the same
+        # remembered close replayed twice hooked the microwave door at 13 deg twice; another past robot's close next)
+        go = mn.go(location, {skill}, exclude=exclude, prefer=prefer); tgt = go.pop('target_row', None)
+        if exclude:log['excluded_episode'] = exclude
         if go.get('chosen_by'):log['chosen_by_hold'] = go['chosen_by']
         if tgt is not None and not go.get('ready') and (go.get('to_manip_start_cm') or 99) <= 60:
             # the map redock below closes the last half metre itself (meal run 12: the fridge close stopped 45 cm short of
@@ -290,7 +295,7 @@ def _fixture_replay(navigator, skill, location, state=None):
         # (store 2026-11-24: drawer memory 000109 matched at 2.2 cm / 59% and the alignment slid to the neighbouring
         # drawer; 000121 matched at 0.13 cm / 100% and measured the 17 cm / 9 deg drift exactly)
         from scripts.test_fixture_memory import view_match
-        near = [r for r in mn.manip_starts(location, {skill}) if np.linalg.norm(np.subtract(r['start'][:2], tgt['start'][:2])) <= VIEW_PICK_M]
+        near = [r for r in mn.manip_starts(location, {skill}, exclude) if np.linalg.norm(np.subtract(r['start'][:2], tgt['start'][:2])) <= VIEW_PICK_M]
         # only when the default memory matches poorly (meal 2026-11-24: switching a well-matched microwave place from
         # 000010 to 000034 broke the later take-out; the store drawer's default matched at 2.2 cm / 59%)
         try:own = view_match(R, tgt)
@@ -312,7 +317,15 @@ def _fixture_replay(navigator, skill, location, state=None):
     from scripts.test_fixture_memory import ALIGN_HANDLE_INLIERS
     min_in = None  # run-8 behaviour (user 2026-11-23); ALIGN_HANDLE_INLIERS was for handle grasps
     align_m = CLOSE_ALIGN_M if (skill in ('close_door', 'close_drawer') or lp is not None) else None  # a reversed take-out measures and corrects the object offset itself (ReverseLook)
-    log['local_align'] = local_align(R, m, d, nav, tgt, min_inliers=min_in, align_m=align_m)
+    if align_m is not None and lp is None and CLOSE_ALIGN_FIRST_TIGHT:
+        # a close first slides to the 1 cm match the other skills use; the 3 cm acceptance only when that does not
+        # converge (2026-11-27 meal-5r-000024: matched at 2.35 cm with no slide, the replayed hand was ~2 cm off, bumped
+        # the door open on its second push and dragged it back from 13 deg on the withdraw; two different remembered
+        # closes failed that way)
+        tight = local_align(R, m, d, nav, tgt, min_inliers=min_in)
+        log['local_align'] = tight if tight['ok'] else local_align(R, m, d, nav, tgt, min_inliers=min_in, align_m=align_m)
+        if not tight['ok']:log['local_align_tight'] = tight
+    else:log['local_align'] = local_align(R, m, d, nav, tgt, min_inliers=min_in, align_m=align_m)
     if not log['local_align']['ok'] and 'false match' in str(log['local_align']['steps'][-1:]) and not over():
         # a false match slid the robot away: back onto the remembered start from the map, then align once more
         log['redock_after_false_match'] = redock(R, m, d, nav, tgt['start'])
@@ -902,6 +915,23 @@ def door_closed_seen(R, nav, navigator, location=None, tol_m=.025, min_points=30
     if len(sel) >= min_points:
         c0 = sel.mean(0); dvec = np.linalg.svd(sel-c0, full_matrices=False)[2][0]
         ang = float(np.degrees(np.arccos(min(1., abs(float(dvec@e))))))
+    # the door's own swing area (2026-11-27 meal-5r-000024 call 9): a door left ~85 deg open is not in the band at all,
+    # and the microwave's front face and the cabinet doors beside it, 6-16 cm behind the closed line and parallel to it,
+    # read as a 0.9 deg "closed" door -> no second close, the food never heated. A door more than 20 deg open puts its
+    # leaf between 20 deg and the remembered opened angle around the hinge, at handle height (offline check of that
+    # episode's views: 7.7k-13.4k such points with the door 78-89 deg open, 0 when shut or at 18 deg).
+    swing = None
+    if 'open_handle' in g:
+        a0 = math.atan2(e[1], e[0]); oh = np.asarray(g['open_handle'], float)[:2]-h[:2]
+        rel_o = math.atan2(math.sin(math.atan2(oh[1], oh[0])-a0), math.cos(math.atan2(oh[1], oh[0])-a0))
+        sgn = 1. if rel_o >= 0 else -1.; opened = abs(math.degrees(rel_o))
+        rr = np.linalg.norm(rel, axis=1)
+        th = np.degrees(np.arctan2(np.sin(np.arctan2(rel[:, 1], rel[:, 0])-a0), np.cos(np.arctan2(rel[:, 1], rel[:, 0])-a0)))*sgn
+        sec = (np.abs(pts[:, 2]-c[2]) < .2) & (rr > .3*L) & (rr < 1.05*L) & (th > DOOR_SWING_MIN_DEG) & (th < opened+15.)
+        swing = int(sec.sum())
+        out.update(swing_points=swing, swing_deg=round(float(np.median(th[sec])), 1) if swing else None, opened_deg=round(opened, 1))
+    leaf_open = swing is not None and swing >= min_points
     out.update(on_closed_line=on, near_line=near, door_width_m=round(L, 3), door_angle_deg=None if ang is None else round(ang, 1),
-               closed=bool(on >= min_points or (ang is not None and ang <= DOOR_CLOSED_DEG)))
+               closed=bool(not leaf_open and (on >= min_points or (ang is not None and ang <= DOOR_CLOSED_DEG))))
+    if leaf_open:out['door_angle_deg'] = out['swing_deg']  # the leaf seen in its swing area: its angle, not the parallel faces'
     return out

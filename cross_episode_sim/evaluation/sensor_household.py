@@ -393,7 +393,7 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
         24 baseline stages after MEMORY_PICK_FALLBACK / failed MEMORY_PLACE). A fresh checkpoint here, plus the previous
         handoff's other files (held payload points, report, support poses) that the stage reads."""
         import copy
-        out=self.checkpoint(output,previous)
+        out=self.memory_checkpoint(output,previous)
         # handoff files are in-memory artifacts during an episode (runtime.artifacts, keyed by resolved path); copy
         # the previous handoff's top-level ones this checkpoint did not write (observed_payload_tool.npy, report.json, ...)
         store=self.runtime.artifacts;src=artifacts.key(previous)+'/';dst=artifacts.key(out)+'/'
@@ -405,6 +405,49 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 if f.is_file() and not artifacts.exists(out/f.name):shutil.copy2(f,out/f.name)
         print('MEMORY_FALLBACK_LIVE_HANDOFF',json.dumps(dict(previous=str(previous),live=str(out))),flush=True)
         return out
+
+    def memory_checkpoint(self,output,previous,stand_s=2.,turns_deg=(15.,30.,-15.,-30.)):
+        """checkpoint() after a memory motion, re-acquiring onboard tracking when its update is rejected.
+        2026-11-27 meal-4r-000021: a memory move bumped the arm, the checkpoint's one tracking update was rejected
+        ('Localization unavailable after fixture motion') and nothing ever fed the tracker another frame (every later
+        stage view refuses a lost session), so all 37 later calls failed with 'Tracker lost'. Here: stand still and
+        sense (onboard nav RGB-D only; the tracker's own keyframe match / verified recovery), then small in-place turns
+        with the arm stowed; back to the start heading once tracking is accepted; then the usual checkpoint."""
+        try:return self.checkpoint(output,previous)
+        except RuntimeError as exc:
+            if 'Localization unavailable' not in str(exc):raise
+        from ..control.onboard_base import OnboardBaseActuator
+        m,d=self.runtime.model,self.runtime.data;sess=self.runtime.mapper;base=OnboardBaseActuator(m,d)
+        log=dict(frames=0,turned_deg=0.,status=None);t0=float(d.time)
+        def sense(seconds):
+            for _ in range(max(1,int(round(seconds/.02)))):base.step(0.,0.,.02)
+            packet=self.runtime.sensors.capture(include_robot_mask=False)
+            r=sess.update(packet.cameras['navigation'],packet.timestamp);log['frames']+=1;log['status']=r.status
+            return bool(r.accepted)
+        def turn(deg):
+            rate=.5*float(np.sign(deg));steps=int(round(abs(np.radians(deg))/.5/.02))
+            for _ in range(steps):
+                if hasattr(sess,'record_control'):sess.record_control(0.,rate,.02)
+                base.step(0.,rate,.02)
+            log['turned_deg']+=deg
+        ok=any(sense(.2) for _ in range(int(stand_s/.2)))
+        at=0.
+        if not ok:
+            for deg in turns_deg:
+                try:turn(deg-at);at=deg
+                except RuntimeError as exc:log['turn_refused']=str(exc)[:120];break
+                if any(sense(.3) for _ in range(3)):ok=True;break
+        if ok and at:
+            # back to the start heading in small tracked steps (frame-to-frame odometry bridges), else stay where tracked
+            returned=0.
+            try:
+                while abs(at-returned)>1e-6:
+                    step=float(np.clip(at-returned,-5.,5.));turn(-step);returned+=step
+                    if not sense(.1):turn(step);returned-=step;sense(.3);log['stopped_back_at_deg']=round(at-returned,1);break
+            except RuntimeError as exc:log['turn_back_refused']=str(exc)[:120]
+        log.update(accepted=ok,robot_s=round(float(d.time)-t0,1))
+        print('MEMORY_TRACKING_REACQUIRE',json.dumps(log,default=str),flush=True)
+        return self.checkpoint(output,previous)
 
     def checkpoint(self,output,previous):
         """In-memory handoff of the current live state, never a restoration."""
@@ -628,7 +671,7 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                     log['stage_wall_s']=round(time.monotonic()-started,1)
                     print('MEMORY_MOVE',json.dumps({k:v for k,v in log.items() if k not in ('options',)},default=str),flush=True)
                     artifacts.write_text(root/'memory_move.json',json.dumps(log,indent=2,default=str))
-                    ctx['continuation']=self.checkpoint(root/'memory_move',ctx['continuation'])
+                    ctx['continuation']=self.memory_checkpoint(root/'memory_move',ctx['continuation'])
             live_ready=False
             if not memory_ready and getattr(self,'memory_nav',None) is None and getattr(self,'live_nav',None) is not None and not _no_memory:
                 live_ready=self._live_route_move(ctx,root,target=target,destination=destination,search_at=search_at,purpose=purpose)
@@ -799,7 +842,7 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 except Exception as exc:bo=dict(result=f'{type(exc).__name__}: {exc}'[:160])
                 print('MEMORY_BACK_OFF',json.dumps(bo),flush=True)
                 if bo.get('result')=='backed off':
-                    ctx['continuation']=self.checkpoint(out.parent/'memory_back_off',ctx['continuation'])
+                    ctx['continuation']=self.memory_checkpoint(out.parent/'memory_back_off',ctx['continuation'])
             from ..runtime.household_components import confined_pick_options, pick_confined
             if mem_tried or (mem_loc is not None and ctx.get('dock') is None and ctx.get('memory_approach')):
                 # the redock before this pick was skipped for the remembered take-out, or memory moved the robot away from
@@ -857,7 +900,7 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 print('MEMORY_PLACE',json.dumps({k:v for k,v in mem_log.items() if k in ('location','ok','result','memory','robot_s','wall_s','gripper_open_after','object_shift','shift_done','move','retreat')},default=str)[:600],flush=True)
                 if mem_log.get('ok'):
                     ctx.pop('qwen_prepared_session',None)
-                    ctx['continuation']=self.checkpoint(self.output/f'memory_place_{len(interface.history):03d}',ctx['continuation'])
+                    ctx['continuation']=self.memory_checkpoint(self.output/f'memory_place_{len(interface.history):03d}',ctx['continuation'])
                     ctx.update(held=None,carry=ctx['continuation'])
                     progress('observe_dock_place','completed')
                     return SkillOutcome(True,'memory_place_replayed')
@@ -880,7 +923,7 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 artifacts.write_text(self.output/f'fixture_transfer_{len(interface.history):03d}.json',json.dumps(mem_log,indent=1,default=str))
                 if mem_log.get('ok'):
                     ctx.pop('qwen_prepared_session',None)
-                    ctx['continuation']=self.checkpoint(self.output/f'fixture_transfer_place_{len(interface.history):03d}',ctx['continuation'])
+                    ctx['continuation']=self.memory_checkpoint(self.output/f'fixture_transfer_place_{len(interface.history):03d}',ctx['continuation'])
                     ctx.update(held=None,carry=ctx['continuation'])
                     progress('observe_dock_place','completed')
                     return SkillOutcome(True,'fixture_relative_place_replayed')
@@ -1163,8 +1206,10 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 # it sweeps through free space (f5_meal call 22: the microwave door bounced back open after the push)
                 print('MEMORY_CLOSE_AGAIN',json.dumps(dict(target=target_name,seen=mem_log.get('door_closed_seen'))),flush=True)
                 try:
-                    again=fixture_replay(self.memory_nav,name,loc)
-                    print('MEMORY_CLOSE_AGAIN_RESULT',json.dumps({k:v for k,v in again.items() if k in ('ok','result','door_closed_seen')},default=str)[:300],flush=True)
+                    # another past robot's close (2026-11-27 meal-5r-000024: the same remembered close replayed again
+                    # hooked the door at 13 deg again and left it 81 deg open)
+                    again=fixture_replay(self.memory_nav,name,loc,exclude=str(mem_log.get('memory') or '').split('/')[0] or None)
+                    print('MEMORY_CLOSE_AGAIN_RESULT',json.dumps({k:v for k,v in again.items() if k in ('ok','result','door_closed_seen','memory','excluded_episode')},default=str)[:500],flush=True)
                 except Exception as exc:print('MEMORY_CLOSE_AGAIN_FAILED',f'{type(exc).__name__}: {exc}'[:160],flush=True)
             if mem_log is not None and mem_log.get('ok'):
                 result=SkillOutcome(True,'memory_replay_confirmed')
@@ -1238,7 +1283,7 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
                 print('MAP_OPEN_LEAF_REMOVED',json.dumps(dict(target=target_name)),flush=True)
                 # Re-docks to an object inside this appliance refuse points on the open leaf.
                 self.runtime.open_leaves=dict(self.open_leaves)
-            ctx['continuation']=self.checkpoint(self.output/f'fixture_handoff_{len(interface.history):03d}',ctx['continuation'])
+            ctx['continuation']=(self.memory_checkpoint if mem_log is not None else self.checkpoint)(self.output/f'fixture_handoff_{len(interface.history):03d}',ctx['continuation'])  # memory replay ran: re-acquire tracking if needed
             if name.startswith('open') and observed is not None:
                 self.fixture_views[kw['target']]=np.r_[view[:2,3],np.arctan2(view[1,0],view[0,0])]
                 from ..navigation.route_memory import episode_routes
@@ -1302,7 +1347,7 @@ class SensorHouseholdPipeline(SensorSetTablePipeline):
             if mem_log is not None and mem_log.get('ok'):
                 if name=='push_button' and mem_log.get('location')=='microwave_start':self.microwave_started=True
                 if name=='push_button' and mem_log.get('location')=='microwave_stop':self.microwave_started=False
-                ctx['continuation']=self.checkpoint(self.output/f'appliance_handoff_{len(interface.history):03d}',ctx['continuation'])
+                ctx['continuation']=self.memory_checkpoint(self.output/f'appliance_handoff_{len(interface.history):03d}',ctx['continuation'])
                 return SkillOutcome(True,'memory_replay_completed')
             if mem_log is not None and not mem_log.get('ok') and ctx.get('memory_approach'):
                 # memory did not finish it and its pre-skill redock was skipped: the usual redock before the live skill
